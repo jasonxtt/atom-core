@@ -6,6 +6,10 @@ import { openConfirm } from './utils/confirm'
 import { createThemeController } from './utils/theme'
 import { leaveMessage } from './utils/unsaved'
 import './style.css'
+if (import.meta.env.VITE_UI_VARIANT === 'glass') {
+  import('./glass.css')
+  import('./utils/glassAppearance').then(({ initAppearance }) => initAppearance())
+}
 
 let storage = null
 try { storage = window.localStorage } catch { /* blocked storage: the theme follows the system */ }

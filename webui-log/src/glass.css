@@ -1,0 +1,141 @@
+/* MosDNS palette on AtomDNS's maintained layout. Every surface derives from one
+   alpha; never fade a container with `opacity` (that would fade its text too). */
+:root, :root[data-theme='light'] {
+  color-scheme: light;
+  --bg-0: #f4f5ef; --bg-1: #fdfcf7;
+  --bg-spot-1: #dbe9e5; --bg-spot-2: #f5ebd7;
+  --ink-0: #1e252b; --ink-1: #55606a;
+  --brand: #0f766e; --brand-2: #115e59; --brand-rgb: 15, 118, 110;
+  --danger: #b42318; --warn: #b54708; --ok: #027a48;
+  --panel-solid: #ffffff; --panel-glass-rgb: 255, 255, 255;
+  --panel-glass-border-rgb: 100, 125, 137;
+  --bl-solid: var(--bl-light-bg, transparent);
+  --rp-muted: #71808b; --rp-iris: #7967a3; --rp-rose: #b4637a;
+  --rp-on-accent: #ffffff;
+  --switch-knob: #ffffff; --switch-knob-on: #ffffff;
+  --bl-shadow: 0 8px 24px #243c4610, inset 0 1px 0 #ffffff33;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg-0: #000000; --bg-1: #040608;
+  --bg-spot-1: #3b82f629; --bg-spot-2: #2dd4bf1f;
+  --ink-0: #f8fafc; --ink-1: #cbd5e1;
+  --brand: #2dd4bf; --brand-2: #5eead4; --brand-rgb: 45, 212, 191;
+  --danger: #f87171; --warn: #fbbf24; --ok: #34d399;
+  --panel-solid: #111827; --panel-glass-rgb: 17, 24, 39;
+  --panel-glass-border-rgb: 148, 163, 184;
+  --bl-solid: var(--bl-dark-bg, transparent);
+  --rp-muted: #94a3b8; --rp-iris: #c4b5fd; --rp-rose: #f9a8d4;
+  --rp-on-accent: #071a18;
+  --bl-shadow: 0 8px 24px #00000024, inset 0 1px 0 #ffffff0c;
+}
+:root, :root[data-theme='light'], :root[data-theme='dark'] {
+  --panel-glass-opacity: .9; --panel-glass-blur: 10px;
+  --bl-alpha: var(--panel-glass-opacity);
+  --bl-glass: rgba(var(--panel-glass-rgb), var(--bl-alpha));
+  --bl-control: rgba(var(--panel-glass-rgb), calc(var(--bl-alpha) * .45));
+  --bl-tint: rgba(var(--brand-rgb), calc(var(--bl-alpha) * .12));
+  --line: rgba(var(--panel-glass-border-rgb), .32);
+  --panel: var(--bl-glass);
+  --surface-elevated: var(--bl-glass);
+  --surface-input: var(--bl-control);
+  --surface-soft: var(--bl-control); --surface-soft-2: var(--bl-control);
+  --surface-hover: var(--bl-tint); --surface-head: var(--bl-control);
+  --surface-head-hover: var(--bl-tint); --surface-side: var(--bl-glass);
+  --surface-active: var(--bl-tint); --table-line: var(--line);
+  --side-bg: var(--bl-glass); --side-active-bg: var(--bl-tint);
+  --rp-base: var(--bg-0); --rp-text: var(--ink-0); --rp-subtle: var(--ink-1);
+  --rp-pine: var(--brand); --rp-foam: var(--ok); --rp-love: var(--danger); --rp-gold: var(--warn);
+  --rp-surface: var(--bl-glass); --rp-overlay: var(--bl-glass);
+  --rp-hl-low: var(--bl-control); --rp-hl-med: var(--line); --rp-hl-high: var(--line);
+  --rp-selected: var(--bl-tint); --rp-fill: var(--bl-control); --rp-fill-hover: var(--bl-tint);
+  --rp-gold-text: var(--warn); --rp-foam-text: var(--ok);
+  --switch-off-bg: rgba(var(--panel-glass-border-rgb), calc(var(--bl-alpha) * .5));
+  --switch-off-border: var(--line);
+  --switch-on-bg: color-mix(in srgb, var(--ok) calc(var(--bl-alpha) * 100%), transparent);
+  --menu-bg: var(--bl-glass); --menu-text: var(--ink-0); --menu-border: var(--line);
+  --menu-hover-bg: var(--bl-tint); --menu-active-bg: var(--bl-tint); --menu-active-text: var(--ink-0);
+}
+body {
+  background: radial-gradient(circle at 10% 10%, var(--bg-spot-1) 0%, transparent 30%), radial-gradient(circle at 90% 0%, var(--bg-spot-2) 0%, transparent 35%), linear-gradient(180deg, var(--bg-1), var(--bg-0));
+  background-attachment: fixed;
+  isolation: isolate;
+}
+body::before {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: -1;
+  background-color: var(--bl-solid); background-image: var(--page-bg-image, none);
+  background-size: cover; background-position: center;
+}
+.rt-main { background: transparent; }
+/* One pane per visual group. Nested rows and tables must not double the tint/blur. */
+.rt-topbar, .rt-sidebar, .rt-mobile-nav,
+.panel, .rt-stat, .rank-card, .overview-card, .sys-card, .trend-card,
+.list-sidebar, .cache-entry, .special-group-card,
+.rt-setting-joined > .rt-setting-grid, .rt-setting-tiles:not(.rt-setting-joined) > .rt-setting-row,
+.rt-palette, .confirm-pop-bubble, .rt-notice {
+  background: var(--bl-glass);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(var(--panel-glass-blur));
+  -webkit-backdrop-filter: blur(var(--panel-glass-blur));
+  box-shadow: var(--bl-shadow);
+}
+/* Navigation already identifies the page; omit the duplicate title strip in /bl. */
+.rt-page-title { display: none; }
+.rt-setting-tiles.rt-setting-section, .rt-panel-group > .panel {
+  background: transparent; border: 0; box-shadow: none;
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+.panel .panel, .panel .table-wrap, .panel .cache-entry,
+.rt-setting-joined .rt-setting-row {
+  background: transparent; box-shadow: none;
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+/* Standalone tables still have a pane, but tables within panes inherit it. */
+.table-wrap { background: var(--bl-glass); }
+th { background: var(--bl-control); }
+.rt-setting-section-title { color: var(--ink-0); }
+.rt-setting-tiles > .rt-setting-section-title {
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--bl-glass);
+  backdrop-filter: blur(var(--panel-glass-blur));
+  -webkit-backdrop-filter: blur(var(--panel-glass-blur));
+}
+.rt-nav-link.active, .rt-nav-group.active, .rt-mobile-tab.active { background: var(--bl-tint); }
+.rt-nav-group, .rt-nav-link, .rt-subtab, .rt-mobile-tab { color: var(--ink-1); }
+.rt-nav-group.active, .rt-nav-link.active, .rt-subtab.active, .rt-mobile-tab.active { color: var(--ink-0); }
+/* Controls use a lighter coat on their parent glass. Their alpha is still exactly
+   zero at 0%; text, focus rings and state indicators remain fully legible. */
+input:not([type='range']):not([type='checkbox']):not([type='color']), textarea, select,
+.btn, .rt-segmented, .rt-search, .rt-log-filter {
+  background: var(--bl-control); color: var(--ink-0); border-color: var(--line);
+}
+input::file-selector-button {
+  background: var(--bl-control); color: var(--ink-0); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 10px; margin-right: 8px;
+}
+.btn.primary {
+  background: color-mix(in srgb, var(--brand) calc(var(--bl-alpha) * 22%), transparent);
+  color: var(--ink-0); border: 1px solid var(--brand);
+}
+.btn.danger, .msg.error {
+  background: color-mix(in srgb, var(--danger) calc(var(--bl-alpha) * 14%), transparent);
+  color: var(--danger); border-color: var(--danger);
+}
+.btn.warning, .msg.warn { background: color-mix(in srgb, var(--warn) calc(var(--bl-alpha) * 14%), transparent); color: var(--warn); }
+.msg.success { background: color-mix(in srgb, var(--ok) calc(var(--bl-alpha) * 14%), transparent); color: var(--ok); border-color: var(--ok); }
+.btn:hover:not(:disabled), .rt-segmented button:hover { background: var(--bl-tint); }
+.btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--brand) calc(var(--bl-alpha) * 34%), transparent); }
+input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 2px;
+}
+/* Native option menus/color swatches and switch knobs are semantic UI, not panes. */
+select option { background: var(--panel-solid); color: var(--ink-0); }
+.bl-background-preview { width: 160px; height: 90px; object-fit: cover; border-radius: 8px; }
+#system-glass-appearance input[type='file'] { width: 100%; min-width: 0; }
+#system-glass-appearance input[type='range'] { width: min(240px, 100%); accent-color: var(--brand); }
+@supports not (backdrop-filter: blur(1px)) {
+  :root, :root[data-theme] { --bl-alpha: 1; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root, :root[data-theme] { --bl-alpha: 1; --panel-glass-blur: 0px; }
+}

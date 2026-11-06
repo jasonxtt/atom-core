@@ -11,7 +11,7 @@ import vue from '@vitejs/plugin-vue'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const version = process.env.UI_VERSION || 'dev'
-const outDir = path.resolve(__dirname, 'dist')
+const outDir = process.env.VITE_UI_VARIANT === 'glass' ? path.resolve(__dirname, 'dist-bl') : path.resolve(__dirname, 'dist')
 const devProxyTarget = process.env.ATOMDNS_DEV_TARGET || 'http://127.0.0.1'
 
 export default defineConfig({

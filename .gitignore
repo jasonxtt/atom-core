@@ -49,3 +49,5 @@ demo/
 webui-log/dist-external/
 docs/site/.vitepress/dist/
 docs/site/.vitepress/cache/
+
+/webui-log/dist-bl/

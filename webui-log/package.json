@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "node ../scripts/build-webui.mjs",
     "build:package": "node ../scripts/build-webui.mjs --package",
+    "build:bl": "VITE_UI_VARIANT=glass node ../scripts/build-webui.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

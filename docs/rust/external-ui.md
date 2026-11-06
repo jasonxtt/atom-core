@@ -18,6 +18,39 @@ UI_VERSION=v0.4.0-ui2 npm run build:package    # and release/atomdns-webui.tar.g
 `webui-log/dist/` holds `index.html`, `app.js`, `app.css`, `chunks/`, `assets/` and `ui-manifest.json`; `atomdns-webui.tar.gz` has the same files at its top level
 (the release asset of the same name is built this way). Resource URLs are **relative**, so one package works as `ui/main` and under any other name.
 
+## Optional glass UI (`/bl/`)
+
+The glass variant reuses the maintained UI's routes, menus, pages and API workflows.
+It adds the MosDNS light/dark glass palette and browser-local background controls;
+the duplicate page-title strip is hidden. The normal build remains unchanged.
+
+```sh
+cd webui-log
+npm ci
+npm run build:bl              # dist-bl/ only; no release archive
+```
+
+Install the contents of `webui-log/dist-bl/` into `<config root>/ui/bl/` using the
+same package installation procedure below. Build outputs are ignored by Git.
+This variant is not included in the normal release build or online update of `ui/main`.
+
+Source:
+- `webui-log/src/glass.css`: palette, shared transparency/blur and component surfaces.
+- `webui-log/src/pages/system/SystemGlassSection.vue`: System Management → background and glass appearance.
+- `webui-log/src/utils/glassAppearance.js`: browser storage, validation and live preview.
+
+Local images (PNG/JPEG/WebP/GIF, up to 3 MiB) are read in the browser and saved as
+data URLs in `localStorage` under `atomdns-bl-appearance-v1`, together with opacity,
+blur, background colors and text/accent overrides. No image-upload API or backend
+change is involved. Image links load directly from the browser. These preferences
+are specific to the browser and origin; clearing site data removes them. A storage
+quota/private-mode failure is reported instead of claiming a successful save.
+
+Glass panes share one opacity; controls use a lighter tint inside them and nested
+groups avoid repeated blur. Text, focus rings, chart colors and switch knobs retain
+their semantic colors. The source also includes opaque fallback styling for browsers
+without backdrop-filter and reduced-transparency preferences.
+
 ## Install / update (operator)
 Online updates replace `ui/main` together with the program when `ui/main` exists ([native-update.md](contracts/native-update.md)); by hand:
 1. Unpack into the directory (the configuration root is the directory that holds `config_custom.yaml`; for `atomdns start -d /cus/atomdns` that is `/cus/atomdns`):

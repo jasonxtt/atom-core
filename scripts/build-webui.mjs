@@ -11,7 +11,7 @@ import { ARCHIVE_NAME, buildManifest, validVersion } from './external-ui-manifes
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const workspace = path.join(repository, 'webui-log')
-const output = path.join(workspace, 'dist')
+const output = path.join(workspace, process.env.VITE_UI_VARIANT === 'glass' ? 'dist-bl' : 'dist')
 
 function describe() {
   try {
@@ -36,7 +36,7 @@ console.log(`WebUI ${version}: ${output}`)
 if (process.argv.includes('--package')) {
   const releaseDirectory = path.join(repository, 'release')
   mkdirSync(releaseDirectory, { recursive: true })
-  const archive = path.join(releaseDirectory, ARCHIVE_NAME)
+  const archive = path.join(releaseDirectory, process.env.VITE_UI_VARIANT === 'glass' ? 'atomdns-webui-bl.tar.gz' : ARCHIVE_NAME)
   rmSync(archive, { force: true })
   // ustar, numeric root ownership, sorted names, no `./` prefix and (on macOS) no AppleDouble
   // files: the updater accepts plain files and directories only.
