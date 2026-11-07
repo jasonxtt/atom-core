@@ -1,0 +1,47 @@
+# ==============================================================================
+# 列表外域名的 AAAA 查询（fast_mark 17：没有命中任何名单，也没有学习记录）
+# ==============================================================================
+# 谁调用：config_custom.yaml 的 sequence_6666 / sequence_requery，在 process_listed.yaml 的名单分流之后调用。
+#         普通查询和刷新分流缓存共用这一个序列（AAAA 在两种情况下的处理完全一样）。
+# 做什么：先向上游要一份真实应答，再看应答里的 IPv6 决定去向：
+#           应答没有全球单播 IPv6（rcode 为 0/3）→ 记入「记忆无V6」，返回空应答
+#           应答含 direct_ip 或 geoip_cn 的 IP    → 直连：记入「记忆直连」，返回国内 IP
+#           其他                                  → 代理：向 sing-box 要 FakeIP，记入「记忆代理」
+#         第一次问谁由「核心运行模式」决定：兼容模式问国内；安全模式问国外（带 ECS）。
+#         SERVFAIL 等失败不会被当成「没有 IPv6」记下来。
+plugins:
+  - tag: sequence_unlisted_v6
+    type: sequence
+    args:
+      # 1. 向上游要真实应答
+      - matches: flag core_mode=compat              # 兼容模式：国内 DNS
+        exec: $sequence_local                       #定义: sub_config/forward_1.yaml
+      - matches: flag core_mode=safe                # 安全模式：国外 DNS（带 ECS）
+        exec: $sequence_google_node                 #定义: sub_config/forward_nocn_ecs.yaml
+      # 2. 确实没有 IPv6 的域名：记忆无V6，返回空应答
+      - matches:
+        - "rcode 0 3"
+        - "!resp_ip 2000::/3"
+        exec: fast_mark 20
+      - matches: fast_mark 20
+        exec:
+          - $learn_nov6_empty                       #定义: sub_config/route_learner.yaml
+          - drop_resp                               # 避免 cname 传递
+          - reject 0                                # 只结束这个 exec 块，并设置 rcode
+      - matches: fast_mark 20
+        exec: exit                                  # 结束整个查询
+      # 安全模式只问国外：国外失败（SERVFAIL、REFUSED 等，既没有 IPv6 又不是正常的空应答）时原样返回错误，
+      # 不当作代理域名，也不记忆。（兼容模式沿用原有行为，不在这里拦截。）
+      - matches:
+        - flag core_mode=safe
+        - "!resp_ip 2000::/3"
+        exec: exit
+      # 3. 应答含直连 IP 或国内 IP：直连，记入记忆直连，结束
+      - matches: "resp_ip $direct_ip"               #定义: sub_config/rule_set.yaml
+        exec: fast_mark 21
+      - matches: "resp_ip $geoip_cn"                #定义: sub_config/rule_set.yaml
+        exec: fast_mark 21
+      - matches: fast_mark 21                       # 直接返回刚才拿到的真实 IP
+        exec: $sequence_addrealiplist_exit          #定义: sub_config/forward_1.yaml
+      # 4. 其余的都有非国内 IPv6（没有 IPv6 的在第 2 步已经结束）：代理
+      - exec: $sequence_fakeip_addlist_exit         #定义: sub_config/forward_1.yaml

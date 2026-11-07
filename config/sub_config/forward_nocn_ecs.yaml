@@ -1,0 +1,21 @@
+plugins:
+#国外上游组（带 ECS）：安全模式下列表外域名的首次查询、安全模式的记忆直连都用它
+  - tag: foreignecs
+    type: aliapi
+    args:
+      concurrent: 1
+      proxy: $main_proxy                            #定义: sub_config/settings.yaml
+      upstreams:
+        - tag: google-foreignecs                #原生要求上游标签全局唯一，foreign 组已占用 google
+          addr: "https://dns.google/dns-query"
+          dial_addr: "8.8.8.8"
+          use_proxy: true
+
+  - tag: sequence_google_node
+    type: sequence
+    args:
+      - exec: ecs $client_ecs                       #定义: sub_config/settings.yaml
+      - exec: $cache_google_node                    #定义: sub_config/cache.yaml
+      - exec: flow_setter sequence=sequence_google_node upstream=foreignecs
+      - exec: $foreignecs                           #定义: 本文件
+      - exec: cname_remover

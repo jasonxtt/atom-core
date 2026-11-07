@@ -1,0 +1,129 @@
+plugins:
+#功能开关（feature_flag），取代原 switch1–switch17（配置 schema 3）
+#流程里用 `flag 名字`（开关）或 `flag 名字=选项`（多选一）引用，关闭用 "!flag 名字"
+#当前值存 webinfo/settings.json 的 flags 段，只存与这里 default 不同的值；
+#修改用 GET /api/v1/flags、POST /api/v1/flags/{名字} {"value": ...}、DELETE /api/v1/flags/{名字}（恢复默认）
+#requery_on_change: true（可选，默认 false）：该开关的值实际改变并发布后，若配置里有 requery 插件，程序随即启动一次 requery
+#（requery 按自己的 flush_rules 清缓存，再预热）；值没变、更新试运行（503）、没有 requery 插件时都不触发
+#首次启动时从旧的 rule/switchN.txt 迁移一次（旧文件保留但不再读取）
+#section 是所属 UI 子项：mode 运行模式、upstream 上游设置、routing 分流规则、blocking 请求屏蔽、
+#rewrite（并入分流规则）、learning 域名学习、cache 缓存设置、client 客户端
+#atom 锁定：DNS 分流模式固定为 FakeIP、国内域名 FakeIP 固定为关，这两个开关（原 dns_mode、cn_fakeip）已删除
+
+#原 switch3：强烈建议兼容模式
+  - tag: core_mode
+    type: feature_flag
+    args:
+      label: 核心运行模式
+      description: 兼容模式：列表外域名先问国内 DNS，性能更高；安全模式：列表外域名只问国外 DNS（带 ECS），国外失败或没有结果也不回退国内，防泄露和劫持能力更强。你明确写进名单的域名、指定直连的客户端和重写目标仍按各自设置使用国内 DNS。
+      section: mode
+      kind: choice
+      options:
+        - {value: compat, label: 兼容模式}
+        - {value: safe, label: 安全模式}
+      default: compat
+      requery_on_change: true
+
+#原 switch8
+  - tag: prefer_v4
+    type: feature_flag
+    args:
+      label: IPv4 优先
+      description: 域名有 A 记录时不返回 AAAA 结果；纯 IPv6 域名仍可解析。
+      section: mode
+      kind: bool
+      default: false
+
+#原 switch16
+  - tag: ddns_foreign
+    type: feature_flag
+    args:
+      label: DDNS 优先国外解析
+      description: DDNS 名单内的域名优先用国外上游解析（无缓存）。兼容模式下国外失败会回退国内；安全模式下只用国外。
+      section: mode
+      kind: bool
+      default: false
+
+#原 switch1 的一部分：未部署 Adguard Home 联动的，建议启用
+  - tag: block_empty
+    type: feature_flag
+    args:
+      label: 空结果屏蔽
+      description: 记忆为无 IPv4 的域名的 A 请求、记忆为无 IPv6 的域名的 AAAA 请求直接返回空。
+      section: blocking
+      kind: bool
+      default: true
+
+#原 switch1 的另一部分
+  - tag: block_blocklist
+    type: feature_flag
+    args:
+      label: 黑名单屏蔽
+      description: 屏蔽黑名单里的域名。
+      section: blocking
+      kind: bool
+      default: true
+
+#原 switch5：强烈建议打开
+  - tag: block_qtypes
+    type: feature_flag
+    args:
+      label: 类型屏蔽
+      description: 屏蔽 SOA、PTR、HTTPS 类型的请求。
+      section: blocking
+      kind: bool
+      default: true
+
+#原 switch7
+  - tag: block_ads
+    type: feature_flag
+    args:
+      label: 广告屏蔽
+      description: 启用 AdGuard 在线规则屏蔽广告；开启后“广告拦截”中已启用的在线列表才会生效。
+      section: blocking
+      kind: bool
+      default: true
+
+#原 switch6：无 IPv6 网络时建议开启
+  - tag: block_aaaa
+    type: feature_flag
+    args:
+      label: IPv6 屏蔽
+      description: 屏蔽 AAAA 请求（直接返回空）。
+      section: blocking
+      kind: bool
+      default: false
+
+#原 switch13
+  - tag: full_cache
+    type: feature_flag
+    args:
+      label: 全局缓存
+      description: 启用直面客户端的全局缓存（兼容模式用「全局缓存·兼容模式」，安全模式用「全局缓存·安全模式」），会缓存 FakeIP。
+      section: cache
+      kind: bool
+      default: true
+
+#原 switch4：强烈建议打开；cache_google_node（表外 ECS 查询缓存）不受此开关控制
+  - tag: lazy_cache
+    type: feature_flag
+    args:
+      label: 分组缓存
+      description: 启用分组缓存：国内查询缓存、国外查询缓存。国外查询缓存·带 ECS 不受它控制。
+      section: cache
+      kind: bool
+      default: true
+
+#原 switch2 + switch12：需要 mosdns 占用 53 端口直面客户端，并正确配置 rule/client_ip.txt
+  - tag: client_routing
+    type: feature_flag
+    args:
+      label: 客户端分流
+      description: 按 client_ip 名单区分客户端：不区分；仅名单内客户端走代理；名单内客户端不走代理。
+      section: client
+      kind: choice
+      options:
+        - {value: none, label: 不区分}
+        - {value: only_listed_proxy, label: 仅名单内客户端走代理}
+        - {value: listed_direct, label: 名单内客户端不走代理}
+      default: none

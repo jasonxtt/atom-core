@@ -1,0 +1,255 @@
+# ==============================================================================
+# AtomDNS 默认配置：总览
+# ==============================================================================
+# 对外只有两个端口：DNS 53（本文件末尾 udp_all / tcp_all）和管理 API / WebUI（下面 api.http）。
+# 刷新分流缓存用的重写与刷新解析都在进程内完成，不占用端口。
+#
+# 一条 A / AAAA 查询的完整路径（sequence_6666，自上而下，前面结束了就不会走到后面）：
+#   1. rewrite 重写（rule/rewrite.txt）           命中就直接应答
+#   2. 屏蔽类型（SOA/PTR/HTTPS，可选 AAAA）       reject
+#   3. unified_matcher1 给域名打 fast_mark        一次匹配拿到黑名单/广告/DDNS/各名单/学习结果的 mark
+#   4. IPv4 优先                                  开启「IPv4 优先」时执行 prefer_ipv4
+#   5. 记忆无 V4/V6、黑名单、广告                 直接空应答 / NXDOMAIN
+#   6. （atom 已删除专属分流组）
+#   7. DDNS 域名                                  国内；开启「DDNS 优先国外」则国外为主（兼容模式可回退国内，安全模式不回退）
+#   8. 指定客户端直连（client_routing）           国内并结束
+#   9. 全局缓存（compat 用 cache_all，safe 用 cache_all_noleak）、域名排行
+#  10. $sequence_listed                           域名在名单里或有学习记录：按 mark 的优先级交给对应的结果序列 → process_listed.yaml
+#  11. $sequence_unlisted_v4 / _v6                不在任何名单里：向上游要真实应答，按应答里的 IP 决定直连或代理 → process_v4.yaml / process_v6.yaml
+#      其他查询类型（MX、TXT、SRV 等）走 $sequence_other：按名单决定问国内还是国外 DNS → process_ot.yaml
+#
+# 「核心运行模式」（flags.yaml 的 core_mode）只影响第 11 步和记忆直连：
+#   兼容模式 compat：列表外域名先问国内 DNS，性能更高。
+#   安全模式 safe  ：列表外域名只问国外 DNS（带 ECS），国外没有结果或失败也不回退国内。
+#   两种模式下，明确写进名单的域名（白名单、直连域名、中国域名）、DDNS 默认解析、指定直连的客户端、
+#   重写的域名目标，仍然按各自的设置使用国内 DNS——它们是你明确指定的，不属于「列表外」。
+#
+# 文件分工：
+#   config_custom.yaml          本文件：主流程 sequence_6666、刷新流程 sequence_requery、53 端口监听
+#   sub_config/settings.yaml    可在 WebUI 调整的值（代理、ECS）
+#   sub_config/flags.yaml       所有功能开关（flag），以及它们在 WebUI 的名字和说明
+#   sub_config/rule_set.yaml    重写、各类名单与规则源、unified_matcher1（域名 → fast_mark 对照表）
+#   sub_config/route_learner.yaml  路由学习：记忆直连 / 记忆代理 / 无 V4 / 无 V6 / 特殊域名
+#   sub_config/cache.yaml       全部缓存及容量
+#   sub_config/forward_local.yaml / forward_nocn.yaml / forward_nocn_ecs.yaml
+#                               国内、国外、国外（带 ECS）三个上游组
+#   sub_config/forward_1.yaml   「结果序列」：一次查询的最后一步（查哪个上游、要不要缓存、要不要记入学习名单），文件头有命名规则
+#   sub_config/process_*.yaml   分流逻辑：listed（名单内）、v4 / v6（列表外）、ot（其他类型）
+#   sub_config/requery.yaml     刷新分流缓存的插件；adguard.yaml 广告规则；domain_output.yaml 域名排行；
+#   sub_config/webinfo.yaml     客户端名称
+#
+# 想知道某个域名实际怎么走：WebUI「日志」里开启诊断抓取（/api/v1/capture/start），再查询这个域名，
+# 日志里会逐步列出它依次经过的匹配条件和序列；审计记录里的 domain_set / final_sequence / final_upstream
+# 则给出它命中的名单、最后执行的序列和实际使用的上游。
+#
+# 阅读和修改时请注意：
+#   * fast_mark 是域名的「标签位」，一个域名可以同时有多个；真正决定去向的是流程里判断 mark 的先后顺序。
+#     含义见 rule_set.yaml 的 unified_matcher1 和 route_learner.yaml；mark 48 是历史保留位（Go 版快速路径用它标记「已匹配过」，本程序不再设置），不要挪用。
+#   * 带缓存的序列在命中缓存时会立刻把结果交回调用者，自己的 exit 来不及执行，所以调用后常常紧跟一个 exit。
+#   * reject 只结束它所在的那个序列（或 exec 块），exit 才结束整个查询。
+#   * tag 和 flag 的名字会出现在 WebUI 保存的设置、审计记录和 API 里，改名需要迁移。
+# ==============================================================================
+
+log:
+  level: warn
+  file: "/tmp/mosdns.log"
+
+#管理 API 与 WebUI 的监听地址；端口可在 WebUI 系统设置里修改
+api:
+  http: "0.0.0.0:9099"
+
+#子配置，不要调整顺序
+include:
+  - "sub_config/settings.yaml"                  #可调整项对象（代理、ECS），原生版新增
+  - "sub_config/adguard.yaml"                   #Adguard插件
+  - "sub_config/domain_output.yaml"             #域名规则生成输出插件定义
+  - "sub_config/route_learner.yaml"             #路由学习（记忆直连/代理/无V4/无V6/特殊域名）
+  - "sub_config/rule_set.yaml"                  #数据插件定义
+  - "sub_config/cache.yaml"                     #缓存插件定义
+  - "sub_config/forward_local.yaml"             #带过期缓存的内部使用国内dns服务器
+  - "sub_config/forward_nocn.yaml"              #带过期缓存的内部使用国外dns服务器
+  - "sub_config/forward_nocn_ecs.yaml"          #带过期缓存的内部使用国外dns服务器（带ecs），表外域名第一次查询使用
+  - "sub_config/forward_1.yaml"                 #结果序列：一次查询的最后一步（文件头有命名规则）
+  - "sub_config/flags.yaml"                     #功能开关定义（feature_flag）
+  - "sub_config/process_listed.yaml"            #名单内域名的分流（A/AAAA 共用）
+  - "sub_config/process_ot.yaml"                #其他查询类型（MX、TXT 等）的分流
+  - "sub_config/process_v4.yaml"                #列表外域名的分流-A 请求
+  - "sub_config/process_v6.yaml"                #列表外域名的分流-AAAA 请求
+  - "sub_config/webinfo.yaml"                   #前端信息与配置存储
+  - "sub_config/requery.yaml"                   #分流与缓存刷新功能
+
+plugins:
+# ---- 主流程：53 端口收到的所有查询（步骤见文件头；名字里的 6666 是历史遗留，不要当作端口）----
+  - tag: sequence_6666
+    type: sequence
+    args:
+      - exec: $rewrite                          #匹配成功重定向后直接结束不执行后续流程；定义: sub_config/rule_set.yaml
+      - matches:                                #屏蔽 SOA、PTR、HTTPS 类型的查询
+        - "qtype 6 12 65"
+        - flag block_qtypes                     #定义: sub_config/flags.yaml
+        exec: reject 0
+      - matches:                                #屏蔽 AAAA 查询
+        - "qtype 28"
+        - flag block_aaaa                       #定义: sub_config/flags.yaml
+        exec: reject 0
+      - exec: $unified_matcher1                 #一次匹配给域名打上所有名单和学习结果的 fast_mark；定义: sub_config/rule_set.yaml
+      - matches: flag prefer_v4                 #IPv4优先：存在A记录时抑制AAAA结果；定义: sub_config/flags.yaml
+        exec: prefer_ipv4
+      - matches:                                #记忆无V4 的域名，A 查询直接返回空
+        - fast_mark 2
+        - qtype 1
+        - flag block_empty                      #定义: sub_config/flags.yaml
+        exec: reject 0
+      - matches:                                #记忆无V6 的域名，AAAA 查询直接返回空
+        - fast_mark 3
+        - qtype 28
+        - flag block_empty                      #定义: sub_config/flags.yaml
+        exec: reject 0
+      - matches:                                #屏蔽黑名单域名
+        - fast_mark 1
+        - flag block_blocklist                  #定义: sub_config/flags.yaml
+        exec: reject 3
+      - matches:                                #屏蔽广告
+        - fast_mark 5
+        - flag block_ads                        #定义: sub_config/flags.yaml
+        exec: reject 3
+      - matches:                                #DDNS域名 + 安全模式 + 国外优先：只问国外，不回退国内
+        - fast_mark 6
+        - flag ddns_foreign                     #DDNS优先国外解析；定义: sub_config/flags.yaml
+        - flag core_mode=safe
+        exec:
+          - $foreign                            #定义: sub_config/forward_nocn.yaml
+          - exit
+      - matches:                                #DDNS域名 + 兼容模式 + 国外优先：国外为主，国外失败回退国内（无缓存）
+        - fast_mark 6
+        - flag ddns_foreign
+        exec:
+          - $prefer_foreign_nocache             #定义: sub_config/forward_1.yaml
+          - exit
+      - matches: fast_mark 6                    #DDNS 域名：国内 DNS，不经过任何缓存
+        exec:
+          - $domestic                           #定义: sub_config/forward_local.yaml
+          - exit
+      - matches:                                #客户端分流「仅名单内客户端走代理」：client_ip.txt 以外的客户端一律直连
+        - flag client_routing=only_listed_proxy #需要本程序占用 53 端口直面客户端；定义: sub_config/flags.yaml
+        - "!client_ip $client_ip"               #定义: sub_config/rule_set.yaml
+        exec: fast_mark 30
+      - matches:                                #客户端分流「名单内客户端不走代理」：client_ip.txt 里的客户端一律直连
+        - flag client_routing=listed_direct     #定义: sub_config/flags.yaml
+        - "client_ip $client_ip"                #定义: sub_config/rule_set.yaml
+        exec: fast_mark 30
+      - matches: fast_mark 30
+        exec:
+          - $sequence_local                     #定义: sub_config/forward_1.yaml
+          - tag_setter 指定客户端直连
+          - exit
+      - matches:                                #全局缓存：兼容模式用 cache_all，安全模式用 cache_all_noleak（分开存，切换模式时互不影响）
+        - flag core_mode=compat                 #兼容模式；定义: sub_config/flags.yaml
+        - flag full_cache                       #缓存开关打开；定义: sub_config/flags.yaml
+        exec: $cache_all                        #定义: sub_config/cache.yaml
+      - matches:
+        - flag core_mode=safe                   #安全模式；定义: sub_config/flags.yaml
+        - flag full_cache                       #缓存开关打开；定义: sub_config/flags.yaml
+        exec: $cache_all_noleak                 #定义: sub_config/cache.yaml
+      - exec: $top_domains                      #定义: sub_config/domain_output.yaml
+      - matches: qtype 1 28                     #A / AAAA：先按名单分流；命中名单的在里面就结束了
+        exec: $sequence_listed              #定义: sub_config/process_listed.yaml
+      - matches: qtype 1                        #名单外的 A 请求
+        exec: $sequence_unlisted_v4         #定义: sub_config/process_v4.yaml
+      - matches: qtype 28                       #名单外的 AAAA 请求
+        exec: $sequence_unlisted_v6             #定义: sub_config/process_v6.yaml
+      - matches: "!qtype 1 28"                  #处理非A、AAAA请求
+        exec: $sequence_other                   #定义: sub_config/process_ot.yaml
+
+
+# ---- 对外监听：DNS 53 端口（UDP / TCP），都进入 sequence_6666 ----
+  - tag: udp_all
+    type: udp_server
+    args:
+      entry: sequence_6666
+      listen: ":53"
+      enable_audit: true
+
+  - tag: tcp_all
+    type: tcp_server
+    args:
+      entry: sequence_6666
+      listen: ":53"
+      enable_audit: true
+      idle_timeout: 720
+
+# ---- 刷新流程：「分流与缓存刷新」(requery 插件) 重新解析域名时走这里，不对外监听，也不写审计 ----
+# 与 sequence_6666 的区别：
+#   * 不因「记忆无 V4 / 无 V6」提前空答——刷新就是要重新确认这两类记录；
+#   * 名单内和列表外的结果序列换成 *_requery 版本，会在国内没有结果时再问一次国外，并更新学习名单；
+#   * 不计入域名排行（$top_domains）。
+  - tag: sequence_requery
+    type: sequence
+    args:
+      - exec: $rewrite                          #定义: sub_config/rule_set.yaml
+      - matches:                                #屏蔽 SOA、PTR、HTTPS 类型的查询
+        - "qtype 6 12 65"
+        - flag block_qtypes                     #定义: sub_config/flags.yaml
+        exec: reject 0
+      - matches:                                #屏蔽 AAAA 查询
+        - "qtype 28"
+        - flag block_aaaa                       #定义: sub_config/flags.yaml
+        exec: reject 0
+      - exec: $unified_matcher1                 #一次匹配给域名打上所有名单和学习结果的 fast_mark；定义: sub_config/rule_set.yaml
+      - matches: flag prefer_v4                 #IPv4优先：存在A记录时抑制AAAA结果；定义: sub_config/flags.yaml
+        exec: prefer_ipv4
+      #刷新分流时不因记忆无V4/无V6而提前空答：要重新探测，才能再确认（刷新记录的最近确认时间）这两类记录
+      - matches:                                #屏蔽黑名单域名
+        - fast_mark 1
+        - flag block_blocklist                  #定义: sub_config/flags.yaml
+        exec: reject 3
+      - matches:                                #屏蔽广告
+        - fast_mark 5
+        - flag block_ads                        #定义: sub_config/flags.yaml
+        exec: reject 3
+      - matches:                                #DDNS域名 + 安全模式 + 国外优先：只问国外，不回退国内
+        - fast_mark 6
+        - flag ddns_foreign                     #DDNS优先国外解析；定义: sub_config/flags.yaml
+        - flag core_mode=safe
+        exec:
+          - $foreign                            #定义: sub_config/forward_nocn.yaml
+          - exit
+      - matches:                                #DDNS域名 + 兼容模式 + 国外优先：国外为主，国外失败回退国内（无缓存）
+        - fast_mark 6
+        - flag ddns_foreign
+        exec:
+          - $prefer_foreign_nocache             #定义: sub_config/forward_1.yaml
+          - exit
+      - matches: fast_mark 6                    #DDNS 域名：国内 DNS，不经过任何缓存
+        exec:
+          - $domestic                           #定义: sub_config/forward_local.yaml
+          - exit
+      - matches:                                #客户端分流「仅名单内客户端走代理」：client_ip.txt 以外的客户端一律直连
+        - flag client_routing=only_listed_proxy #需要本程序占用 53 端口直面客户端；定义: sub_config/flags.yaml
+        - "!client_ip $client_ip"               #定义: sub_config/rule_set.yaml
+        exec: fast_mark 30
+      - matches:                                #客户端分流「名单内客户端不走代理」：client_ip.txt 里的客户端一律直连
+        - flag client_routing=listed_direct     #定义: sub_config/flags.yaml
+        - "client_ip $client_ip"                #定义: sub_config/rule_set.yaml
+        exec: fast_mark 30
+      - matches: fast_mark 30
+        exec:
+          - $sequence_local                     #定义: sub_config/forward_1.yaml
+          - tag_setter 指定客户端直连
+          - exit
+      - matches:                                #全局缓存：兼容模式用 cache_all，安全模式用 cache_all_noleak（分开存，切换模式时互不影响）
+        - flag core_mode=compat                 #兼容模式；定义: sub_config/flags.yaml
+        - flag full_cache                       #缓存开关打开；定义: sub_config/flags.yaml
+        exec: $cache_all                        #定义: sub_config/cache.yaml
+      - matches:
+        - flag core_mode=safe                   #安全模式；定义: sub_config/flags.yaml
+        - flag full_cache                       #缓存开关打开；定义: sub_config/flags.yaml
+        exec: $cache_all_noleak                 #定义: sub_config/cache.yaml
+      - matches: qtype 1 28                     #A / AAAA：先按名单分流；命中名单的在里面就结束了
+        exec: $sequence_listed_requery              #定义: sub_config/process_listed.yaml
+      - matches: qtype 1                        #名单外的 A 请求
+        exec: $sequence_unlisted_v4_requery         #定义: sub_config/process_v4.yaml
+      - matches: qtype 28                       #名单外的 AAAA 请求
+        exec: $sequence_unlisted_v6             #定义: sub_config/process_v6.yaml
+      - matches: "!qtype 1 28"                  #处理非A、AAAA请求
+        exec: $sequence_other                   #定义: sub_config/process_ot.yaml

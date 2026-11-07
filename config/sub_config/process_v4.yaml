@@ -1,0 +1,78 @@
+# ==============================================================================
+# 列表外域名的 A 查询（fast_mark 17：没有命中任何名单，也没有学习记录）
+# ==============================================================================
+# 谁调用：config_custom.yaml 的 sequence_6666 / sequence_requery，在 process_listed.yaml 的名单分流之后调用。
+# 做什么：先向上游要一份真实应答，再看应答里的 IP 决定这个域名走直连还是代理：
+#           应答含 direct_ip 或 geoip_cn 的 IP  → 直连：记入「记忆直连」，返回国内 IP
+#           应答有其他 IPv4                     → 代理：向 sing-box 要 FakeIP，记入「记忆代理」
+#           应答没有 IPv4                       → 见下面第二条
+#         第一次问谁由「核心运行模式」决定：兼容模式问国内；安全模式问国外（带 ECS）。
+#
+# 几点背景：
+# 一、fast_mark 4：国内 DNS 无解析但国外 DNS 有解析（或相反）的域名，形成的域名表仅供统计查看。
+#     刷新分流缓存时同时被加入 realip、fakeip、nov4 等列表。
+# 二、有几种域名没有 V4 IP：不存在、纯 V6 域名、本区域不提供服务。前两种在第一次查询后无须再向另一边查第二次；
+#     fx168 这种不在大陆提供服务、国内 DNS 无法解析的域名，只在刷新（requery）时查第二次，
+#     避免大量国内纯 V6 域名、不存在的域名做无谓的二次查询。
+#     只有经过 requery 二次确认没有 V4 IP 的域名，才加入「记忆无V4」。
+#     普通查询里漏到这里的无 V4 域名，暂时直接返回上游的空应答；requery 分流好之后它们就属于名单内域名，不会再漏到这里。
+# 三、为什么已经在在线订阅名单里的域名还要写进生成的域名表：domain_mapper 对生成的 full: 域名匹配最快，
+#     一次匹配同时拿到多个 fast_mark（包含订阅名单的 mark）。
+plugins:
+  # ---- 普通查询 -----------------------------------------------------------------
+  - tag: sequence_unlisted_v4
+    type: sequence
+    args:
+      # 1. 向上游要真实应答
+      - matches: flag core_mode=compat              # 兼容模式：国内 DNS
+        exec: $sequence_local                       #定义: sub_config/forward_1.yaml
+      - matches: flag core_mode=safe                # 安全模式：国外 DNS（带 ECS）
+        exec: $sequence_google_node                 #定义: sub_config/forward_nocn_ecs.yaml
+      # 2. 应答含直连 IP 或国内 IP：直连，记入记忆直连，结束
+      - matches: "resp_ip $direct_ip"               #定义: sub_config/rule_set.yaml
+        exec: fast_mark 21
+      - matches: "resp_ip $geoip_cn"                #定义: sub_config/rule_set.yaml
+        exec: fast_mark 21
+      - matches: fast_mark 21                       # 直接返回刚才拿到的真实 IP
+        exec: $sequence_addrealiplist_exit          #定义: sub_config/forward_1.yaml
+      # 3. 其他 IPv4：代理
+      - matches: "resp_ip 0.0.0.0/0"
+        exec: $sequence_fakeip_addlist_exit         #定义: sub_config/forward_1.yaml
+
+  # ---- 刷新分流缓存（requery）-------------------------------------------------------
+  # 与普通查询的区别：不因记忆无V4/无V6 提前空答；没有 IP 时再问一次国外，并把确实没有 IPv4 的域名记为「记忆无V4」。
+  - tag: sequence_unlisted_v4_requery
+    type: sequence
+    args:
+      # 1. 向上游要真实应答
+      - matches: flag core_mode=compat
+        exec: $sequence_local                       #定义: sub_config/forward_1.yaml
+      - matches: flag core_mode=safe
+        exec: $sequence_google_node                 #定义: sub_config/forward_nocn_ecs.yaml
+      - matches: "!resp_ip 0.0.0.0/0"               # 第一次就没有 IP：做标记（特殊域名的线索）
+        exec: fast_mark 4
+      - matches: "!resp_ip 0.0.0.0/0"               # 仅 requery 才查第 2 次（国外），用来给 fx168 这类域名分流
+        exec: $sequence_google                      #定义: sub_config/forward_1.yaml
+      # 2. 根据应答找出确实没有 IPv4 的域名
+      - exec: $learn_sv4_seen                       #fast_mark 4 且应答有 IPv4：特殊域名；定义: sub_config/route_learner.yaml
+      - matches:
+        - "rcode 0 3"
+        - "!resp_ip 0.0.0.0/0"
+        exec: fast_mark 20
+      - matches: fast_mark 20
+        exec:
+          - $learn_nov4_empty                       #记忆无V4（SERVFAIL 等不算）；定义: sub_config/route_learner.yaml
+          - drop_resp                               # 避免 cname 传递
+          - reject 0                                # 只结束这个 exec 块，并设置 rcode
+      - matches: fast_mark 20
+        exec: exit                                  # 结束整个查询
+      # 3. 应答含直连 IP 或国内 IP：直连，记入记忆直连，结束
+      - matches: "resp_ip $direct_ip"               #定义: sub_config/rule_set.yaml
+        exec: fast_mark 21
+      - matches: "resp_ip $geoip_cn"                #定义: sub_config/rule_set.yaml
+        exec: fast_mark 21
+      - matches: fast_mark 21                       # 直接返回刚才拿到的真实 IP
+        exec: $sequence_addrealiplist_exit          #定义: sub_config/forward_1.yaml
+      # 4. 其他 IPv4：代理
+      - matches: "resp_ip 0.0.0.0/0"
+        exec: $sequence_fakeip_addlist_exit         #定义: sub_config/forward_1.yaml

@@ -1,0 +1,15 @@
+plugins:
+# 国内上游组：直连域名、DDNS、列表外首次查询（兼容模式）、重写目标都用它
+  - tag: domestic
+    type: aliapi
+    args:
+      concurrent: 2                             #同时向几个上游发出（取最先成功的应答）；改动启用的上游个数时一并调整
+      proxy: $main_proxy                        #本组条目可用 use_proxy: true 选择走代理（默认都不走）；定义: sub_config/settings.yaml
+      upstreams:
+        - tag: 阿里UDP
+          addr: "udp://223.5.5.5"
+        - tag: 阿里DOH
+          addr: "https://dns.alidns.com/dns-query"
+          dial_addr: "223.5.5.5"
+        #已预置但默认停用的上游（WebUI 上游页可重新启用，保存后写入 webinfo/settings.json）：
+        #阿里TCP tcp://223.5.5.5 / 阿里DOT tls://223.5.5.5 / 运营商 udp://114.114.114.114

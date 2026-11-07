@@ -1,0 +1,176 @@
+# ==============================================================================
+# 结果序列：一次查询的最后一步
+# ==============================================================================
+# process_listed.yaml / process_v4.yaml / process_v6.yaml 决定「这个域名该直连还是代理」之后，调用这里的序列去执行：
+# 查哪个上游、要不要先看缓存、要不要把结果记入学习名单、最后 exit 结束整个查询。
+# 每个序列开头的 flow_setter 把「走了哪个序列、哪个上游」写进审计记录。
+#
+# 命名规则：sequence_<去向>[_addlist|_sv4][_exit][_requery]
+#   去向   local       国内 DNS，返回真实 IP
+#          google      国外 DNS，返回真实 IP（google_node 带 ECS，在 forward_nocn_ecs.yaml）
+#          fakeip      代理：向本机 sing-box 要 FakeIP（atom 固定 FakeIP 分流）
+#   addlist  同时把域名记入学习名单（直连类记「记忆直连」，代理类记「记忆代理」）。只有列表外探测（process_v4.yaml）用它：
+#            静态名单（白名单、直连域名、中国域名、灰名单、代理域名、非中国域名）的判断永远优先于学习结果，记了也用不上，所以不记
+#   sv4      刷新时用：国内没有 IPv4、国外有非国内 IPv4 时记为「特殊域名」并改走代理
+#   exit     最后执行 exit 结束整个查询
+#   requery  刷新分流缓存时用的版本：国内没有结果会再问国外，并记忆无 V4 / 无 V6 / 特殊域名
+# 带缓存（cache_cn / cache_google）的序列命中缓存时会提前把结果交回调用者，调用者需要自己再 exit。
+#
+# 本文件的顺序：上游组（nocnfake）→ 国内 → 国外 → 代理（FakeIP）→ 国内入口。
+plugins:
+#向本机 sing-box 的 dns-in 请求代理域名的 FakeIP（atom 锁定：地址固定，不能在设置里改；
+#发往这个组的查询会带上 EDNS0 65001 出口指令，见程序的 edns_directive.rs）
+  - tag: nocnfake
+    type: aliapi
+    args:
+      concurrent: 1
+      upstreams:
+        - tag: sing-box
+          addr: "udp://127.0.0.1:6666"
+
+#国内 DNS 要真实 IP 并结束（静态直连名单、兼容模式的记忆直连）
+  - tag: sequence_local_exit
+    type: sequence
+    args:
+      - exec: flow_setter sequence=sequence_local_exit upstream=domestic
+      - matches: flag lazy_cache                    #定义: sub_config/flags.yaml
+        exec: $cache_cn                             #定义: sub_config/cache.yaml
+      - exec: $domestic                             #定义: sub_config/forward_local.yaml
+      - exec: cname_remover
+      - exec: $learn_nov6_empty                     #AAAA 无全球单播 IPv6 且 rcode 为 0/3：记忆无V6（A 查询时什么都不做）；定义: sub_config/route_learner.yaml
+      - exec: exit
+
+  - tag: sequence_local_exit_requery
+    type: sequence
+    args:
+      - exec: flow_setter sequence=sequence_local_exit_requery upstream=domestic
+      - matches: flag lazy_cache                    #定义: sub_config/flags.yaml
+        exec: $cache_cn                             #定义: sub_config/cache.yaml
+      - exec: $domestic                             #定义: sub_config/forward_local.yaml
+      - exec: cname_remover
+      - matches:
+        - qtype 1                                   #A请求
+        - "!resp_ip 0.0.0.0/0"
+        exec:
+          - flow_setter sequence=sequence_local_exit_requery upstream=foreign
+          - $foreign                                #定义: sub_config/forward_nocn.yaml
+      - exec: $learn_nov4_empty                     #A 无 IPv4 且 rcode 为 0/3：记忆无V4；定义: sub_config/route_learner.yaml
+      - exec: $learn_nov6_empty                     #AAAA 无全球单播 IPv6 且 rcode 为 0/3：记忆无V6；定义: sub_config/route_learner.yaml
+      - exec: exit
+
+#刷新时静态直连名单的域名：国内没有 IPv4 时再问国外，国外有非国内 IPv4 就记为特殊域名并改走代理
+  - tag: sequence_local_sv4_exit_requery
+    type: sequence
+    args:
+      - exec: flow_setter sequence=sequence_local_sv4_exit_requery upstream=domestic
+      - matches: flag lazy_cache                    #定义: sub_config/flags.yaml
+        exec: $cache_cn                             #定义: sub_config/cache.yaml
+      - exec: $domestic                             #定义: sub_config/forward_local.yaml
+      - exec: cname_remover
+      - exec: $learn_nov6_empty                     #AAAA 无全球单播 IPv6 且 rcode 为 0/3：记忆无V6；定义: sub_config/route_learner.yaml
+      - matches:
+        - qtype 1                                   #A请求
+        - "!resp_ip 0.0.0.0/0"
+        exec: fast_mark 19
+      - matches: fast_mark 19
+        exec:
+          - flow_setter sequence=sequence_local_sv4_exit_requery upstream=foreign
+          - $foreign                                #定义: sub_config/forward_nocn.yaml
+      - exec: $learn_nov4_empty                     #A 无 IPv4 且 rcode 为 0/3：记忆无V4；定义: sub_config/route_learner.yaml
+      - matches:
+        - fast_mark 19                              #A请求
+        - "resp_ip 0.0.0.0/0"                       #有IP
+        - "!resp_ip $geoip_cn"                      #但是没有cn ip；定义: sub_config/rule_set.yaml
+        exec:                                       #改问 sing-box 要 FakeIP
+          - $learn_sv4_listed                       #特殊域名；定义: sub_config/route_learner.yaml
+          - drop_resp
+          - flow_setter sequence=sequence_local_sv4_exit_requery upstream=nocnfake
+          - $nocnfake                               #定义: 本文件
+          - exit
+      - exec: exit
+
+#国内 DNS 要真实 IP，不结束（列表外探测、指定客户端直连、其他查询类型）
+  - tag: sequence_local
+    type: sequence
+    args:
+      - exec: flow_setter sequence=sequence_local upstream=domestic
+      - matches: flag lazy_cache                    #定义: sub_config/flags.yaml
+        exec: $cache_cn                             #定义: sub_config/cache.yaml
+      - exec: $domestic                             #定义: sub_config/forward_local.yaml
+      - exec: cname_remover
+
+
+#列表外探测到国内 IP：记忆直连，返回刚才拿到的真实 IP 并结束
+  - tag: sequence_addrealiplist_exit
+    type: sequence
+    args:
+      - exec: $learn_direct_probed                  #探测应答含直连 IP/国内 IP：记忆直连；定义: sub_config/route_learner.yaml
+      - exec: exit
+
+#刷新分流缓存时，安全模式下「记忆直连」的域名：只向国外 DNS 要真实应答（先带 ECS，没有 IPv4 再问一次不带 ECS 的），
+#确认无 V4 / 无 V6 后记忆。全程不问国内 DNS。
+  - tag: sequence_foreign_exit_requery
+    type: sequence
+    args:
+      - exec: $sequence_google_node                 #定义: sub_config/forward_nocn_ecs.yaml
+      - matches:
+        - qtype 1                                   #A请求
+        - "!resp_ip 0.0.0.0/0"
+        exec: $sequence_google                      #定义: 本文件
+      - exec: $learn_nov4_empty                     #A 无 IPv4 且 rcode 为 0/3：记忆无V4；定义: sub_config/route_learner.yaml
+      - exec: $learn_nov6_empty                     #AAAA 无全球单播 IPv6 且 rcode 为 0/3：记忆无V6；定义: sub_config/route_learner.yaml
+      - exec: exit
+
+#国外 DNS 要真实 IP，不结束
+  - tag: sequence_google
+    type: sequence
+    args:
+      - exec: flow_setter sequence=sequence_google upstream=foreign
+      - matches: flag lazy_cache                    #定义: sub_config/flags.yaml
+        exec: $cache_google                         #定义: sub_config/cache.yaml
+      - exec: $foreign                              #定义: sub_config/forward_nocn.yaml
+      - exec: cname_remover
+
+#国外 DNS 要真实 IP 并结束（realiplist）
+  - tag: sequence_google_exit
+    type: sequence
+    args:
+      - exec: flow_setter sequence=sequence_google_exit upstream=foreign
+      - matches: flag lazy_cache                    #定义: sub_config/flags.yaml
+        exec: $cache_google                         #定义: sub_config/cache.yaml
+      - exec: $foreign                              #定义: sub_config/forward_nocn.yaml
+      - exec: cname_remover
+      - exec: exit
+
+#代理（列表外探测到非国内 IP）：向 sing-box 要 FakeIP，记忆代理后结束
+  - tag: sequence_fakeip_addlist_exit
+    type: sequence
+    args:
+      - exec: flow_setter sequence=sequence_fakeip_addlist_exit upstream=nocnfake
+      - exec: $nocnfake                             #定义: 本文件
+      - exec: $learn_proxy                          #记忆代理；定义: sub_config/route_learner.yaml
+      - exec: exit
+
+#代理（静态代理名单、记忆代理）：向 sing-box 要 FakeIP 后结束
+  - tag: sequence_fakeip_exit
+    type: sequence
+    args:
+      - exec: flow_setter sequence=sequence_fakeip_exit upstream=nocnfake
+      - exec: $nocnfake                             #定义: 本文件
+      - exec: exit
+
+#国内上游入口：rewrite 的 dns: $sequence_local_in 在进程内调用它，不占用端口
+  - tag: sequence_local_in
+    type: sequence
+    args:
+      - exec: $sequence_local                       #定义: 本文件
+      - exec: flow_setter sequence=sequence_local_in upstream=domestic
+
+#DDNS 优先国外：先问国外要真实 IP，失败或 1 秒内没有应答再问国内，不带缓存
+  - tag: prefer_foreign_nocache
+    type: fallback
+    args:
+      primary: foreign                          #主上游组；定义: sub_config/forward_nocn.yaml
+      secondary: domestic                       #备用上游组；定义: sub_config/forward_local.yaml
+      threshold: 1000                           #主上游多少毫秒没有应答就启用备用（程序默认 500）
+      always_standby: false                     #true 时备用与主上游同时发出

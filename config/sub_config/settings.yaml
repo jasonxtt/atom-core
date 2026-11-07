@@ -1,0 +1,16 @@
+# 可由 WebUI 调整的值，以具名对象定义；其它文件用 $标签 引用。
+# 修改后的值保存在 webinfo/settings.json（只含与本文件不同的部分），本文件保持默认。
+plugins:
+  # 全局 SOCKS5 代理。地址留空表示不使用代理。
+  # 引用它的有：各规则源（rule_set.yaml、adguard.yaml 的 proxy）与 foreign/foreignecs 等上游组（proxy + 条目 use_proxy）。
+  # atom：默认是本机 sing-box 的 mixed 入站（7890），国外 DNS 经 Final 出去；UDP 上游不能走 SOCKS。
+  - tag: main_proxy
+    type: socks5_proxy
+    args:
+      addr: "127.0.0.1:7890"
+
+  # 国外查询附带的 ECS 地址，供 ecs $client_ecs 使用（sub_config/forward_nocn_ecs.yaml）。
+  - tag: client_ecs
+    type: ecs_address
+    args:
+      addr: "2408:8888::8"
