@@ -14,10 +14,6 @@ pub enum CliCommand {
         dir: Option<PathBuf>,
     },
     Version,
-    /// The update guard, started by the running host (not meant for people).
-    UpdateGuard {
-        transaction: PathBuf,
-    },
 }
 
 /// Deterministic command-line usage failure.
@@ -65,17 +61,6 @@ where
             return Err(CliError::new("unexpected argument"));
         }
         return Ok(CliCommand::Version);
-    }
-    if command == OsStr::new("update-guard") {
-        let (Some(flag), Some(path), None) = (args.next(), args.next(), args.next()) else {
-            return Err(CliError::new("update-guard needs --transaction <file>"));
-        };
-        if flag != OsStr::new("--transaction") || path.is_empty() {
-            return Err(CliError::new("update-guard needs --transaction <file>"));
-        }
-        return Ok(CliCommand::UpdateGuard {
-            transaction: PathBuf::from(path),
-        });
     }
     let check = command == OsStr::new("check");
     if command != OsStr::new("start") && !check {

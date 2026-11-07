@@ -1310,7 +1310,7 @@ fn capability_matrix_is_complete_and_matches_host_eligibility() {
             let ops = payload["ui_operations"]
                 .as_object()
                 .expect("complete operations");
-            assert_eq!(ops.len(), 32);
+            assert_eq!(ops.len(), 30);
             for id in [
                 "system.health",
                 "system.version",
@@ -1351,8 +1351,6 @@ fn capability_matrix_is_complete_and_matches_host_eligibility() {
                 "lists.remembered",
                 // An in-process test host has no captured restart target (only `main` captures one).
                 "system.restart",
-                "system.config_management",
-                "system.update",
                 "system.domain_generation",
                 "system.global_overrides",
             ] {

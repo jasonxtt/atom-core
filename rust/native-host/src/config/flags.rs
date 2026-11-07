@@ -518,18 +518,11 @@ pub(super) fn legacy_switch(name: &str) -> bool {
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Whether this process is the candidate an online update is trying out.
-/// While it runs, the schema-2 program may still be restored, and that
-/// program refuses a `settings.json` with a `flags` section.
-pub(crate) fn update_trial() -> bool {
-    std::env::var_os(crate::update::transaction::MARKER_ENV).is_some()
-}
-
 /// Startup's one-time migration: when the settings file has no `flags`
 /// section yet, the values the compile took from `rule/switchN.txt` are
 /// written into it (differences only, `{}` when there are none), so the switch
-/// files are never read again. Nothing is written during an update trial or
-/// when the file changed since the compile; a failed write is logged and
+/// files are never read again. Nothing is written when the file changed
+/// since the compile; a failed write is logged and
 /// retried at the next start. The live configuration is updated in place: the
 /// values are the same, only their source becomes `settings`.
 pub(crate) fn persist_migration(config: &mut super::CompiledConfig) {
@@ -542,12 +535,6 @@ pub(crate) fn persist_migration(config: &mut super::CompiledConfig) {
     let Some(root) = config.reload.as_ref().map(|reload| reload.root_dir.clone()) else {
         return;
     };
-    if update_trial() {
-        crate::diag::info_line!(
-            "feature_flag migration deferred: an online update is being tried out"
-        );
-        return;
-    }
     let path = super::settings::Settings::path(&root);
     let current = match std::fs::read(&path) {
         Ok(bytes) => Some(bytes),

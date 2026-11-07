@@ -50,7 +50,6 @@ mod udp_response;
 #[cfg(test)]
 mod udp_truncation_tests;
 mod ui_manifest;
-mod update;
 mod upstream_metrics;
 mod webinfo;
 
@@ -62,21 +61,6 @@ pub use assembly::{
 pub use cache::{
     CacheAdapterError, CacheCatalog, CacheClock, CacheTestClock, NativeCacheAdapter, PendingStore,
 };
-/// Container mode (`ATOMDNS_CONTAINER=1`): whether it is on, and the start-up step that brings
-/// the configuration volume in line with the image. Returns the lines to log.
-#[must_use]
-pub fn container_enabled() -> bool {
-    update::container::enabled()
-}
-
-/// See [`container_enabled`].
-pub fn prepare_container(
-    config: &std::path::Path,
-    root: &std::path::Path,
-) -> Result<Vec<String>, String> {
-    update::container::prepare(config, root)
-}
-
 pub use cli::{CliCommand, CliError, parse_args, resolve_config_paths};
 pub use config::{
     ApiConfig, CacheId, CacheKind, CachePluginConfig, CheckFinding, CheckFindingKind, CheckReport,
@@ -98,43 +82,8 @@ pub use observer::{
     UpstreamDiagnosticSelected, UpstreamDiagnostics, UpstreamTransport,
 };
 pub use process_metrics::mark_image_start;
-pub use restart::{
-    RestartTarget, capture as capture_restart_target, captured as restart_target, take_pending,
-};
+pub use restart::{RestartTarget, capture as capture_restart_target, captured as restart_target};
 
-/// `atomdns update-guard --transaction <file>`: the update guard (see `update/guard.rs`). It
-/// replaces this process and returns only when even the final `exec` failed.
-#[must_use]
-pub fn run_update_guard(transaction: &std::path::Path) -> String {
-    update::guard::run(transaction)
-}
-
-/// Called by `atomdns start`: a candidate started by the update guard asks to be stopped
-/// together with it.
-pub fn arm_update_candidate() {
-    update::guard::arm_parent_death_signal();
-}
-
-/// Called by `atomdns start` before the configuration is loaded: rolls back an interrupted
-/// update and returns the program and arguments to run again (`None`: nothing to recover).
-///
-/// # Errors
-///
-/// A message when the rollback itself failed (the host must not start in a mixed state).
-pub fn recover_interrupted_update(
-    root: &std::path::Path,
-) -> Result<Option<(String, Vec<String>)>, String> {
-    update::transaction::recover_on_start(root)
-        .map(|recovered| recovered.map(|recovered| (recovered.executable, recovered.args)))
-}
-
-/// After the `exec` of an update guard failed: nothing was changed, so the staged
-/// transaction is closed as rolled back with the reason.
-pub fn abandon_failed_update_exec(target: &RestartTarget, reason: &str) {
-    if let Some(path) = target.transaction() {
-        update::transaction::abandon_staged(path, &format!("无法启动更新守护: {reason}"));
-    }
-}
 pub use tcp::{TcpServer, TcpServerError};
 pub use udp::{UdpServer, UdpServerError};
 
@@ -152,9 +101,6 @@ where
         ))),
         CliCommand::Check { .. } => Err(HostError::Cli(CliError::new(
             "check does not prepare a host",
-        ))),
-        CliCommand::UpdateGuard { .. } => Err(HostError::Cli(CliError::new(
-            "update-guard does not prepare a host",
         ))),
         CliCommand::Start { config, dir } => {
             let (config, root) =

@@ -478,9 +478,6 @@ async fn cache_settings_change(
             }
         }
     }
-    if crate::config::flags::update_trial() {
-        return text(503, "配置更新试运行中，暂不能修改缓存设置");
-    }
     let before = cache_numbers(&current.config, tag, yaml);
     let mut settings = current.config.settings.clone();
     let mut tuning = settings.caches.remove(tag).unwrap_or_default();
@@ -552,9 +549,6 @@ async fn learning_settings_change(control: &RuntimeControl, method: &str, body: 
         settings.learning = Learning::default();
     } else if let Err(reply) = patch_learning(&current.config, &mut settings, body) {
         return reply;
-    }
-    if crate::config::flags::update_trial() {
-        return text(503, "配置更新试运行中，暂不能修改学习设置");
     }
     let unchanged = settings == current.config.settings;
     drop(current);
@@ -709,9 +703,6 @@ async fn flag_change(control: &RuntimeControl, method: &str, key: &str, body: &[
         }
         value
     };
-    if crate::config::flags::update_trial() {
-        return text(503, "配置更新试运行中，暂不能修改开关");
-    }
     if value == flag.value {
         return flag_reply(flag, false);
     }
@@ -794,16 +785,6 @@ fn unique<'a>(
                 .join(", ")
         )),
     }
-}
-
-/// The address of the configured `socks5_proxy` object (empty when there is none, or it is
-/// ambiguous): the proxy the updater's downloads go through.
-pub(crate) fn proxy_address(config: &CompiledConfig) -> String {
-    unique(config, "socks5_proxy")
-        .ok()
-        .flatten()
-        .map(|item| item.value.trim().to_owned())
-        .unwrap_or_default()
 }
 
 fn overrides_get(config: &CompiledConfig) -> Reply {
