@@ -1,5 +1,5 @@
 plugins:
-#国外上游组：realiplist、其他查询类型、刷新时的二次确认都用它
+#国外上游组：其他查询类型、刷新时的二次确认都用它
   - tag: foreign
     type: aliapi
     args:

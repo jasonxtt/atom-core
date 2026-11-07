@@ -63,26 +63,12 @@ plugins:
       files:
         - "rule/whitelist.txt"
 
-#自定义cnfakeip排除域名列表
-  - tag: cnfakeipfilter
-    type: domain_set_light
-    args:
-      files:
-        - "rule/cnfakeipfilter.txt"
-
 #屏蔽域名列表
   - tag: blocklist
     type: domain_set_light
     args:
       files:
         - "rule/blocklist.txt"
-
-#国外dns解析realip域名列表
-  - tag: realiplist
-    type: domain_set_light
-    args:
-      files:
-        - "rule/realiplist.txt"
 
 #自定义强制代理域名列表
   - tag: greylist
@@ -122,12 +108,6 @@ plugins:
         - tag: whitelist
           mark: 8 
           output_tag: "白名单"
-        - tag: realiplist
-          mark: 9
-          output_tag: "!CN fakeip filter"
-        - tag: cnfakeipfilter
-          mark: 10
-          output_tag: "CN fakeip filter"
         - tag: cuscn
           mark: 13
           output_tag: "直连域名"

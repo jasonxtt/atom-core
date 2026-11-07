@@ -131,17 +131,6 @@ plugins:
       - exec: $foreign                              #定义: sub_config/forward_nocn.yaml
       - exec: cname_remover
 
-#国外 DNS 要真实 IP 并结束（realiplist）
-  - tag: sequence_google_exit
-    type: sequence
-    args:
-      - exec: flow_setter sequence=sequence_google_exit upstream=foreign
-      - matches: flag lazy_cache                    #定义: sub_config/flags.yaml
-        exec: $cache_google                         #定义: sub_config/cache.yaml
-      - exec: $foreign                              #定义: sub_config/forward_nocn.yaml
-      - exec: cname_remover
-      - exec: exit
-
 #代理（列表外探测到非国内 IP）：向 sing-box 要 FakeIP，记忆代理后结束
   - tag: sequence_fakeip_addlist_exit
     type: sequence

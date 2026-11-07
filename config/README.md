@@ -14,5 +14,6 @@ atom 删除了在线更新和配置包，这份配置随程序一起发布，用
   主流程去掉 `$special_upstream_matcher` 和 `$sequence_special`。
 - `main_proxy` 默认 `127.0.0.1:7890`（本机 sing-box 的 mixed 入站）。
 - 删除来源包里描述 Go → Rust 迁移的 `README-rust.md`。
-- `realiplist` 原样保留，等用户确认是否删除。`cnfakeipfilter` 的分支随 `cn_fakeip` 删掉了；名单和 `unified_matcher1`
-  里的条目还在，但不再影响分流。
+- 删除 `realiplist`（mark 9，国外 DNS 解析、返回真实 IP，在 FakeIP 网段分流下等于悄悄直连）和 `cnfakeipfilter`
+  （mark 10，只在 `cn_fakeip` 开启时生效）：名单插件、`unified_matcher1` 条目、`rule/` 下的文件、分流分支和只给
+  realiplist 用的 `sequence_google_exit`。以后需要"国外 DNS 解析后直连"，用规则表表达。

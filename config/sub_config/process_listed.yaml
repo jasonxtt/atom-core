@@ -14,7 +14,6 @@
 #
 #   mark  名单                       去向
 #   ----  -------------------------  ---------------------------------------------------
-#    9    realiplist（!CN FakeIP）   国外 DNS 要真实 IP
 #    7    greylist 灰名单            代理：向 sing-box 要 FakeIP
 #    8    whitelist 白名单           直连：国内 DNS
 #   15    cusnocn 代理域名           代理（同 7）
@@ -35,11 +34,6 @@ plugins:
   - tag: sequence_listed
     type: sequence
     args:
-      - matches: fast_mark 9                        # realiplist：国外真实 IP
-        exec: $sequence_google_exit                 #定义: sub_config/forward_1.yaml
-      - matches: fast_mark 9
-        exec: exit
-
       - matches: fast_mark 7                        # 灰名单：代理
         exec: $sequence_fakeip_exit                 #定义: sub_config/forward_1.yaml
 
@@ -83,11 +77,6 @@ plugins:
   - tag: sequence_listed_requery
     type: sequence
     args:
-      - matches: fast_mark 9
-        exec: $sequence_google_exit                 #定义: sub_config/forward_1.yaml
-      - matches: fast_mark 9
-        exec: exit
-
       - matches: fast_mark 7
         exec: $sequence_fakeip_exit                 #定义: sub_config/forward_1.yaml
 
