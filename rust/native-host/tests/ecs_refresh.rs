@@ -23,7 +23,7 @@ fn query(marker: u8) -> Vec<u8> {
         ));
     let mut wire = message.to_vec().unwrap();
     wire[11] = 1;
-    let body = [0, 8, 0, 7, 0, 1, 24, 0, 203, 0, 113, 253, 233, 0, 1, marker];
+    let body = [0, 8, 0, 7, 0, 1, 24, 0, 203, 0, 113, 253, 234, 0, 1, marker];
     wire.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0]);
     wire.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
     wire.extend_from_slice(&body);
@@ -190,7 +190,7 @@ fn run(tcp: bool) {
         serving.await.unwrap().unwrap();
     });
     let captured = worker.join().unwrap();
-    assert!(captured[1].windows(5).any(|s| s == [253, 233, 0, 1, 42]));
+    assert!(captured[1].windows(5).any(|s| s == [253, 234, 0, 1, 42]));
     assert!(
         captured[1]
             .windows(11)

@@ -882,8 +882,12 @@ fn aliapi(
     }
     yaml_defaults.insert(tag.clone(), yaml_entries.clone());
 
-    // A settings list replaces it (enabled entries only).
-    let from_settings = settings.upstreams.get(&tag);
+    // A settings list replaces it (enabled entries only). atom: the FakeIP
+    // upstream is fixed to sing-box's `dns-in` and never taken from settings.
+    let from_settings = settings
+        .upstreams
+        .get(&tag)
+        .filter(|_| tag != crate::edns_directive::FAKEIP_UPSTREAM);
     if let Some(entries) = from_settings {
         let mut items: Vec<RawValue> = entries
             .iter()

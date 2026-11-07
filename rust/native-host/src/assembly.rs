@@ -1046,6 +1046,8 @@ pub struct ForwardCatalog {
     entry_indexes: BTreeMap<atomdns_sequence_core::ExecutableId, Vec<usize>>,
     owners: BTreeMap<atomdns_sequence_core::ExecutableId, Vec<Rc<ForwardAdapter>>>,
     concurrent: BTreeMap<atomdns_sequence_core::ExecutableId, usize>,
+    /// Invocations of the FakeIP upstream group (atom: EDNS0 65001 CLEAR).
+    fakeip: BTreeSet<atomdns_sequence_core::ExecutableId>,
     rotation: RefCell<u64>,
 }
 
@@ -1080,10 +1082,16 @@ impl ForwardCatalog {
         }
         let concurrent = owners.keys().map(|executable| (*executable, 1)).collect();
         let entry_indexes = owners.keys().map(|id| (*id, vec![0])).collect();
+        let fakeip = configs
+            .iter()
+            .filter(|config| config.tag == crate::edns_directive::FAKEIP_UPSTREAM)
+            .map(|config| config.executable)
+            .collect();
         Ok(Self {
             entry_indexes,
             owners,
             concurrent,
+            fakeip,
             rotation: RefCell::new(seed),
         })
     }
@@ -1122,6 +1130,7 @@ impl ForwardCatalog {
             BTreeMap::new();
         let mut shared: BTreeMap<(usize, usize), Rc<ForwardAdapter>> = BTreeMap::new();
         let mut concurrent = BTreeMap::new();
+        let mut fakeip = BTreeSet::new();
         for invocation in &config.forward_invocations {
             let definition = config
                 .forward_definitions
@@ -1130,6 +1139,9 @@ impl ForwardCatalog {
                     format!("forward definition {} is missing", invocation.definition)
                 })?;
             concurrent.insert(invocation.executable, definition.concurrent);
+            if definition.tag == crate::edns_directive::FAKEIP_UPSTREAM {
+                fakeip.insert(invocation.executable);
+            }
             entry_indexes.insert(invocation.executable, invocation.entries.clone());
             let mut invocation_owners = Vec::with_capacity(invocation.entries.len());
             for &entry_index in &invocation.entries {
@@ -1174,8 +1186,24 @@ impl ForwardCatalog {
             entry_indexes,
             owners,
             concurrent,
+            fakeip,
             rotation: RefCell::new(seed),
         })
+    }
+
+    /// The query as it leaves for `executable` (see [`crate::edns_directive`]).
+    fn outgoing_query(
+        &self,
+        executable: atomdns_sequence_core::ExecutableId,
+        query: &[u8],
+    ) -> Result<Vec<u8>, ExchangeError> {
+        crate::edns_directive::outgoing_query(query, self.fakeip.contains(&executable))
+            .map(std::borrow::Cow::into_owned)
+            .map_err(|_| {
+                ExchangeError::Upstream(UpstreamError::InvalidRequest(
+                    atomdns_upstream_core::RequestError::Malformed,
+                ))
+            })
     }
 
     fn rotation_start(&self, len: usize) -> usize {
@@ -1265,9 +1293,10 @@ impl ExchangeExecutor for ForwardCatalog {
         else {
             return Box::pin(async move { Err(ExchangeError::UnknownExecutable(executable)) });
         };
+        let query = self.outgoing_query(executable, query);
         Box::pin(async move {
             owner
-                .exchange(query, deadline, cancellation)
+                .exchange(&query?, deadline, cancellation)
                 .await
                 .map_err(ExchangeError::Upstream)
         })
@@ -1287,7 +1316,10 @@ impl ExchangeExecutor for ForwardCatalog {
             return Box::pin(async move { Err(ExchangeError::UnknownExecutable(executable)) });
         };
         let concurrent = self.concurrent.get(&executable).copied().unwrap_or(1);
-        let query = query.to_vec();
+        let query = match self.outgoing_query(executable, query) {
+            Ok(query) => query,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
         let (header, question) = match parse_query(&query) {
             Ok(parsed) => parsed,
             Err(_) => {

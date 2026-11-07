@@ -235,3 +235,44 @@ fn groups_follow_the_flags_and_a_list_without_an_enabled_upstream_is_refused() {
         task.await.unwrap();
     });
 }
+
+/// atom: the FakeIP group `nocnfake` is fixed to sing-box. The API refuses to
+/// change it and a list stored in `settings.json` (by hand) is ignored.
+#[test]
+fn the_fakeip_upstream_cannot_be_overridden() {
+    let tree = Tree::new("atom-nocnfake");
+    let port = free_port();
+    config(&tree, "flag cn_fakeip", "flag dns_mode=fakeip", port);
+    std::fs::write(
+        tree.path("webinfo/settings.json"),
+        r#"{"version":1,"upstreams":{"nocnfake":[{"tag":"x1","enabled":true,"protocol":"udp","addr":"udp://192.0.2.1:53"}]}}"#,
+    )
+    .unwrap();
+    let host = HostAssembly::from_config_file(&tree.path("config.yaml")).expect("assembles");
+    host.block_on(async {
+        let bound: BoundHost = host.bind_host().await.expect("binds");
+        let shutdown = TransportCancellation::new();
+        let scope = shutdown.clone();
+        let task = tokio::task::spawn_local(async move {
+            bound.serve(scope).await.expect("clean shutdown");
+        });
+        let effective = json(&api(port, "GET", "/api/v1/upstream/config", "").await.body);
+        let tags = effective["nocnfake"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["tag"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(tags, ["n1"], "{effective}");
+
+        let before = std::fs::read_to_string(tree.path("webinfo/settings.json")).unwrap();
+        let change = r#"{"plugin_tag":"nocnfake","upstreams":[{"tag":"n2","enabled":true,"protocol":"udp","addr":"udp://127.0.0.1:10"}]}"#;
+        let reply = api(port, "POST", "/api/v1/upstream/config", change).await;
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        assert!(reply.body.contains("FakeIP 上游固定"), "{}", reply.body);
+        assert_eq!(std::fs::read_to_string(tree.path("webinfo/settings.json")).unwrap(), before);
+
+        shutdown.cancel();
+        task.await.unwrap();
+    });
+}

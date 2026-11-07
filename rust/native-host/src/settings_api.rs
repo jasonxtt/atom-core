@@ -190,6 +190,9 @@ pub(crate) async fn post_upstream(control: &RuntimeControl, body: &[u8]) -> Repl
     if !current.config.effective_upstreams.contains_key(&tag) {
         return text(404, "upstream tag not found");
     }
+    if tag == crate::edns_directive::FAKEIP_UPSTREAM {
+        return text(400, "FakeIP 上游固定为本机 sing-box，不能修改");
+    }
     for (index, entry) in payload.upstreams.iter().enumerate() {
         if let Err(reason) = entry.validate(index) {
             return text(400, &reason);

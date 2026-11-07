@@ -15,6 +15,7 @@ mod config;
 mod diag;
 mod domain_output;
 mod ecs;
+mod edns_directive;
 mod execution;
 mod external_ui;
 mod local_time;
