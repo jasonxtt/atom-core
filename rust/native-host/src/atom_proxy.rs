@@ -244,7 +244,14 @@ pub(crate) fn check_outbound(outbound: &Map<String, Value>) -> Result<(), Refusa
     Ok(())
 }
 
-/// Outbound fields that are credentials: never shown by the API.
+/// Outbound fields that are credentials: never shown by the API. Checked
+/// against the sing-box v1.14.4 outbound options of the node types:
+/// passwords and user names (socks, http, shadowsocks, trojan, naive,
+/// hysteria2, tuic, anytls, shadowtls, ssh, `obfs.password`), `uuid`
+/// (vmess, vless, tuic), hysteria's `auth` and `auth_str`, ssh and
+/// wireguard keys, TLS `client_key` and REALITY's `short_id` (the server
+/// admits only its listed IDs; `public_key` is public). The generic
+/// `key`, `psk`, `token`, `secret` cover what other types may add.
 const CREDENTIAL_KEYS: &[&str] = &[
     "password",
     "username",
@@ -255,22 +262,46 @@ const CREDENTIAL_KEYS: &[&str] = &[
     "private_key",
     "private_key_passphrase",
     "pre_shared_key",
+    "client_key",
+    "short_id",
+    "key",
+    "psk",
+    "token",
+    "secret",
 ];
 
+/// HTTP header names that carry credentials (`headers` of http, ws and h2
+/// transports, naive's `extra_headers`).
+const CREDENTIAL_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie"];
+
 /// A node's outbound for the API: every credential field removed, at any
-/// depth (`obfs.password`, wireguard `peers[].pre_shared_key`, ...).
+/// depth (`obfs.password`, wireguard `peers[].pre_shared_key`, ...), plus
+/// hysteria's string `obfs` (its obfuscation password) and credential
+/// headers.
 pub(crate) fn public_outbound(outbound: &Map<String, Value>) -> Map<String, Value> {
-    fn clean(value: &Value) -> Value {
+    fn clean(key: &str, value: &Value) -> Value {
         match value {
+            Value::Object(map) if key == "headers" || key == "extra_headers" => Value::Object(
+                map.iter()
+                    .filter(|(name, _)| {
+                        !CREDENTIAL_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+                    })
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            ),
             Value::Object(map) => Value::Object(public_outbound(map)),
-            Value::Array(items) => Value::Array(items.iter().map(clean).collect()),
+            Value::Array(items) => Value::Array(items.iter().map(|item| clean("", item)).collect()),
             other => other.clone(),
         }
     }
     outbound
         .iter()
-        .filter(|(key, _)| !CREDENTIAL_KEYS.contains(&key.as_str()))
-        .map(|(key, value)| (key.clone(), clean(value)))
+        .filter(|(key, value)| {
+            let hidden = CREDENTIAL_KEYS.contains(&key.as_str())
+                || (key.as_str() == "obfs" && value.is_string());
+            !hidden
+        })
+        .map(|(key, value)| (key.clone(), clean(key, value)))
         .collect()
 }
 
@@ -757,10 +788,22 @@ pub(crate) fn load(root: &Path, reserved: &[u16]) -> Result<ProxyState, String> 
     Ok(state)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: make the next [`save`] on this thread fail.
+    pub(crate) static FAIL_NEXT_SAVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Writes the state; the file holds node credentials, so it is owner-only
+/// (0600).
 pub(crate) fn save(root: &Path, state: &ProxyState) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_SAVE.with(|fail| fail.replace(false)) {
+        return Err(std::io::Error::other("injected save failure"));
+    }
     let mut bytes = serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?;
     bytes.push(b'\n');
-    crate::runtime_snapshot::write_durably(&root.join(PROXY_FILE), &bytes)
+    crate::runtime_snapshot::write_durably_private(&root.join(PROXY_FILE), &bytes)
 }
 
 #[cfg(test)]

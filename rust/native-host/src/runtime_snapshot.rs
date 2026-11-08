@@ -254,6 +254,16 @@ impl FileCommit {
 /// and the running generation must agree with the file that now holds the
 /// new bytes.
 pub(crate) fn write_durably(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_durably_with(path, bytes, false)
+}
+
+/// [`write_durably`] for a file holding credentials (atom fork): the
+/// temporary file, and so the renamed one, is owner-only (0600).
+pub(crate) fn write_durably_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_durably_with(path, bytes, true)
+}
+
+fn write_durably_with(path: &std::path::Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
     use std::io::Write as _;
     let parent = path
         .parent()
@@ -275,7 +285,22 @@ pub(crate) fn write_durably(path: &std::path::Path, bytes: &[u8]) -> std::io::Re
     name.push(format!(".tmp-{}", std::process::id()));
     let temporary = parent.join(name);
     let written = (|| {
-        let mut file = std::fs::File::create(&temporary)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        #[cfg(unix)]
+        if private {
+            // A leftover temporary file keeps its mode through `open`.
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(not(unix))]
+        let _ = private;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&temporary, path)

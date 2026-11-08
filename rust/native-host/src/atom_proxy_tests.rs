@@ -276,7 +276,58 @@ fn credentials_never_leave_through_the_view() {
         json!({
             "type": "wireguard", "peers": [{"server": "a", "public_key": "pub"}],
             "obfs": {"type": "salamander"},
-            "tls": {"enabled": true, "reality": {"public_key": "pk", "short_id": "01"}}
+            "tls": {"enabled": true, "reality": {"public_key": "pk"}}
         })
     );
+}
+
+#[test]
+fn tls_keys_reality_ids_hysteria_obfs_and_auth_headers_are_hidden() {
+    let outbound = json!({
+        "type": "hysteria", "obfs": "secret-obfs", "auth_str": "a",
+        "tls": {"enabled": true, "client_certificate": ["CERT"], "client_key": ["KEY"], "client_key_path": "/k.pem",
+                "reality": {"enabled": true, "public_key": "pk", "short_id": "01"}},
+        "transport": {"type": "ws", "headers": {"Host": "h.example", "Authorization": "Basic x", "cookie": "c"}},
+        "extra_headers": {"Proxy-Authorization": "Basic y", "X-Other": "z"}
+    });
+    let shown = Value::Object(public_outbound(outbound.as_object().unwrap()));
+    assert_eq!(
+        shown,
+        json!({
+            "type": "hysteria",
+            "tls": {"enabled": true, "client_certificate": ["CERT"], "client_key_path": "/k.pem",
+                    "reality": {"enabled": true, "public_key": "pk"}},
+            "transport": {"type": "ws", "headers": {"Host": "h.example"}},
+            "extra_headers": {"X-Other": "z"}
+        })
+    );
+    // hysteria2's obfs is an object: only its password goes.
+    let hy2 = json!({"type": "hysteria2", "obfs": {"type": "salamander", "password": "p"}});
+    assert_eq!(
+        Value::Object(public_outbound(hy2.as_object().unwrap()))["obfs"],
+        json!({"type": "salamander"})
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_state_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = std::env::temp_dir().join(format!("atom-proxy-mode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    save(&root, &ProxyState::default()).unwrap();
+    let path = root.join(PROXY_FILE);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    save(&root, &ProxyState::default()).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+        .collect();
+    assert!(leftovers.is_empty());
+    let _ = std::fs::remove_dir_all(&root);
 }

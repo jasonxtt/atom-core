@@ -39,7 +39,7 @@ impl FakeSingbox {
         std::fs::write(
             &reload,
             format!(
-                "#!/bin/sh\nd={}\necho x >> $d/reloads\nif [ -f $d/config.json ] && grep -q BADRELOAD $d/config.json; then echo 'reload failed' >&2; exit 1; fi\nif [ -f $d/config.json ]; then cp $d/config.json $d/running.json; else rm -f $d/running.json; fi\n",
+                "#!/bin/sh\nd={}\necho x >> $d/reloads\nif [ -f $d/slow ]; then sleep 1; fi\nif [ -f $d/config.json ] && grep -q BADRELOAD $d/config.json; then echo 'reload failed' >&2; exit 1; fi\nif [ -f $d/config.json ]; then cp $d/config.json $d/running.json; else rm -f $d/running.json; fi\n",
                 dir.join("sb").display()
             ),
         )
@@ -189,12 +189,12 @@ fn config(secret: &str, marker: &str) -> Vec<u8> {
 fn apply_writes_reloads_and_confirms_with_the_new_secret() {
     let fake = FakeSingbox::start("ok");
     let first = config("s1", "one");
-    apply_blocking(&fake.host, &first, "s1").unwrap();
+    apply_blocking(&fake.host, &first, "s1", &[], &[]).unwrap();
     assert_eq!(fake.live().unwrap(), first);
     assert_eq!(fake.running().unwrap(), first);
     assert!(!fake.host.dir.join(NEXT_FILE).exists());
     let second = config("s2", "two");
-    apply_blocking(&fake.host, &second, "s2").unwrap();
+    apply_blocking(&fake.host, &second, "s2", &[], &[]).unwrap();
     assert_eq!(fake.running().unwrap(), second);
     assert_eq!(fake.reload_count(), 2);
 }
@@ -203,9 +203,9 @@ fn apply_writes_reloads_and_confirms_with_the_new_secret() {
 fn a_refused_check_touches_nothing() {
     let fake = FakeSingbox::start("check");
     let first = config("s1", "one");
-    apply_blocking(&fake.host, &first, "s1").unwrap();
+    apply_blocking(&fake.host, &first, "s1", &[], &[]).unwrap();
     let bad = config("s2", "BADCHECK");
-    let error = apply_blocking(&fake.host, &bad, "s2").unwrap_err();
+    let error = apply_blocking(&fake.host, &bad, "s2", &[], &[]).unwrap_err();
     assert!(
         matches!(&error, ApplyError::Check(message) if message.contains("bad outbound")),
         "{error}"
@@ -219,8 +219,8 @@ fn a_refused_check_touches_nothing() {
 fn a_failed_reload_rolls_back() {
     let fake = FakeSingbox::start("reload");
     let first = config("s1", "one");
-    apply_blocking(&fake.host, &first, "s1").unwrap();
-    let error = apply_blocking(&fake.host, &config("s2", "BADRELOAD"), "s2").unwrap_err();
+    apply_blocking(&fake.host, &first, "s1", &[], &[]).unwrap();
+    let error = apply_blocking(&fake.host, &config("s2", "BADRELOAD"), "s2", &[], &[]).unwrap_err();
     let message = error.to_string();
     assert!(matches!(error, ApplyError::Runtime(_)));
     assert!(
@@ -235,8 +235,8 @@ fn a_failed_reload_rolls_back() {
 fn an_unconfirmed_reload_rolls_back() {
     let fake = FakeSingbox::start("confirm");
     let first = config("s1", "one");
-    apply_blocking(&fake.host, &first, "s1").unwrap();
-    let error = apply_blocking(&fake.host, &config("s2", "NOCONFIRM"), "s2").unwrap_err();
+    apply_blocking(&fake.host, &first, "s1", &[], &[]).unwrap();
+    let error = apply_blocking(&fake.host, &config("s2", "NOCONFIRM"), "s2", &[], &[]).unwrap_err();
     let message = error.to_string();
     assert!(
         message.contains("没有确认") && message.contains("已回滚到旧配置"),
@@ -249,7 +249,7 @@ fn an_unconfirmed_reload_rolls_back() {
 #[test]
 fn the_first_failed_apply_leaves_no_file() {
     let fake = FakeSingbox::start("first");
-    let error = apply_blocking(&fake.host, &config("s1", "BADRELOAD"), "s1").unwrap_err();
+    let error = apply_blocking(&fake.host, &config("s1", "BADRELOAD"), "s1", &[], &[]).unwrap_err();
     assert!(error.to_string().contains("之前没有配置"), "{error}");
     assert!(fake.live().is_none());
 }
@@ -258,7 +258,7 @@ fn the_first_failed_apply_leaves_no_file() {
 fn a_missing_binary_writes_nothing() {
     let mut fake = FakeSingbox::start("nobinary");
     fake.host.binary = fake.dir.join("absent");
-    let error = apply_blocking(&fake.host, &config("s1", "one"), "s1").unwrap_err();
+    let error = apply_blocking(&fake.host, &config("s1", "one"), "s1", &[], &[]).unwrap_err();
     assert!(error.to_string().contains("找不到 sing-box"), "{error}");
     assert!(!fake.host.dir.join(NEXT_FILE).exists());
 }
@@ -266,7 +266,7 @@ fn a_missing_binary_writes_nothing() {
 #[test]
 fn clash_select_and_delay_go_through_the_api() {
     let fake = FakeSingbox::start("clash");
-    apply_blocking(&fake.host, &config("s1", "one"), "s1").unwrap();
+    apply_blocking(&fake.host, &config("s1", "one"), "s1", &[], &[]).unwrap();
     select(&fake.host, "s1", "g-12345678", "n-00000001").unwrap();
     assert_eq!(
         fake.selects.lock().unwrap().as_slice(),
@@ -471,4 +471,61 @@ fn the_default_resolver_is_the_first_plain_domestic_upstream() {
         default_resolver(&[entry("https://dns.example/dns-query", "", true)]),
         None
     );
+}
+
+#[test]
+fn selections_are_synced_after_the_reload_and_restored_on_rollback() {
+    let fake = FakeSingbox::start("selections");
+    let chosen = vec![
+        ("g-default".to_owned(), "n-00000002".to_owned()),
+        ("final".to_owned(), "g-default".to_owned()),
+    ];
+    apply_blocking(&fake.host, &config("s1", "one"), "s1", &chosen, &[]).unwrap();
+    assert_eq!(
+        fake.selects.lock().unwrap().as_slice(),
+        &[
+            (
+                "g-default".to_owned(),
+                r#"{"name":"n-00000002"}"#.to_owned()
+            ),
+            ("final".to_owned(), r#"{"name":"g-default"}"#.to_owned()),
+        ]
+    );
+    fake.selects.lock().unwrap().clear();
+    let old_chosen = vec![("g-default".to_owned(), "n-00000001".to_owned())];
+    apply_blocking(
+        &fake.host,
+        &config("s2", "BADRELOAD"),
+        "s2",
+        &chosen,
+        &old_chosen,
+    )
+    .unwrap_err();
+    assert_eq!(
+        fake.selects.lock().unwrap().as_slice(),
+        &[(
+            "g-default".to_owned(),
+            r#"{"name":"n-00000001"}"#.to_owned()
+        )],
+        "the old instance gets the old choices back"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_configuration_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fake = FakeSingbox::start("mode");
+    std::fs::write(fake.host.config_path(), b"{}").unwrap();
+    std::fs::set_permissions(
+        fake.host.config_path(),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    apply_blocking(&fake.host, &config("s1", "one"), "s1", &[], &[]).unwrap();
+    let mode = std::fs::metadata(fake.host.config_path())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
 }

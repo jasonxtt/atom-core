@@ -363,7 +363,7 @@ pub(crate) fn check(host: &Host, bytes: &[u8]) -> Result<(), String> {
         return Err(format!("找不到 sing-box 程序 {}", host.binary.display()));
     }
     let next = host.dir.join(NEXT_FILE);
-    crate::runtime_snapshot::write_durably(&next, bytes)
+    write_private(&next, bytes)
         .map_err(|error| format!("写入 {} 失败: {error}", next.display()))?;
     let command = vec![
         host.binary.display().to_string(),
@@ -385,7 +385,7 @@ pub(crate) fn check(host: &Host, bytes: &[u8]) -> Result<(), String> {
 fn install(host: &Host, bytes: Option<&[u8]>) -> Result<(), String> {
     let live = host.config_path();
     match bytes {
-        Some(bytes) => crate::runtime_snapshot::write_durably(&live, bytes),
+        Some(bytes) => write_private(&live, bytes),
         None => match std::fs::remove_file(&live) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
@@ -441,9 +441,32 @@ impl std::fmt::Display for ApplyError {
     }
 }
 
-/// Applies `bytes` (secret `secret`): check, write, reload, confirm; on a
-/// failure after the write, the old file (or none) is restored and reloaded.
-pub(crate) fn apply_blocking(host: &Host, bytes: &[u8], secret: &str) -> Result<(), ApplyError> {
+/// The configuration file holds node credentials: written owner-only
+/// (0600), the temporary file included.
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    crate::runtime_snapshot::write_durably_private(path, bytes)
+}
+
+/// Switches each selector to its chosen member (the running instance may
+/// have kept a choice from `cache.db` instead of `default`).
+fn sync_selections(host: &Host, secret: &str, chosen: &[(String, String)]) -> Result<(), String> {
+    for (tag, member) in chosen {
+        select(host, secret, tag, member)
+            .map_err(|error| format!("同步 {tag} 的选择失败: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Applies `bytes` (secret `secret`): check, write, reload, confirm, then
+/// the selections `chosen`; on a failure after the write, the old file (or
+/// none) is restored, reloaded and given back the selections `old_chosen`.
+pub(crate) fn apply_blocking(
+    host: &Host,
+    bytes: &[u8],
+    secret: &str,
+    chosen: &[(String, String)],
+    old_chosen: &[(String, String)],
+) -> Result<(), ApplyError> {
     check(host, bytes).map_err(ApplyError::Check)?;
     let live = host.config_path();
     let old = match std::fs::read(&live) {
@@ -459,18 +482,22 @@ pub(crate) fn apply_blocking(host: &Host, bytes: &[u8], secret: &str) -> Result<
     };
     std::fs::rename(host.dir.join(NEXT_FILE), &live)
         .map_err(|error| ApplyError::Runtime(format!("替换 {} 失败: {error}", live.display())))?;
-    let failure = match reload(host).and_then(|()| confirm(host, secret)) {
+    let failure = match reload(host)
+        .and_then(|()| confirm(host, secret))
+        .and_then(|()| sync_selections(host, secret, chosen))
+    {
         Ok(()) => return Ok(()),
         Err(failure) => failure,
     };
     Err(ApplyError::Runtime(format!(
         "{failure}；{}",
-        rollback(host, old.as_deref())
+        rollback(host, old.as_deref(), old_chosen)
     )))
 }
 
-/// Puts `old` back after a failed application and says how that went.
-pub(crate) fn rollback(host: &Host, old: Option<&[u8]>) -> String {
+/// Puts `old` back after a failed application (with the selections
+/// `old_chosen`) and says how that went.
+pub(crate) fn rollback(host: &Host, old: Option<&[u8]>, old_chosen: &[(String, String)]) -> String {
     if let Err(error) = install(host, old) {
         return format!("回滚失败: {error}");
     }
@@ -480,7 +507,9 @@ pub(crate) fn rollback(host: &Host, old: Option<&[u8]>) -> String {
         return "已删除新配置（之前没有配置）".to_owned();
     };
     match reload(host).and_then(|()| match secret_of(old) {
-        Some(secret) => confirm(host, &secret),
+        Some(secret) => {
+            confirm(host, &secret).and_then(|()| sync_selections(host, &secret, old_chosen))
+        }
         None => Ok(()),
     }) {
         Ok(()) => "已回滚到旧配置".to_owned(),

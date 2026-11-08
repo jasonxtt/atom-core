@@ -286,3 +286,34 @@ fn socks_links_and_clash_socks5() {
             .contains("TLS")
     );
 }
+
+#[test]
+fn legacy_shadowsocks_base64_may_contain_a_slash() {
+    // codex's example: "aes-128-gcm:???@proxy.example:443".
+    let (_, out) = one("ss://YWVzLTEyOC1nY206Pz8/QHByb3h5LmV4YW1wbGU6NDQz");
+    assert_eq!(out["method"], "aes-128-gcm");
+    assert_eq!(out["password"], "???");
+    assert_eq!(out["server"], "proxy.example");
+    assert_eq!(out["server_port"], 443);
+    // A SIP002-style `/` before the query still works.
+    let legacy = base64::engine::general_purpose::STANDARD.encode("aes-128-gcm:pw@1.2.3.4:8388");
+    let (_, out) = one(&format!("ss://{legacy}/?plugin=#x"));
+    assert_eq!(out["password"], "pw");
+}
+
+#[test]
+fn yaml_credentials_are_kept_verbatim() {
+    let nodes = from_clash_yaml(
+        "- {name: t, type: trojan, server: ' t.example ', port: 443, password: ' se cret '}\n- {name: s, type: socks5, server: s, port: 1, username: ' u', password: 'p '}\n- {name: h, type: hysteria2, server: h, port: 1, password: ' x', obfs: salamander, obfs-password: ' o '}",
+    )
+    .unwrap();
+    assert_eq!(nodes[0].1["password"], " se cret ");
+    assert_eq!(
+        nodes[0].1["server"], "t.example",
+        "non-credential fields are still trimmed"
+    );
+    assert_eq!(nodes[1].1["username"], " u");
+    assert_eq!(nodes[1].1["password"], "p ");
+    assert_eq!(nodes[2].1["password"], " x");
+    assert_eq!(nodes[2].1["obfs"]["password"], " o ");
+}

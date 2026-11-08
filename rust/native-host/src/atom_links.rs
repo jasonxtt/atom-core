@@ -527,11 +527,26 @@ fn ss_link(link: &str) -> Result<Imported, String> {
     let sip002 = if rest.contains('@') {
         rest.to_owned()
     } else {
-        let (encoded, tail) = match rest.find(['/', '?']) {
+        // Standard base64 may contain `/`: only `?` starts the tail. A `/`
+        // right before `?` is most likely the SIP002-style path, so it is
+        // tried without it first; either way the decoded text must name a
+        // server.
+        let (encoded, tail) = match rest.find('?') {
             Some(at) => rest.split_at(at),
             None => (rest, ""),
         };
-        let decoded = base64_text(encoded).ok_or_else(|| "ss 链接不是 base64".to_owned())?;
+        let stripped = encoded.strip_suffix('/');
+        let candidates = if tail.is_empty() {
+            [Some(encoded), stripped]
+        } else {
+            [stripped, Some(encoded)]
+        };
+        let decoded = candidates
+            .into_iter()
+            .flatten()
+            .filter_map(base64_text)
+            .find(|text| text.contains('@'))
+            .ok_or_else(|| "ss 链接不是 base64".to_owned())?;
         let (userinfo, server) = decoded
             .rsplit_once('@')
             .ok_or_else(|| "ss 链接缺少服务器地址".to_owned())?;
@@ -615,6 +630,15 @@ fn text(proxy: &Map<String, Value>, key: &str) -> String {
         Some(Value::String(value)) => value.trim().to_owned(),
         Some(Value::Number(value)) => value.to_string(),
         Some(Value::Bool(value)) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// A credential field verbatim (no trimming: spaces may be part of it).
+fn raw(proxy: &Map<String, Value>, key: &str) -> String {
+    match proxy.get(key) {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Number(value)) => value.to_string(),
         _ => String::new(),
     }
 }
@@ -709,7 +733,7 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
             }
             let mut outbound = base("shadowsocks", &server, port)?;
             outbound.insert("method".into(), json!(text(proxy, "cipher")));
-            outbound.insert("password".into(), json!(text(proxy, "password")));
+            outbound.insert("password".into(), json!(raw(proxy, "password")));
             let plugin = text(proxy, "plugin");
             if !plugin.is_empty() {
                 let opts = section(proxy, "plugin-opts");
@@ -744,7 +768,7 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         }
         "vmess" => {
             let mut outbound = base("vmess", &server, port)?;
-            outbound.insert("uuid".into(), json!(text(proxy, "uuid")));
+            outbound.insert("uuid".into(), json!(raw(proxy, "uuid")));
             let cipher = text(proxy, "cipher");
             outbound.insert(
                 "security".into(),
@@ -769,7 +793,7 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         }
         "vless" => {
             let mut outbound = base("vless", &server, port)?;
-            outbound.insert("uuid".into(), json!(text(proxy, "uuid")));
+            outbound.insert("uuid".into(), json!(raw(proxy, "uuid")));
             let flow = text(proxy, "flow");
             if !flow.is_empty() {
                 outbound.insert("flow".into(), json!(flow));
@@ -786,14 +810,14 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         }
         "trojan" => {
             let mut outbound = base("trojan", &server, port)?;
-            outbound.insert("password".into(), json!(text(proxy, "password")));
+            outbound.insert("password".into(), json!(raw(proxy, "password")));
             put(&mut outbound, "tls", clash_tls(proxy, true).value());
             put(&mut outbound, "transport", clash_transport(proxy)?);
             outbound
         }
         "hysteria2" => {
             let mut outbound = base("hysteria2", &server, port)?;
-            let password = text(proxy, "password");
+            let password = raw(proxy, "password");
             if !password.is_empty() {
                 outbound.insert("password".into(), json!(password));
             }
@@ -801,7 +825,7 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
             if !obfs.is_empty() {
                 outbound.insert(
                     "obfs".into(),
-                    json!({"type": obfs, "password": text(proxy, "obfs-password")}),
+                    json!({"type": obfs, "password": raw(proxy, "obfs-password")}),
                 );
             }
             put(&mut outbound, "tls", clash_tls(proxy, true).value());
@@ -809,8 +833,8 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         }
         "tuic" => {
             let mut outbound = base("tuic", &server, port)?;
-            outbound.insert("uuid".into(), json!(text(proxy, "uuid")));
-            let password = text(proxy, "password");
+            outbound.insert("uuid".into(), json!(raw(proxy, "uuid")));
+            let password = raw(proxy, "password");
             if !password.is_empty() {
                 outbound.insert("password".into(), json!(password));
             }
@@ -827,7 +851,7 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         }
         "anytls" => {
             let mut outbound = base("anytls", &server, port)?;
-            outbound.insert("password".into(), json!(text(proxy, "password")));
+            outbound.insert("password".into(), json!(raw(proxy, "password")));
             put(&mut outbound, "tls", clash_tls(proxy, true).value());
             outbound
         }
@@ -835,7 +859,7 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
             let mut outbound = base("socks", &server, port)?;
             outbound.insert("version".into(), json!("5"));
             for key in ["username", "password"] {
-                let value = text(proxy, key);
+                let value = raw(proxy, key);
                 if !value.is_empty() {
                     outbound.insert(key.into(), json!(value));
                 }

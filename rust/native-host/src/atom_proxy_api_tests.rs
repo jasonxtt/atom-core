@@ -8,6 +8,7 @@ struct Api {
     assembly: HostAssembly,
     root: std::path::PathBuf,
     fake: FakeSingbox,
+    yaml: String,
 }
 
 impl Api {
@@ -49,7 +50,32 @@ plugins:
             assembly,
             root,
             fake,
+            yaml,
         }
+    }
+
+    /// A request as a future, to run two at once.
+    async fn request(&self, method: &str, target: &str, body: &str) -> (u16, Value) {
+        let reply = crate::atom_rules_api::handle(
+            None,
+            self.assembly.config(),
+            self.assembly.cache(),
+            method,
+            target,
+            body.as_bytes(),
+            &TransportCancellation::new(),
+        )
+        .await
+        .expect("an atom route");
+        let value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+        (reply.status, value)
+    }
+
+    /// Whether the files on disk make a configuration that loads.
+    fn reloads_from_disk(&self) -> Result<(), String> {
+        crate::config::compile_yaml_with_base(&self.yaml, &self.root)
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
     }
 
     fn call(&self, method: &str, target: &str, body: &str) -> (u16, Value) {
@@ -509,4 +535,210 @@ fn node_views_hide_credentials_and_edits_replace_the_connection() {
     assert_eq!(status, 404);
     let (status, _) = api.call("POST", &format!("/api/v1/atom/groups/{hk}/delay"), "{}");
     assert_eq!(status, 404);
+}
+
+fn fail_next_save() {
+    crate::atom_proxy::FAIL_NEXT_SAVE.with(|fail| fail.set(true));
+}
+
+#[test]
+fn a_failed_save_keeps_other_changes_out_until_sing_box_is_compensated() {
+    let api = Api::new("compensate");
+    let (status, _) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    assert_eq!(status, 201);
+    let before = api.fake.live().unwrap();
+    let reloads = api.fake.reload_count();
+    let slow = api.fake.host.dir.join("slow");
+    std::fs::write(&slow, b"").unwrap();
+    fail_next_save();
+    let (first, second) = api.assembly.block_on(async {
+        let first = api.request(
+            "POST",
+            "/api/v1/atom/groups",
+            r#"{"name": "g", "type": "selector"}"#,
+        );
+        let second = async {
+            // The second reload of the first change is its compensation.
+            while api.fake.reload_count() < reloads + 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            api.request(
+                "POST",
+                "/api/v1/atom/nodes",
+                r#"{"format": "link", "content": "trojan://x@z.example:1"}"#,
+            )
+            .await
+        };
+        tokio::join!(first, second)
+    });
+    std::fs::remove_file(&slow).unwrap();
+    assert_eq!(first.0, 500, "{}", first.1);
+    let message = first.1["error"].as_str().unwrap();
+    assert!(
+        message.contains("injected save failure") && message.contains("已回滚到旧配置"),
+        "{message}"
+    );
+    assert_eq!(
+        second.0, 409,
+        "a change during the compensation is refused: {}",
+        second.1
+    );
+    assert_eq!(api.fake.live().unwrap(), before);
+    assert_eq!(api.fake.running().unwrap(), before);
+    let (_, nodes) = api.call("GET", "/api/v1/atom/nodes", "");
+    assert_eq!(nodes["nodes"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_confirmed_group_deletion_writes_rules_first_and_undoes_them_on_failure() {
+    let api = Api::new("delete-order");
+    let (_, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
+    let (_, created) = api.call(
+        "POST",
+        "/api/v1/atom/groups",
+        &format!(r#"{{"name": "G", "type": "selector", "members": ["{hk}"]}}"#),
+    );
+    let group = created["group"]["id"].as_str().unwrap().to_owned();
+    let (status, _) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        &format!(r#"{{"match": {{"suffix": ["a.example"]}}, "action": {{"type": "proxy", "group_id": "{group}"}}}}"#),
+    );
+    assert_eq!(status, 201);
+    let rules_file = api.root.join(crate::atom_rules::RULES_FILE);
+    let proxy_file = api.root.join(crate::atom_proxy::PROXY_FILE);
+    let (old_rules, old_proxy) = (
+        std::fs::read(&rules_file).unwrap(),
+        std::fs::read(&proxy_file).unwrap(),
+    );
+
+    // The group file write fails after the rules were written: they are put back.
+    fail_next_save();
+    let (status, failed) = api.call(
+        "DELETE",
+        &format!("/api/v1/atom/groups/{group}?confirm=true"),
+        "",
+    );
+    assert_eq!(status, 500, "{failed}");
+    assert!(
+        failed["error"].as_str().unwrap().contains("规则文件已恢复"),
+        "{failed}"
+    );
+    assert_eq!(std::fs::read(&rules_file).unwrap(), old_rules);
+    assert_eq!(std::fs::read(&proxy_file).unwrap(), old_proxy);
+    let (_, rules) = api.call("GET", "/api/v1/atom/rules", "");
+    assert_eq!(
+        rules["rules"].as_array().unwrap().last().unwrap()["action"]["group_id"],
+        group.as_str()
+    );
+    api.reloads_from_disk().unwrap();
+
+    // A crash between the two writes leaves new rules beside the old groups:
+    // that loads. The other order (old rules, new groups) would not.
+    let (status, _) = api.call(
+        "DELETE",
+        &format!("/api/v1/atom/groups/{group}?confirm=true"),
+        "",
+    );
+    assert_eq!(status, 200);
+    let (new_rules, new_proxy) = (
+        std::fs::read(&rules_file).unwrap(),
+        std::fs::read(&proxy_file).unwrap(),
+    );
+    std::fs::write(&proxy_file, &old_proxy).unwrap();
+    api.reloads_from_disk()
+        .expect("new rules with the old groups load");
+    std::fs::write(&rules_file, &old_rules).unwrap();
+    std::fs::write(&proxy_file, &new_proxy).unwrap();
+    let refused = api.reloads_from_disk().unwrap_err();
+    assert!(refused.contains("不存在"), "{refused}");
+    std::fs::write(&rules_file, &new_rules).unwrap();
+}
+
+#[test]
+fn a_reload_brings_the_running_selection_to_the_saved_one() {
+    let api = Api::new("cached-selection");
+    let (_, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
+    let jp = imported["nodes"][1]["id"].as_str().unwrap().to_owned();
+    let members = format!(r#""members": ["{hk}", "{jp}"]"#);
+    let (status, _) = api.call(
+        "PUT",
+        "/api/v1/atom/groups/g-default",
+        &format!(r#"{{"name": "默认代理", "type": "selector", {members}}}"#),
+    );
+    assert_eq!(status, 200);
+    // jp through the Clash API: sing-box's cache.db now remembers jp.
+    let (status, _) = api.call(
+        "POST",
+        "/api/v1/atom/groups/g-default/select",
+        &format!(r#"{{"name": "{jp}"}}"#),
+    );
+    assert_eq!(status, 200);
+    // Back to hk by editing the group: a reload, after which the cached jp
+    // would win over `default` unless the selection is pushed again.
+    let (status, _) = api.call(
+        "PUT",
+        "/api/v1/atom/groups/g-default",
+        &format!(r#"{{"name": "默认代理", "type": "selector", {members}, "selected": "{hk}"}}"#),
+    );
+    assert_eq!(status, 200);
+    let last = api
+        .fake
+        .selects
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(tag, _)| tag == "g-default")
+        .cloned()
+        .unwrap();
+    assert_eq!(last.1, format!(r#"{{"name":"{hk}"}}"#));
+}
+
+#[test]
+fn a_select_that_cannot_be_saved_is_switched_back() {
+    let api = Api::new("select-undo");
+    let (_, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
+    let jp = imported["nodes"][1]["id"].as_str().unwrap().to_owned();
+    let (status, _) = api.call(
+        "PUT",
+        "/api/v1/atom/groups/g-default",
+        &format!(r#"{{"name": "默认代理", "type": "selector", "members": ["{hk}", "{jp}"]}}"#),
+    );
+    assert_eq!(status, 200);
+    let before = api.fake.live().unwrap();
+    fail_next_save();
+    let (status, failed) = api.call(
+        "POST",
+        "/api/v1/atom/groups/g-default/select",
+        &format!(r#"{{"name": "{jp}"}}"#),
+    );
+    assert_eq!(status, 500, "{failed}");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("已恢复原来的选择"),
+        "{failed}"
+    );
+    let selects = api.fake.selects.lock().unwrap().clone();
+    let tail: Vec<&str> = selects
+        .iter()
+        .rev()
+        .take(2)
+        .map(|(_, body)| body.as_str())
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            format!(r#"{{"name":"{hk}"}}"#),
+            format!(r#"{{"name":"{jp}"}}"#)
+        ]
+    );
+    assert_eq!(api.fake.live().unwrap(), before, "the file is back");
+    let (_, groups) = api.call("GET", "/api/v1/atom/groups/g-default", "");
+    assert_eq!(groups["now"], hk.as_str());
 }

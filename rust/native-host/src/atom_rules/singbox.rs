@@ -5,12 +5,15 @@
 //! A transaction: validate the next rules and proxy state → generate the
 //! sing-box configuration → if it differs from the running one, apply it
 //! (check, write, reload, confirm; rollback on failure) → write the atom
-//! files → publish. While it runs every other change of this owner is
-//! refused with 409 (writes do not queue), and only one application runs in
-//! the process. A configuration that would come out the same (a rename) is
-//! not applied again.
+//! files → publish. From the application until the atom files are written
+//! (or sing-box is compensated after a failed write) the change holds both
+//! exclusions ([`Exclusive`]): every other change of this owner is refused
+//! with 409 (writes do not queue), and only one application runs in the
+//! process. A configuration that would come out the same (a rename) is not
+//! applied again.
 
-use std::sync::Mutex;
+use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -95,19 +98,55 @@ fn apply_refusal(error: ApplyError) -> Refusal {
     }
 }
 
-/// Runs a blocking application with the process-wide guard, recording the
-/// outcome inside the blocking task (it completes even if the caller is
-/// dropped).
+/// A change's exclusion, held from its application until its files are
+/// written or sing-box is compensated: the process-wide [`ApplyGuard`] and
+/// this owner's busy flag. Blocking work takes a clone of the guard, so the
+/// process stays excluded until that work ends even if the request is
+/// dropped; the busy flag is cleared on drop.
+struct Exclusive<'a> {
+    guard: Arc<ApplyGuard>,
+    busy: &'a Cell<bool>,
+}
+
+impl Drop for Exclusive<'_> {
+    fn drop(&mut self) {
+        self.busy.set(false);
+    }
+}
+
+/// `(selector tag, chosen member)` pairs.
+type Selections = Vec<(String, String)>;
+
+/// The selections sing-box must run with `state`: every selector group with
+/// members, and Final. A selector prefers the choice remembered in
+/// `cache.db` over its `default`, so a reload alone may keep an older one.
+fn selections(state: &ProxyState) -> Selections {
+    let mut chosen: Vec<(String, String)> = state
+        .groups
+        .iter()
+        .filter(|group| group.kind == atom_proxy::GroupKind::Selector && !group.members.is_empty())
+        .filter_map(|group| Some((group.id.clone(), state.selection(&group.id)?)))
+        .collect();
+    if !state.final_group.members.is_empty() {
+        chosen.push((FINAL.to_owned(), state.final_group.selected.clone()));
+    }
+    chosen
+}
+
+/// Runs a blocking application (with the selections of `next`, and those
+/// of `current` for a rollback), recording the outcome inside the blocking
+/// task.
 async fn run_apply(
-    guard: ApplyGuard,
+    guard: Arc<ApplyGuard>,
     host: Host,
     bytes: Vec<u8>,
     secret: String,
+    chosen: (Selections, Selections),
     trigger: String,
 ) -> Result<(), ApplyError> {
     tokio::task::spawn_blocking(move || {
         let _guard = guard;
-        let result = sb::apply_blocking(&host, &bytes, &secret);
+        let result = sb::apply_blocking(&host, &bytes, &secret, &chosen.0, &chosen.1);
         record(
             &trigger,
             true,
@@ -128,6 +167,19 @@ impl AtomRules {
 
     pub(crate) fn proxy_host(&self) -> Option<&Host> {
         self.proxy.as_ref().map(|proxy| &proxy.host)
+    }
+
+    /// Takes both exclusions (409 when either is held).
+    fn exclusive(&self) -> Result<Exclusive<'_>, Refusal> {
+        if self.busy.get() {
+            return Err(busy());
+        }
+        let guard = ApplyGuard::try_begin().ok_or_else(busy)?;
+        self.busy.set(true);
+        Ok(Exclusive {
+            guard: Arc::new(guard),
+            busy: &self.busy,
+        })
     }
 
     /// Takes the default resolver from AtomDNS's effective upstreams.
@@ -249,46 +301,51 @@ impl AtomRules {
             None => false,
         };
         let applied = !in_memory && !unchanged;
-        if applied {
-            let guard = ApplyGuard::try_begin().ok_or_else(busy)?;
+        let current_proxy = owner.state.borrow().clone();
+        let exclusive = if applied {
+            let exclusive = self.exclusive()?;
             let secret = sb::new_secret();
             let bytes = self.generate(&host, &next_proxy, &next_rules.rules, &secret)?;
-            self.busy.set(true);
-            let result = run_apply(guard, host.clone(), bytes, secret, trigger.to_owned()).await;
-            self.busy.set(false);
-            result.map_err(apply_refusal)?;
-        }
+            run_apply(
+                Arc::clone(&exclusive.guard),
+                host.clone(),
+                bytes,
+                secret,
+                (selections(&next_proxy), selections(&current_proxy)),
+                trigger.to_owned(),
+            )
+            .await
+            .map_err(apply_refusal)?;
+            Some(exclusive)
+        } else {
+            None
+        };
         if !in_memory {
-            let old_proxy = owner.state.borrow().clone();
-            let saved = (|| {
-                if proxy.is_some() {
-                    atom_proxy::save(&self.root, &next_proxy)?;
-                }
-                if rules.is_some() {
-                    if let Err(error) = self.write_rules_file(&next_rules) {
-                        if proxy.is_some() {
-                            let _ = atom_proxy::save(&self.root, &old_proxy);
-                        }
-                        return Err(error);
-                    }
-                }
-                Ok::<(), std::io::Error>(())
-            })();
-            if let Err(error) = saved {
-                let restored = if applied {
-                    let old = live.clone();
-                    tokio::task::spawn_blocking(move || sb::rollback(&host, old.as_deref()))
+            if let Err(message) = self.save_both(rules.as_ref(), proxy.as_ref()) {
+                // Compensate sing-box while still holding the exclusion, so
+                // no other change applies in between.
+                let restored = match &exclusive {
+                    Some(exclusive) => {
+                        let (guard, old) = (Arc::clone(&exclusive.guard), live.clone());
+                        let old_selections = selections(&current_proxy);
+                        tokio::task::spawn_blocking(move || {
+                            let _guard = guard;
+                            sb::rollback(&host, old.as_deref(), &old_selections)
+                        })
                         .await
                         .unwrap_or_else(|error| format!("回滚任务异常结束: {error}"))
-                } else {
-                    "sing-box 配置没有变".to_owned()
+                    }
+                    None => "sing-box 配置没有变".to_owned(),
                 };
                 record(
                     trigger,
                     applied,
-                    Some(format!("保存失败: {error}；{restored}")),
+                    Some(format!("保存失败: {message}；{restored}")),
                 );
-                return Err(Refusal::new(500, format!("保存失败: {error}；{restored}")));
+                return Err(Refusal::new(
+                    500,
+                    format!("保存失败: {message}；{restored}"),
+                ));
             }
         }
         if !applied {
@@ -306,6 +363,36 @@ impl AtomRules {
             let table = self.compile(&current, proxy_state.as_ref())?;
             *self.state.borrow_mut() = current;
             self.table.replace(std::rc::Rc::new(table));
+        }
+        drop(exclusive);
+        Ok(())
+    }
+
+    /// Writes the atom files of a change. The rules go first: the only
+    /// change of both is a confirmed group deletion, and new rules (moved to
+    /// Final) beside the old groups load fine, while old rules beside the
+    /// new groups would reference a missing group and stop the next start.
+    /// When the second write fails, the first is undone; a failed undo is
+    /// part of the error.
+    fn save_both(&self, rules: Option<&State>, proxy: Option<&ProxyState>) -> Result<(), String> {
+        if let Some(rules) = rules {
+            self.write_rules_file(rules)
+                .map_err(|error| error.to_string())?;
+        }
+        if let Some(proxy) = proxy {
+            if let Err(error) = atom_proxy::save(&self.root, proxy) {
+                let mut message = error.to_string();
+                if rules.is_some() {
+                    let old = self.state.borrow().clone();
+                    match self.write_rules_file(&old) {
+                        Ok(()) => message.push_str("（规则文件已恢复）"),
+                        Err(undo) => message.push_str(&format!(
+                            "；恢复规则文件也失败: {undo}，规则可能引用已删除的组"
+                        )),
+                    }
+                }
+                return Err(message);
+            }
         }
         Ok(())
     }
@@ -388,24 +475,64 @@ impl AtomRules {
             } else {
                 None
             };
-            let guard = ApplyGuard::try_begin().ok_or_else(busy)?;
-            let (tag, member) = (id.to_owned(), member.to_owned());
-            self.busy.set(true);
-            let result = tokio::task::spawn_blocking(move || {
-                let _guard = guard;
-                sb::select(&host, &secret, &tag, &member)?;
-                if let Some(bytes) = file {
-                    crate::runtime_snapshot::write_durably(&host.config_path(), &bytes)
-                        .map_err(|error| format!("已切换，但更新配置文件失败: {error}"))?;
-                }
-                Ok::<(), String>(())
-            })
-            .await
-            .unwrap_or_else(|error| Err(format!("切换任务异常结束: {error}")));
-            self.busy.set(false);
-            result.map_err(|message| Refusal::new(502, message))?;
-            atom_proxy::save(&self.root, &next)
-                .map_err(|error| Refusal::new(500, format!("已切换，但保存失败: {error}")))?;
+            let exclusive = self.exclusive()?;
+            let previous = current.selection(id).unwrap_or_default();
+            let (tag, chosen) = (id.to_owned(), member.to_owned());
+            let switch = {
+                let (guard, host, secret, tag) = (
+                    Arc::clone(&exclusive.guard),
+                    host.clone(),
+                    secret.clone(),
+                    tag.clone(),
+                );
+                let file = file.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _guard = guard;
+                    sb::select(&host, &secret, &tag, &chosen)?;
+                    if let Some(bytes) = file {
+                        sb::write_private(&host.config_path(), &bytes)
+                            .map_err(|error| format!("已切换，但更新配置文件失败: {error}"))?;
+                    }
+                    Ok::<(), String>(())
+                })
+                .await
+                .unwrap_or_else(|error| Err(format!("切换任务异常结束: {error}")))
+            };
+            let failure = match switch {
+                Ok(()) => match atom_proxy::save(&self.root, &next) {
+                    Ok(()) => None,
+                    Err(error) => Some((500, format!("保存失败: {error}"))),
+                },
+                Err(message) => Some((502, message)),
+            };
+            if let Some((status, message)) = failure {
+                // Back to the previous choice and file, still excluded.
+                let guard = Arc::clone(&exclusive.guard);
+                let undo = tokio::task::spawn_blocking(move || {
+                    let _guard = guard;
+                    let mut problems = Vec::new();
+                    if !previous.is_empty() {
+                        if let Err(error) = sb::select(&host, &secret, &tag, &previous) {
+                            problems.push(error);
+                        }
+                    }
+                    if file.is_some() {
+                        if let Err(error) = sb::write_private(&host.config_path(), &live) {
+                            problems.push(format!("恢复配置文件失败: {error}"));
+                        }
+                    }
+                    problems
+                })
+                .await
+                .unwrap_or_else(|error| vec![format!("恢复任务异常结束: {error}")]);
+                let undo = if undo.is_empty() {
+                    "已恢复原来的选择".to_owned()
+                } else {
+                    format!("恢复原来的选择失败: {}", undo.join("；"))
+                };
+                return Err(Refusal::new(status, format!("{message}；{undo}")));
+            }
+            drop(exclusive);
         }
         let version = next.version;
         *owner.state.borrow_mut() = next;
@@ -458,14 +585,22 @@ impl AtomRules {
         if self.root.as_os_str().is_empty() {
             return Ok(());
         }
-        let guard = ApplyGuard::try_begin().ok_or_else(busy)?;
+        let exclusive = self.exclusive()?;
         let secret = sb::new_secret();
         let state = owner.state.borrow().clone();
         let rules = self.state.borrow().rules.clone();
         let bytes = self.generate(&owner.host, &state, &rules, &secret)?;
-        self.busy.set(true);
-        let result = run_apply(guard, owner.host.clone(), bytes, secret, "apply".to_owned()).await;
-        self.busy.set(false);
+        let chosen = (selections(&state), selections(&state));
+        let result = run_apply(
+            Arc::clone(&exclusive.guard),
+            owner.host.clone(),
+            bytes,
+            secret,
+            chosen,
+            "apply".to_owned(),
+        )
+        .await;
+        drop(exclusive);
         result.map_err(apply_refusal)
     }
 
@@ -489,7 +624,7 @@ impl AtomRules {
             record("startup", false, None);
             return;
         }
-        let Some(guard) = ApplyGuard::try_begin() else {
+        let Ok(exclusive) = self.exclusive() else {
             crate::diag::warn_line!(
                 "atom sing-box: another application is running; startup check skipped"
             );
@@ -505,16 +640,17 @@ impl AtomRules {
                 return;
             }
         };
-        self.busy.set(true);
+        let chosen = (selections(&state), selections(&state));
         let result = run_apply(
-            guard,
+            Arc::clone(&exclusive.guard),
             owner.host.clone(),
             bytes,
             secret,
+            chosen,
             "startup".to_owned(),
         )
         .await;
-        self.busy.set(false);
+        drop(exclusive);
         if let Err(error) = result {
             crate::diag::warn_line!(
                 "atom sing-box: applying the configuration at startup failed: {error}"
