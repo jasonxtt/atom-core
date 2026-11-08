@@ -453,3 +453,60 @@ fn settings_put_takes_its_own_lease() {
         "/api/v1/atom/status"
     ));
 }
+
+#[test]
+fn node_views_hide_credentials_and_edits_replace_the_connection() {
+    let api = Api::new("credentials");
+    let (status, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    assert_eq!(status, 201);
+    let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
+    assert!(
+        imported["nodes"][0]["outbound"].get("password").is_none(),
+        "{imported}"
+    );
+    let (_, listed) = api.call("GET", "/api/v1/atom/nodes", "");
+    assert!(!listed.to_string().contains("\"password\""), "{listed}");
+    let (_, one) = api.call("GET", &format!("/api/v1/atom/nodes/{hk}"), "");
+    assert_eq!(one["outbound"]["server"], "hk.example");
+    assert!(one["outbound"].get("password").is_none());
+    // The file sing-box runs still has the credentials.
+    assert_eq!(api.outbound(&hk)["password"], "pw");
+
+    let (status, _) = api.call(
+        "PUT",
+        &format!("/api/v1/atom/nodes/{hk}"),
+        r#"{"format": "link"}"#,
+    );
+    assert_eq!(status, 400, "format and content go together");
+    let (status, _) = api.call(
+        "PUT",
+        &format!("/api/v1/atom/nodes/{hk}"),
+        r#"{"format": "link", "content": "trojan://a@x.example:1\ntrojan://b@y.example:2"}"#,
+    );
+    assert_eq!(status, 400, "one node only");
+    let (status, replaced) = api.call(
+        "PUT",
+        &format!("/api/v1/atom/nodes/{hk}"),
+        r#"{"format": "link", "content": "trojan://newpw@hk2.example:8443#ignored"}"#,
+    );
+    assert_eq!(status, 200, "{replaced}");
+    assert_eq!(
+        replaced["node"]["name"], "香港",
+        "the name stays unless given"
+    );
+    assert_eq!(replaced["node"]["server"], "hk2.example");
+    assert_eq!(api.outbound(&hk)["password"], "newpw");
+    assert_eq!(api.outbound(&hk)["server_port"], 8443);
+
+    let (status, tested) = api.call(
+        "POST",
+        &format!("/api/v1/atom/nodes/{hk}/delay"),
+        r#"{"timeout": 2000}"#,
+    );
+    assert_eq!(status, 200, "{tested}");
+    assert_eq!(tested, serde_json::json!({"id": hk, "delay": 88}));
+    let (status, _) = api.call("POST", "/api/v1/atom/nodes/g-default/delay", "{}");
+    assert_eq!(status, 404);
+    let (status, _) = api.call("POST", &format!("/api/v1/atom/groups/{hk}/delay"), "{}");
+    assert_eq!(status, 404);
+}

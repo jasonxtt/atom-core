@@ -251,3 +251,38 @@ fn singbox_json_forms() {
             .contains("没有可导入")
     );
 }
+
+#[test]
+fn socks_links_and_clash_socks5() {
+    for scheme in ["socks", "socks5", "socks5h"] {
+        let (name, out) = one(&format!("{scheme}://u%40x:p%3Aw@192.0.2.10:1080#s5"));
+        assert_eq!(name, "s5");
+        assert_eq!(
+            out,
+            json!({"type": "socks", "version": "5", "server": "192.0.2.10", "server_port": 1080,
+                "username": "u@x", "password": "p:w"})
+        );
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode("user:pass");
+    let (_, v2rayn) = one(&format!("socks://{encoded}@s.example:1080"));
+    assert_eq!(v2rayn["username"], "user");
+    assert_eq!(v2rayn["password"], "pass");
+    let (_, open) = one("socks5h://s.example:1080");
+    assert!(open.get("username").is_none() && open.get("password").is_none());
+    assert!(
+        parse_link("socks5://s.example")
+            .unwrap_err()
+            .contains("端口")
+    );
+    let nodes = from_clash_yaml(
+        "- {name: s, type: socks5, server: s.example, port: 1080, username: u, password: p}",
+    )
+    .unwrap();
+    assert_eq!(nodes[0].1["type"], "socks");
+    assert_eq!(nodes[0].1["username"], "u");
+    assert!(
+        from_clash_yaml("- {name: s, type: socks5, server: s, port: 1, tls: true}")
+            .unwrap_err()
+            .contains("TLS")
+    );
+}

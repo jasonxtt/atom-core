@@ -244,6 +244,36 @@ pub(crate) fn check_outbound(outbound: &Map<String, Value>) -> Result<(), Refusa
     Ok(())
 }
 
+/// Outbound fields that are credentials: never shown by the API.
+const CREDENTIAL_KEYS: &[&str] = &[
+    "password",
+    "username",
+    "user",
+    "uuid",
+    "auth",
+    "auth_str",
+    "private_key",
+    "private_key_passphrase",
+    "pre_shared_key",
+];
+
+/// A node's outbound for the API: every credential field removed, at any
+/// depth (`obfs.password`, wireguard `peers[].pre_shared_key`, ...).
+pub(crate) fn public_outbound(outbound: &Map<String, Value>) -> Map<String, Value> {
+    fn clean(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => Value::Object(public_outbound(map)),
+            Value::Array(items) => Value::Array(items.iter().map(clean).collect()),
+            other => other.clone(),
+        }
+    }
+    outbound
+        .iter()
+        .filter(|(key, _)| !CREDENTIAL_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), clean(value)))
+        .collect()
+}
+
 /// A sing-box duration of whole seconds, minutes or hours (`30s`, `3m`,
 /// `1h30m`), at least one second.
 fn check_interval(value: &str) -> Result<(), Refusal> {

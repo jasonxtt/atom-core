@@ -6,7 +6,8 @@
 //! | path | methods |
 //! |---|---|
 //! | `nodes` | GET, POST `{format: json\|yaml\|link, content}` (import) |
-//! | `nodes/{id}` | GET, PUT `{name?, outbound?}`, DELETE |
+//! | `nodes/{id}` | GET, PUT `{name?, format?, content?}`, DELETE |
+//! | `nodes/{id}/delay` | POST `{url?, timeout?}` (Clash API) |
 //! | `groups` | GET, POST `{name, type, members, ...}` |
 //! | `groups/{id}` | GET, PUT, DELETE (`?confirm=true`) |
 //! | `groups/{id}/select` | POST `{name}` (Clash API, no reload) |
@@ -17,7 +18,9 @@
 //! | `apply` | GET (the latest application), POST (apply again) |
 //!
 //! Every write takes an optional `version` (body, or `?version=` for
-//! DELETE) checked against the proxy state's version. A write that changes
+//! DELETE) checked against the proxy state's version. Node views never
+//! carry credentials ([`crate::atom_proxy::public_outbound`]): a node's
+//! connection is replaced whole, by new import content. A write that changes
 //! the generated sing-box configuration is applied to sing-box first
 //! ([`AtomRules::transact`]); a failure there leaves everything unchanged.
 
@@ -82,7 +85,7 @@ fn node_view(state: &ProxyState, node: &crate::atom_proxy::Node) -> Value {
         "type": node.outbound.get("type"),
         "server": node.outbound.get("server"),
         "server_port": node.outbound.get("server_port"),
-        "outbound": node.outbound,
+        "outbound": crate::atom_proxy::public_outbound(&node.outbound),
         "groups": state.groups_containing(&node.id),
     })
 }
@@ -139,21 +142,7 @@ async fn import_nodes(rules: &AtomRules, bytes: &[u8]) -> Answer {
             format!("invalid request body: unknown field `{key}`"),
         ));
     }
-    let text = content.as_str().map(str::to_owned);
-    let imported = match (format.as_str(), text) {
-        ("json", Some(text)) => serde_json::from_str::<Value>(&text)
-            .map_err(|e| format!("JSON 无法解析: {e}"))
-            .and_then(crate::atom_links::from_singbox_json),
-        ("json", None) => crate::atom_links::from_singbox_json(content),
-        ("yaml", Some(text)) => crate::atom_links::from_clash_yaml(&text),
-        ("link", Some(text)) => crate::atom_links::from_links(&text),
-        ("yaml" | "link", None) => Err("content 必须是字符串".to_owned()),
-        (other, _) => Err(format!("不支持的 format `{other}`：json、yaml 或 link")),
-    }
-    .map_err(|message| error(400, message))?;
-    if imported.is_empty() {
-        return Err(error(400, "没有可导入的节点"));
-    }
+    let imported = parse_import(&format, content)?;
     let mut next = state(rules);
     let added = next.add_nodes(imported);
     next.version += 1;
@@ -169,22 +158,51 @@ async fn import_nodes(rules: &AtomRules, bytes: &[u8]) -> Answer {
     ))
 }
 
+/// Converts import content (`format`: json, yaml or link) to nodes.
+fn parse_import(format: &str, content: Value) -> Result<Vec<crate::atom_links::Imported>, Reply> {
+    let text = content.as_str().map(str::to_owned);
+    let imported = match (format, text) {
+        ("json", Some(text)) => serde_json::from_str::<Value>(&text)
+            .map_err(|e| format!("JSON 无法解析: {e}"))
+            .and_then(crate::atom_links::from_singbox_json),
+        ("json", None) => crate::atom_links::from_singbox_json(content),
+        ("yaml", Some(text)) => crate::atom_links::from_clash_yaml(&text),
+        ("link", Some(text)) => crate::atom_links::from_links(&text),
+        ("yaml" | "link", None) => Err("content 必须是字符串".to_owned()),
+        (other, _) => Err(format!("不支持的 format `{other}`：json、yaml 或 link")),
+    }
+    .map_err(|message| error(400, message))?;
+    if imported.is_empty() {
+        return Err(error(400, "没有可导入的节点"));
+    }
+    Ok(imported)
+}
+
 async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Update {
         name: Option<String>,
-        outbound: Option<Map<String, Value>>,
+        format: Option<String>,
+        content: Option<Value>,
     }
     let (version, map) = object(bytes)?;
     let update: Update = from_map(map)?;
     rules.check_proxy_version(version).map_err(|e| fail(&e))?;
+    // No content: the connection stays as it is (the API never shows its
+    // credentials, so it cannot be edited field by field).
+    let outbound = match (update.format, update.content) {
+        (Some(format), Some(content)) => {
+            let mut imported = parse_import(&format, content)?;
+            if imported.len() != 1 {
+                return Err(error(400, "修改节点时 content 只能是一个节点"));
+            }
+            Some(imported.remove(0).1)
+        }
+        (None, None) => None,
+        _ => return Err(error(400, "format 和 content 要一起给")),
+    };
     let mut next = state(rules);
-    let outbound = update.outbound.map(|mut outbound| {
-        // Like an import: a `tag` in the body is the node's name.
-        outbound.remove("tag");
-        outbound
-    });
     let node = next
         .update_node(id, update.name, outbound)
         .map_err(|e| fail(&e))?;
@@ -304,7 +322,11 @@ async fn select(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
     ))
 }
 
-async fn delay(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
+async fn delay(rules: &AtomRules, id: &str, node: bool, bytes: &[u8]) -> Answer {
+    if node != id.starts_with("n-") {
+        let what = if node { "节点" } else { "节点组" };
+        return Err(error(404, format!("{what} `{id}` 不存在")));
+    }
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Delay {
@@ -314,11 +336,19 @@ async fn delay(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
     let (_, map) = object(bytes)?;
     let request: Delay = from_map(map)?;
     let timeout = request.timeout.unwrap_or(5000).clamp(100, 30_000);
-    let delays = rules
+    let result = rules
         .delay(id, request.url, timeout)
         .await
         .map_err(|e| fail(&e))?;
-    Ok(reply_json(200, &json!({ "id": id, "delays": delays })))
+    // A node: `{id, delay}`; a group: `{id, delays: {member: ms}}`.
+    Ok(reply_json(
+        200,
+        &if node {
+            json!({ "id": id, "delay": result.get("delay") })
+        } else {
+            json!({ "id": id, "delays": result })
+        },
+    ))
 }
 
 // ---- final ----------------------------------------------------------------
@@ -595,6 +625,7 @@ pub(crate) async fn handle(
         }
         ("PUT", ["nodes", id]) => update_node(rules, id, body).await,
         ("DELETE", ["nodes", id]) => delete_node(rules, id, query).await,
+        ("POST", ["nodes", id, "delay"]) => delay(rules, id, true, body).await,
         ("GET", ["groups"]) => {
             let state = current();
             let groups: Vec<Value> = state
@@ -629,7 +660,7 @@ pub(crate) async fn handle(
             Err(reply) => Err(reply),
         },
         ("POST", ["groups", id, "select"]) => select(rules, id, body).await,
-        ("POST", ["groups", id, "delay"]) => delay(rules, id, body).await,
+        ("POST", ["groups", id, "delay"]) => delay(rules, id, false, body).await,
         ("GET", ["final"]) => Ok(reply_json(200, &final_view(&current()))),
         ("PUT", ["final"]) => put_final(rules, body).await,
         ("GET", ["settings"]) => Ok(reply_json(200, &settings_view(rules, &current()))),

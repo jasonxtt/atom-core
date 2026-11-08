@@ -262,3 +262,21 @@ fn the_file_round_trips_and_a_bad_one_stops_loading() {
     assert!(load(&root, RESERVED).unwrap_err().contains("默认代理"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn credentials_never_leave_through_the_view() {
+    let outbound = json!({
+        "type": "wireguard", "private_key": "k", "peers": [{"server": "a", "pre_shared_key": "psk", "public_key": "pub"}],
+        "obfs": {"type": "salamander", "password": "o"}, "uuid": "u", "username": "n", "password": "p",
+        "tls": {"enabled": true, "reality": {"public_key": "pk", "short_id": "01"}}
+    });
+    let shown = Value::Object(public_outbound(outbound.as_object().unwrap()));
+    assert_eq!(
+        shown,
+        json!({
+            "type": "wireguard", "peers": [{"server": "a", "public_key": "pub"}],
+            "obfs": {"type": "salamander"},
+            "tls": {"enabled": true, "reality": {"public_key": "pk", "short_id": "01"}}
+        })
+    );
+}

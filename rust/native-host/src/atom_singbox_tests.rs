@@ -99,6 +99,11 @@ impl FakeSingbox {
                             String::from_utf8_lossy(&body).into_owned(),
                         ));
                         ("204 No Content", String::new())
+                    } else if method == "GET"
+                        && path.starts_with("/proxies/")
+                        && path.contains("/delay?")
+                    {
+                        ("200 OK", r#"{"delay":88}"#.to_owned())
                     } else if method == "GET" && path.starts_with("/group/") {
                         ("200 OK", r#"{"n-00000001":120}"#.to_owned())
                     } else if path == "/version" {
@@ -269,6 +274,10 @@ fn clash_select_and_delay_go_through_the_api() {
             "g-12345678".to_owned(),
             r#"{"name":"n-00000001"}"#.to_owned()
         )]
+    );
+    assert_eq!(
+        node_delay(&fake.host, "s1", "n-00000001", "https://example.com/", 500).unwrap()["delay"],
+        88
     );
     let delays = delay(&fake.host, "s1", "g-12345678", "https://example.com/", 500).unwrap();
     assert_eq!(delays["n-00000001"], 120);

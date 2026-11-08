@@ -412,7 +412,8 @@ impl AtomRules {
         Ok(version)
     }
 
-    /// Tests every member of a group or Final through the Clash API.
+    /// Tests one node, or every member of a group or Final, through the
+    /// Clash API.
     pub(crate) async fn delay(
         &self,
         id: &str,
@@ -420,23 +421,32 @@ impl AtomRules {
         timeout_ms: u32,
     ) -> Result<Value, Refusal> {
         let owner = self.proxy.as_ref().ok_or_else(unconfigured)?;
-        let url = {
+        let (url, node) = {
             let state = owner.state.borrow();
-            if id != FINAL && state.group(id).is_none() {
-                return Err(Refusal::new(404, format!("节点组 `{id}` 不存在")));
+            let node = state.node(id).is_some();
+            if !node && id != FINAL && state.group(id).is_none() {
+                return Err(Refusal::new(404, format!("节点或节点组 `{id}` 不存在")));
             }
-            url.or_else(|| state.group(id).and_then(|group| group.url.clone()))
-                .unwrap_or_else(|| atom_proxy::DEFAULT_URL.to_owned())
+            let url = url
+                .or_else(|| state.group(id).and_then(|group| group.url.clone()))
+                .unwrap_or_else(|| atom_proxy::DEFAULT_URL.to_owned());
+            (url, node)
         };
         let secret = self
             .live_secret()
             .ok_or_else(|| Refusal::new(409, "sing-box 还没有应用过配置"))?;
         let host = owner.host.clone();
         let tag = id.to_owned();
-        tokio::task::spawn_blocking(move || sb::delay(&host, &secret, &tag, &url, timeout_ms))
-            .await
-            .unwrap_or_else(|error| Err(format!("测速任务异常结束: {error}")))
-            .map_err(|message| Refusal::new(502, message))
+        tokio::task::spawn_blocking(move || {
+            if node {
+                sb::node_delay(&host, &secret, &tag, &url, timeout_ms)
+            } else {
+                sb::delay(&host, &secret, &tag, &url, timeout_ms)
+            }
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("测速任务异常结束: {error}")))
+        .map_err(|message| Refusal::new(502, message))
     }
 
     /// Applies the current state again with a new secret (`POST apply`).

@@ -620,6 +620,29 @@ pub(crate) fn delay(
     }
 }
 
+/// Tests one node: `{"delay": ms}`. A node that fails the test is an
+/// error (sing-box answers 503 or 504 with the reason).
+pub(crate) fn node_delay(
+    host: &Host,
+    secret: &str,
+    tag: &str,
+    url: &str,
+    timeout_ms: u32,
+) -> Result<Value, String> {
+    let path = format!(
+        "/proxies/{}/delay?url={}&timeout={timeout_ms}",
+        query_encode(tag),
+        query_encode(url)
+    );
+    match clash(host.clash_api, secret, "GET", &path, None)? {
+        (200, body) => serde_json::from_slice(&body).map_err(|error| error.to_string()),
+        (status, body) => Err(format!(
+            "测速失败（{status}）: {}",
+            String::from_utf8_lossy(&body).trim()
+        )),
+    }
+}
+
 /// sing-box's version through the Clash API, if it answers.
 pub(crate) fn version(host: &Host, secret: &str) -> Option<String> {
     let (status, body) = clash(host.clash_api, secret, "GET", "/version", None).ok()?;

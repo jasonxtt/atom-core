@@ -7,7 +7,8 @@
 //! - `yaml`: Clash/mihomo `proxies` (a whole configuration, the list, or one
 //!   proxy).
 //! - `link`: share links, one per line: `vless://`, `vmess://`, `trojan://`,
-//!   `ss://`, `hysteria2://` (`hy2://`), `tuic://`, `anytls://`.
+//!   `ss://`, `hysteria2://` (`hy2://`), `tuic://`, `anytls://`, `socks://`
+//!   (`socks5://`, `socks5h://`).
 //!
 //! An import is all or nothing: the first entry that cannot be converted is
 //! the error, with its position.
@@ -431,6 +432,33 @@ fn anytls_link(link: &str) -> Result<Imported, String> {
     Ok((clean_name(&link.name, &outbound), outbound))
 }
 
+/// `socks://`, `socks5://`, `socks5h://`: a SOCKS5 outbound (the name is
+/// resolved by the server either way). The userinfo is `user:pass`, or
+/// base64 of it (V2RayN).
+fn socks_link(link: &str) -> Result<Imported, String> {
+    let link = parse_link_url(link)?;
+    let (username, password) = if link.password.is_empty() && !link.user.is_empty() {
+        match base64_text(&link.user).and_then(|text| {
+            text.split_once(':')
+                .map(|(user, pass)| (user.to_owned(), pass.to_owned()))
+        }) {
+            Some(pair) => pair,
+            None => (link.user.clone(), String::new()),
+        }
+    } else {
+        (link.user.clone(), link.password.clone())
+    };
+    let mut outbound = base("socks", &link.host, link.port)?;
+    outbound.insert("version".into(), json!("5"));
+    if !username.is_empty() {
+        outbound.insert("username".into(), json!(username));
+    }
+    if !password.is_empty() {
+        outbound.insert("password".into(), json!(password));
+    }
+    Ok((clean_name(&link.name, &outbound), outbound))
+}
+
 /// `vmess://` + base64 of the V2RayN JSON (`add`, `port`, `id`, `aid`,
 /// `scy`, `net`, `host`, `path`, `tls`, `sni`, `alpn`, `fp`, `ps`).
 fn vmess_link(link: &str) -> Result<Imported, String> {
@@ -573,6 +601,7 @@ pub(crate) fn parse_link(link: &str) -> Result<Imported, String> {
         "hysteria2" | "hy2" => hysteria2_link(link),
         "tuic" => tuic_link(link),
         "anytls" => anytls_link(link),
+        "socks" | "socks5" | "socks5h" => socks_link(link),
         other => Err(format!("不支持的链接协议 `{other}://`")),
     }
 }
@@ -800,6 +829,20 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
             let mut outbound = base("anytls", &server, port)?;
             outbound.insert("password".into(), json!(text(proxy, "password")));
             put(&mut outbound, "tls", clash_tls(proxy, true).value());
+            outbound
+        }
+        "socks5" => {
+            let mut outbound = base("socks", &server, port)?;
+            outbound.insert("version".into(), json!("5"));
+            for key in ["username", "password"] {
+                let value = text(proxy, key);
+                if !value.is_empty() {
+                    outbound.insert(key.into(), json!(value));
+                }
+            }
+            if truthy(proxy, "tls") {
+                return Err("不支持带 TLS 的 socks5".into());
+            }
             outbound
         }
         "" => return Err("缺少 type".into()),
