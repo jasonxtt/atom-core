@@ -270,6 +270,11 @@ const CREDENTIAL_KEYS: &[&str] = &[
     "secret",
 ];
 
+/// Opaque containers that may carry credentials in free form: tor's
+/// `torrc` (e.g. `HTTPSProxyAuthenticator`) and `extra_args`. They are left
+/// out of the view whole.
+const OPAQUE_KEYS: &[&str] = &["torrc", "extra_args"];
+
 /// HTTP header names that carry credentials (`headers` of http, ws and h2
 /// transports, naive's `extra_headers`).
 const CREDENTIAL_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie"];
@@ -298,6 +303,7 @@ pub(crate) fn public_outbound(outbound: &Map<String, Value>) -> Map<String, Valu
         .iter()
         .filter(|(key, value)| {
             let hidden = CREDENTIAL_KEYS.contains(&key.as_str())
+                || OPAQUE_KEYS.contains(&key.as_str())
                 || (key.as_str() == "obfs" && value.is_string());
             !hidden
         })

@@ -331,3 +331,18 @@ fn the_state_file_is_owner_only() {
     assert!(leftovers.is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn tor_options_are_left_out_of_the_view_whole() {
+    let tor = json!({
+        "type": "tor", "executable_path": "/usr/bin/tor", "data_directory": "tor",
+        "extra_args": ["--HTTPSProxyAuthenticator", "alice:secret"],
+        "torrc": {"HTTPSProxy": "10.0.0.1:3128", "HTTPSProxyAuthenticator": "alice:secret"}
+    });
+    let shown = Value::Object(public_outbound(tor.as_object().unwrap()));
+    assert_eq!(
+        shown,
+        json!({"type": "tor", "executable_path": "/usr/bin/tor", "data_directory": "tor"})
+    );
+    assert!(!shown.to_string().contains("secret"));
+}
