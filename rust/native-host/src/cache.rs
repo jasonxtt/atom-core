@@ -526,6 +526,13 @@ impl NativeCacheAdapter {
     pub async fn save(&self) -> Result<(), CacheAdapterError> {
         self.transaction(ManagementOperation::Save).await
     }
+    /// atom fork: the fallback when [`Self::flush`] fails to persist its
+    /// empty dump. Clears the memory first (no old entry is served from
+    /// now on), then removes the dump file so a restart cannot load the old
+    /// entries back; an error means the file is still there.
+    pub(crate) async fn discard(&self) -> Result<(), CacheAdapterError> {
+        self.transaction(ManagementOperation::Discard).await
+    }
     async fn commit_operation(
         &self,
         operation: ManagementOperation,
@@ -559,6 +566,26 @@ impl NativeCacheAdapter {
                 self.owner.generation.set(generation);
                 self.owner.revision.set(revision);
                 if self.dump_file.is_some() {
+                    self.owner.clean_revision.set(revision);
+                }
+            }
+            ManagementOperation::Discard => {
+                let (generation, revision) = self.next_versions()?;
+                {
+                    let _guard = CommitGuard {
+                        owner: self.owner.clone(),
+                    };
+                    self.cache.flush();
+                    self.owner.generation.set(generation);
+                    self.owner.revision.set(revision);
+                }
+                if let Some(path) = self.dump_file.clone() {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(CacheAdapterError::Io(e.to_string())),
+                    }
+                    // No file is an empty dump: the disk matches the memory.
                     self.owner.clean_revision.set(revision);
                 }
             }
@@ -843,6 +870,8 @@ enum ManagementOperation {
     Import(Vec<u8>),
     Flush,
     Save,
+    /// atom fork: see [`NativeCacheAdapter::discard`].
+    Discard,
 }
 struct CommitGuard {
     owner: Rc<CacheOwner>,

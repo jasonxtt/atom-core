@@ -8,7 +8,8 @@
 //!
 //! Conditions: the name conditions (`domain`, `suffix`, `keyword`, `regex`,
 //! `ruleset`) are one class and the `client` addresses another. Within a
-//! class any entry may match; every class a rule uses must match. `ip_cidr`
+//! class any entry may match; every class a rule uses must match. A rule
+//! with a `client` condition can only be direct or block. `ip_cidr`
 //! is matched by sing-box (design §4.6) and refused here until the sing-box
 //! configuration is generated.
 //!
@@ -16,7 +17,9 @@
 //! mark per action) and, for proxy, records the group in
 //! `ExecutionState::outbound`; the configuration dispatches on the marks.
 //! The table lives in `webinfo/atom_rules.json` and the custom rulesets in
-//! `webinfo/atom_rulesets.json` (lists in `webinfo/atom_rulesets/<id>.txt`).
+//! `webinfo/atom_rulesets.json` (lists in
+//! `webinfo/atom_rulesets/<id>-<revision>.txt`; a new list is a new file,
+//! switched to by the metadata write).
 //! Every change is validated and compiled first, written to disk second, and
 //! published last, as one whole table ([`Live`]): a query sees either the old
 //! or the new table, never a mix, and DNS is not interrupted.
@@ -169,6 +172,11 @@ pub(crate) struct Ruleset {
     pub(crate) updated_at: i64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) last_error: String,
+    /// The list's revision, its file `<id>-<revision>.txt`. Every new list
+    /// is a new revision; 0: no list yet (a remote set never downloaded),
+    /// the list is empty and there is no file.
+    #[serde(default)]
+    pub(crate) revision: u64,
 }
 
 /// A builtin set the configuration offers to rules by name.
@@ -403,17 +411,19 @@ fn new_id(prefix: &str, taken: &dyn Fn(&str) -> bool) -> String {
 
 /// Reads a local list file: one rule per line in the provider text form
 /// (`domain:`, `full:`, `keyword:`, `regexp:`; a bare name is `domain:`).
+/// A missing file is an error: a ruleset with a revision has a file.
 fn read_list(path: &Path) -> Result<Vec<String>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(str::to_owned)
-            .collect()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(format!("read {}: {error}", path.display())),
-    }
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    Ok(String::from_utf8_lossy(&bytes)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect())
+}
+
+fn list_path(root: &Path, id: &str, revision: u64) -> PathBuf {
+    root.join(RULESET_DIR).join(format!("{id}-{revision}.txt"))
 }
 
 /// Builds the matcher of a list; the first bad entry is the error.
@@ -515,9 +525,13 @@ impl AtomRules {
             }
             for set in &rulesets {
                 let set: &Ruleset = set;
-                let file = root.join(RULESET_DIR).join(format!("{}.txt", set.id));
-                let list = build_list(&read_list(&file)?)
-                    .map_err(|error| format!("{}: {error}", file.display()))?;
+                let list = if set.revision == 0 {
+                    MixSetBuilder::new().finish()
+                } else {
+                    let file = list_path(root, &set.id, set.revision);
+                    build_list(&read_list(&file)?)
+                        .map_err(|error| format!("{}: {error}", file.display()))?
+                };
                 lists.insert(set.id.clone(), Rc::new(list));
             }
         }
@@ -616,6 +630,14 @@ impl AtomRules {
         };
         let verdict = match &rule.action {
             Action::Proxy { group_id } => {
+                // sing-box binds a group per name, not per client: a client
+                // rule could only bind the group for every client (a cached
+                // FakeIP sends no CLEAR), so proxy is the same for everyone.
+                if !m.client.is_empty() {
+                    return Err(at(Refusal::invalid(
+                        "带 client 条件的规则只能直连或屏蔽：sing-box 只按域名绑定出站组、不区分客户端，代理规则对所有客户端必须一样",
+                    )));
+                }
                 validate_group(group_id).map_err(at)?;
                 Verdict::Proxy(Arc::from(group_id.as_str()))
             }
@@ -859,27 +881,51 @@ impl AtomRules {
 
     /// The local list of a ruleset as stored.
     pub(crate) fn ruleset_entries(&self, id: &str) -> Result<Vec<String>, Refusal> {
-        if self.ruleset(id).is_none() {
+        let Some(set) = self.ruleset(id) else {
             return Err(Refusal::new(404, format!("规则集 `{id}` 不存在")));
-        }
-        if self.root.as_os_str().is_empty() {
+        };
+        if self.root.as_os_str().is_empty() || set.revision == 0 {
             return Ok(Vec::new());
         }
-        read_list(&self.list_file(id)).map_err(|error| Refusal::new(500, error))
+        read_list(&list_path(&self.root, id, set.revision))
+            .map_err(|error| Refusal::new(500, error))
     }
 
-    fn list_file(&self, id: &str) -> PathBuf {
-        self.root.join(RULESET_DIR).join(format!("{id}.txt"))
-    }
-
-    fn write_list(&self, id: &str, rules: &[String]) -> Result<(), Refusal> {
-        if self.root.as_os_str().is_empty() {
-            return Ok(());
+    fn remove_list(&self, id: &str, revision: u64) {
+        if !self.root.as_os_str().is_empty() && revision != 0 {
+            let _ = std::fs::remove_file(list_path(&self.root, id, revision));
         }
-        let mut text = rules.join("\n");
-        text.push('\n');
-        crate::runtime_snapshot::write_durably(&self.list_file(id), text.as_bytes())
-            .map_err(|error| Refusal::new(500, format!("保存失败: {error}")))
+    }
+
+    /// Publishes `next`, in which ruleset `id` moved from revision `old` to
+    /// `new` with the list `entries`. The list goes to the new revision's
+    /// file first; the metadata write in [`Self::commit`] is the one point
+    /// that switches to it, so a failure anywhere leaves the old list and
+    /// the old metadata together. The file left behind is removed (the new
+    /// one on failure, the old one on success).
+    fn commit_list(
+        &self,
+        next: State,
+        id: &str,
+        old: u64,
+        new: u64,
+        entries: &[String],
+    ) -> Result<(), Refusal> {
+        if !self.root.as_os_str().is_empty() {
+            let mut text = entries.join("\n");
+            text.push('\n');
+            crate::runtime_snapshot::write_durably(
+                &list_path(&self.root, id, new),
+                text.as_bytes(),
+            )
+            .map_err(|error| Refusal::new(500, format!("保存失败: {error}")))?;
+        }
+        if let Err(refusal) = self.commit(next, false, true) {
+            self.remove_list(id, new);
+            return Err(refusal);
+        }
+        self.remove_list(id, old);
+        Ok(())
     }
 
     fn check_source(source: &Source) -> Result<(), Refusal> {
@@ -924,6 +970,9 @@ impl AtomRules {
         let list = build_list(&entries).map_err(Refusal::invalid)?;
         let mut next = self.state.borrow().clone();
         let id = new_id("rs-", &|id| next.rulesets.iter().any(|set| set.id == id));
+        // A local set has its list from the start; a remote one has none
+        // until its first download (revision 0).
+        let local = matches!(source, Source::Local);
         let set = Ruleset {
             id: id.clone(),
             name: name.to_owned(),
@@ -931,11 +980,15 @@ impl AtomRules {
             rule_count: entries.len(),
             updated_at: if entries.is_empty() { 0 } else { now() },
             last_error: String::new(),
+            revision: u64::from(local),
         };
-        self.write_list(&id, &entries)?;
         next.rulesets.push(set.clone());
-        next.lists.insert(id, Rc::new(list));
-        self.commit(next, false, true)?;
+        next.lists.insert(id.clone(), Rc::new(list));
+        if local {
+            self.commit_list(next, &id, 0, 1, &entries)?;
+        } else {
+            self.commit(next, false, true)?;
+        }
         Ok(set)
     }
 
@@ -974,10 +1027,14 @@ impl AtomRules {
                 ));
             }
             let list = build_list(&entries).map_err(Refusal::invalid)?;
-            self.write_list(id, &entries)?;
+            let old = set.revision;
+            set.revision = old + 1;
             set.rule_count = entries.len();
             set.updated_at = now();
             next.lists.insert(id.to_owned(), Rc::new(list));
+            next.rulesets[at] = set.clone();
+            self.commit_list(next, id, old, set.revision, &entries)?;
+            return Ok(set);
         }
         next.rulesets[at] = set.clone();
         self.commit(next, false, true)?;
@@ -1004,19 +1061,21 @@ impl AtomRules {
                 ..Refusal::new(409, format!("规则集 `{id}` 还被规则引用，请先修改这些规则"))
             });
         }
-        next.rulesets.remove(at);
+        let revision = next.rulesets.remove(at).revision;
         next.lists.remove(id);
         self.commit(next, false, true)?;
-        if !self.root.as_os_str().is_empty() {
-            let _ = std::fs::remove_file(self.list_file(id));
-        }
+        self.remove_list(id, revision);
         Ok(())
     }
 
     /// Installs a converted download (`Ok`) or records why it failed.
+    /// `source` is what was downloaded: a download is installed only while
+    /// the set still has that source (409 otherwise), so a slow download of
+    /// a replaced URL cannot overwrite the list of the new one.
     pub(crate) fn store_download(
         &self,
         id: &str,
+        source: &Source,
         result: Result<(Vec<String>, MixSet), String>,
     ) -> Result<Ruleset, Refusal> {
         let mut next = self.state.borrow().clone();
@@ -1026,18 +1085,29 @@ impl AtomRules {
             .position(|set| set.id == id)
             .ok_or_else(|| Refusal::new(404, format!("规则集 `{id}` 不存在")))?;
         let mut set = next.rulesets[at].clone();
+        if set.source != *source {
+            return Err(Refusal::new(
+                409,
+                format!("规则集 `{id}` 的来源在下载期间被修改，这次下载的结果已丢弃"),
+            ));
+        }
         match result {
             Ok((entries, list)) => {
-                self.write_list(id, &entries)?;
+                let old = set.revision;
+                set.revision = old + 1;
                 set.rule_count = entries.len();
                 set.updated_at = now();
                 set.last_error.clear();
                 next.lists.insert(id.to_owned(), Rc::new(list));
+                next.rulesets[at] = set.clone();
+                self.commit_list(next, id, old, set.revision, &entries)?;
             }
-            Err(error) => set.last_error = error,
+            Err(error) => {
+                set.last_error = error;
+                next.rulesets[at] = set.clone();
+                self.commit(next, false, true)?;
+            }
         }
-        next.rulesets[at] = set.clone();
-        self.commit(next, false, true)?;
         Ok(set)
     }
 }

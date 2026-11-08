@@ -21,7 +21,7 @@ atom 删除了在线更新和配置包，这份配置随程序一起发布，用
 第 2 步（规则表，atom 设计文档第 3.1、4 节）：
 
 - 新增 `sub_config/atom_rules.yaml`：`atom_rules` 插件（用户规则表）。规则存在 `webinfo/atom_rules.json`，
-  自定义规则集存在 `webinfo/atom_rulesets.json` 和 `webinfo/atom_rulesets/<id>.txt`，都由 `/api/v1/atom/` 管理，
+  自定义规则集存在 `webinfo/atom_rulesets.json` 和 `webinfo/atom_rulesets/<id>-<revision>.txt`，都由 `/api/v1/atom/` 管理，
   这份配置里不放；没有 `atom_rules.json` 时用默认规则表（局域网和私有域名 → 直连，广告 → 屏蔽），第一次修改时才写文件。
 - 主流程 `sequence_6666` 和刷新流程 `sequence_requery`：DDNS 之后执行 `$atom_rules`，按 fast_mark 40（屏蔽，`reject 0`）、
   41（代理：A/AAAA 走 `$sequence_fakeip_exit`，查询带 65001 SET 组；其他类型问国外）、42（直连：国内 DNS）分派。

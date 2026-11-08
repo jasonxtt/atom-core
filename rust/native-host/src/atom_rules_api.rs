@@ -84,14 +84,32 @@ fn query_version(query: Option<&str>) -> Result<Option<u64>, Reply> {
     Ok(None)
 }
 
-/// Empties every cache after a change (best effort; a failure is logged).
-async fn flush_caches(config: &CompiledConfig, cache: &CacheCatalog) {
+/// Empties every cache after a change. A cached answer of the old rules
+/// (a FakeIP that sends no CLEAR) must not outlive them: when a flush cannot
+/// persist its empty dump, the cache is discarded instead (memory cleared,
+/// dump file removed). What still fails is returned, and the change is
+/// reported as applied but not fully flushed.
+async fn flush_caches(config: &CompiledConfig, cache: &CacheCatalog) -> Result<(), String> {
+    let mut failed = Vec::new();
     for item in &config.caches {
-        if let Some(store) = cache.get(item.id) {
-            if let Err(e) = store.flush().await {
-                crate::diag::warn_line!("atom rules: flushing cache {} failed: {e}", item.tag);
-            }
+        let Some(store) = cache.get(item.id) else {
+            continue;
+        };
+        let Err(e) = store.flush().await else {
+            continue;
+        };
+        crate::diag::warn_line!(
+            "atom rules: flushing cache {} failed: {e}; discarding it instead",
+            item.tag
+        );
+        if let Err(e) = store.discard().await {
+            failed.push(format!("{}: {e}", item.tag));
         }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
     }
 }
 
@@ -140,10 +158,13 @@ pub(crate) async fn handle(
         _ => return Some(error(404, "not found")),
     };
     Some(match reply {
-        Ok(reply) => {
-            flush_caches(config, cache).await;
-            reply
-        }
+        Ok(reply) => match flush_caches(config, cache).await {
+            Ok(()) => reply,
+            Err(e) => error(
+                500,
+                format!("修改已保存并生效，但清空缓存失败，旧的缓存应答可能还会被使用: {e}"),
+            ),
+        },
         Err(reply) => reply,
     })
 }
@@ -418,7 +439,7 @@ async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancella
         Err(e) => Err(format!("下载失败: {e}")),
     };
     let failed = converted.as_ref().err().cloned();
-    match rules.store_download(&set.id, converted) {
+    match rules.store_download(&set.id, &set.source, converted) {
         // The set is kept with `last_error`; the caller sees the failure.
         Ok(set) => match failed {
             None => json(200, &ruleset_view(&set)),

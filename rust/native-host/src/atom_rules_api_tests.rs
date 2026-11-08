@@ -44,8 +44,12 @@ struct Api {
 
 impl Api {
     fn new(name: &str) -> Self {
+        Self::with_yaml(name, YAML)
+    }
+
+    fn with_yaml(name: &str, yaml: &str) -> Self {
         let root = scratch(name);
-        let config = crate::config::compile_yaml_with_base(YAML, &root).expect("config");
+        let config = crate::config::compile_yaml_with_base(yaml, &root).expect("config");
         let assembly = HostAssembly::with_options(config, HostOptions::default()).unwrap();
         Self { assembly, root }
     }
@@ -188,6 +192,122 @@ fn crud_move_and_test_over_http_shapes() {
     let (status, _) = api.call("PATCH", "/api/v1/atom/rules", "");
     assert_eq!(status, 405);
     assert!(api.root.join(crate::atom_rules::RULES_FILE).exists());
+}
+
+#[test]
+fn a_proxy_rule_with_a_client_is_refused_in_chinese() {
+    let api = Api::new("client-proxy");
+    let (status, refused) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"suffix": ["video.example"], "client": ["192.168.1.0/24"]},
+            "action": {"type": "proxy", "group_id": "g-v"}}"#,
+    );
+    assert_eq!(status, 400);
+    let message = refused["error"].as_str().unwrap();
+    assert!(
+        message.contains("client") && message.contains("直连或屏蔽"),
+        "{message}"
+    );
+    let (status, created) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"suffix": ["video.example"], "client": ["192.168.1.0/24"]},
+            "action": {"type": "direct"}}"#,
+    );
+    assert_eq!(status, 201, "{created}");
+    let id = created["rule"]["id"].as_str().unwrap().to_owned();
+    let (status, _) = api.call(
+        "PUT",
+        &format!("/api/v1/atom/rules/{id}"),
+        r#"{"match": {"client": ["192.168.1.0/24"]}, "action": {"type": "proxy", "group_id": "g-v"}}"#,
+    );
+    assert_eq!(status, 400);
+}
+
+/// A cache with a dump file, so a flush has to persist.
+const DUMP_YAML: &str = r"log: {level: error}
+plugins:
+  - tag: cache_all
+    type: cache
+    args: {size: 64, dump_file: cache/all.dump}
+  - tag: domestic
+    type: forward
+    args: {upstreams: [{addr: 'udp://127.0.0.1:15000'}]}
+  - tag: atom_rules
+    type: atom_rules
+    args:
+      marks: {proxy: 41, direct: 42, block: 40}
+  - tag: main
+    type: sequence
+    args:
+      - exec: $atom_rules
+      - exec: $cache_all
+      - exec: $domestic
+  - tag: listener
+    type: udp_server
+    args: {entry: main, listen: '127.0.0.1:3098'}
+";
+
+fn query_and_answer() -> (Vec<u8>, Vec<u8>) {
+    let mut raw = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    raw.extend_from_slice(b"\x01a\x07example\x00\x00\x01\x00\x01");
+    let mut wire = raw.clone();
+    wire[2] = 0x81;
+    wire[3] = 0x80;
+    wire[7] = 1;
+    wire.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 1, 44, 0, 4, 1, 2, 3, 4]);
+    (raw, wire)
+}
+
+#[test]
+fn a_flush_that_cannot_persist_still_drops_the_old_entries() {
+    let api = Api::with_yaml("flush-fallback", DUMP_YAML);
+    let dump = api.assembly.config().caches[0].dump_file.clone().unwrap();
+    std::fs::create_dir_all(dump.parent().unwrap()).unwrap();
+    let store = api.assembly.cache().get(crate::config::CacheId(0)).unwrap();
+    let (raw, response) = query_and_answer();
+    if let Some(token) = store.begin_store(&raw).unwrap() {
+        token.publish(&response).unwrap();
+    }
+    api.assembly.block_on(store.save()).unwrap();
+    assert!(dump.exists(), "the old entry is on disk too");
+    // The flush fails to write its empty dump; the change still succeeds,
+    // with the cache discarded in memory and on disk.
+    store.inject_persist_fault(crate::managed::PersistFault::Rename);
+    let (status, created) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"suffix": ["example"]}, "action": {"type": "direct"}}"#,
+    );
+    assert_eq!(status, 201, "{created}");
+    assert!(
+        store.lookup_entry(&raw).unwrap().is_none(),
+        "memory cleared"
+    );
+    assert!(!dump.exists(), "a restart cannot load the old entry");
+
+    // When even the discard cannot remove the dump (here a directory), the
+    // caller is told: the change is in force, the cache is not fully gone.
+    if let Some(token) = store.begin_store(&raw).unwrap() {
+        token.publish(&response).unwrap();
+    }
+    std::fs::create_dir_all(dump.join("blocker")).unwrap();
+    let (status, failed) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"suffix": ["other.example"]}, "action": {"type": "block"}}"#,
+    );
+    assert_eq!(status, 500, "{failed}");
+    assert!(
+        failed["error"].as_str().unwrap().contains("清空缓存失败"),
+        "{failed}"
+    );
+    assert!(
+        store.lookup_entry(&raw).unwrap().is_none(),
+        "memory still cleared"
+    );
+    assert_eq!(api.call("GET", "/api/v1/atom/rules", "").1["version"], 2);
 }
 
 #[test]

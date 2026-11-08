@@ -21,7 +21,7 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-fn owner(root: &Path) -> AtomRules {
+fn load(root: &Path) -> Result<AtomRules, String> {
     AtomRules::load(
         root,
         MARKS,
@@ -29,7 +29,10 @@ fn owner(root: &Path) -> AtomRules {
         String::new(),
         vec![("adguard".to_owned(), BuiltinSet::Mark(ADS))],
     )
-    .unwrap()
+}
+
+fn owner(root: &Path) -> AtomRules {
+    load(root).unwrap()
 }
 
 fn input(matches: Match, action: Action) -> RuleInput {
@@ -172,7 +175,7 @@ fn classes_are_anded_and_entries_ored() {
         ..Match::default()
     };
     rules
-        .create(input(matches, proxy("g-tv")), None, None, None)
+        .create(input(matches, Action::Block), None, None, None)
         .unwrap();
     let only_client = Match {
         client: vec!["192.168.9.9".to_owned()],
@@ -184,9 +187,9 @@ fn classes_are_anded_and_entries_ored() {
     let action = |name: &str, client: &str| rules.test(name, ip(client), 0).map(|(_, r)| r.action);
     assert_eq!(
         action("www.youtube.com", "192.168.1.50"),
-        Some(proxy("g-tv"))
+        Some(Action::Block)
     );
-    assert_eq!(action("google.com", "10.0.0.7"), Some(proxy("g-tv")));
+    assert_eq!(action("google.com", "10.0.0.7"), Some(Action::Block));
     assert_eq!(action("google.com", "10.0.0.8"), None);
     assert_eq!(action("example.com", "192.168.1.50"), None);
     assert_eq!(
@@ -317,6 +320,10 @@ fn local_rulesets_are_referenced_edited_and_guarded() {
     drop(rules);
     let rules = owner(&root);
     assert_eq!(hit(&rules, "www.disneyplus.com"), Some(proxy("g-us")));
+    // The edit is a new revision's file; the old one is gone.
+    assert_eq!(rules.ruleset(&set.id).unwrap().revision, 2);
+    assert!(!list_path(&root, &set.id, 1).exists());
+    assert!(list_path(&root, &set.id, 2).exists());
     let blocked = rules.delete_ruleset(&set.id).unwrap_err();
     assert_eq!(
         (blocked.status, blocked.rules.clone()),
@@ -324,12 +331,7 @@ fn local_rulesets_are_referenced_edited_and_guarded() {
     );
     rules.delete(&rule.id, None).unwrap();
     rules.delete_ruleset(&set.id).unwrap();
-    assert!(
-        !root
-            .join(RULESET_DIR)
-            .join(format!("{}.txt", set.id))
-            .exists()
-    );
+    assert!(!list_path(&root, &set.id, 2).exists());
     assert!(rules.rulesets().is_empty());
     // Bad entries and bad sources are refused.
     assert_eq!(
@@ -367,7 +369,9 @@ fn remote_downloads_are_converted_and_failures_recorded() {
     assert_eq!(set.rule_count, 0);
     let yaml = b"payload:\n  - '+.openai.com'\n  - 'chat.example.org'\n";
     let converted = convert_download(yaml, "auto", "", "https://example.com/list.yaml");
-    let stored = rules.store_download(&set.id, converted).unwrap();
+    let stored = rules
+        .store_download(&set.id, &set.source, converted)
+        .unwrap();
     assert_eq!(stored.rule_count, 2);
     assert!(stored.last_error.is_empty());
     let matches = Match {
@@ -381,7 +385,7 @@ fn remote_downloads_are_converted_and_failures_recorded() {
     assert_eq!(hit(&rules, "chat.example.org"), Some(proxy("g-ai")));
     // A failed refresh keeps the list and records the reason.
     let failed = rules
-        .store_download(&set.id, Err("下载失败: timed out".to_owned()))
+        .store_download(&set.id, &set.source, Err("下载失败: timed out".to_owned()))
         .unwrap();
     assert_eq!(failed.rule_count, 2);
     assert!(failed.last_error.contains("timed out"));
@@ -389,6 +393,191 @@ fn remote_downloads_are_converted_and_failures_recorded() {
     assert!(convert_download(b"\n# nothing\n", "text", "", "x.txt").is_err());
     let text = convert_download(b"a.com\nfull:b.com\n", "text", "", "x.txt").unwrap();
     assert_eq!(text.0.len(), 2);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn proxy_rules_cannot_have_a_client_condition() {
+    let root = scratch("client-proxy");
+    let rules = owner(&root);
+    let lan_client = Match {
+        client: vec!["192.168.1.0/24".to_owned()],
+        ..suffix(&["video.example"])
+    };
+    // sing-box binds per name: a client's proxy rule would bind every client.
+    let refused = rules
+        .create(input(lan_client.clone(), proxy("g-x")), None, None, None)
+        .unwrap_err();
+    assert_eq!(refused.status, 400);
+    assert!(refused.message.contains("client"), "{}", refused.message);
+    let only_client = Match {
+        client: vec!["10.0.0.7".to_owned()],
+        ..Match::default()
+    };
+    assert_eq!(
+        rules
+            .create(input(only_client, proxy("g-x")), None, None, None)
+            .unwrap_err()
+            .status,
+        400
+    );
+    // Direct and block stay per client; a replace cannot turn one into proxy.
+    let (_, rule) = rules
+        .create(input(lan_client.clone(), Action::Direct), None, None, None)
+        .unwrap();
+    rules
+        .create(input(lan_client.clone(), Action::Block), None, None, None)
+        .unwrap();
+    let version = rules.rules().0;
+    assert_eq!(
+        rules
+            .update(&rule.id, input(lan_client, proxy("g-x")), None)
+            .unwrap_err()
+            .status,
+        400
+    );
+    assert_eq!(rules.rules().0, version, "nothing changed");
+    // A table file holding such a rule does not load (like a damaged file).
+    drop(rules);
+    // Disabled rules are validated too.
+    std::fs::write(
+        root.join(RULES_FILE),
+        r#"{"version": 9, "rules": [{"id": "r-x", "enabled": false,
+            "match": {"client": ["10.0.0.7"]},
+            "action": {"type": "proxy", "group_id": "g-x"}}]}"#,
+    )
+    .unwrap();
+    let error = load(&root).err().expect("refused");
+    assert!(error.contains("client"), "{error}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_failed_ruleset_publication_leaves_the_old_list_in_force() {
+    let root = scratch("ruleset-commit");
+    let rules = owner(&root);
+    let set = rules
+        .create_ruleset("mine", Source::Local, vec!["old.example".to_owned()])
+        .unwrap();
+    let matches = Match {
+        ruleset: vec![set.id.clone()],
+        ..Match::default()
+    };
+    rules
+        .create(input(matches, Action::Block), None, None, None)
+        .unwrap();
+    // The metadata write fails (its path is now a non-empty directory).
+    let metadata = root.join(RULESETS_FILE);
+    let saved = std::fs::read(&metadata).unwrap();
+    std::fs::remove_file(&metadata).unwrap();
+    std::fs::create_dir_all(metadata.join("blocker")).unwrap();
+    let failed = rules
+        .update_ruleset(&set.id, None, None, Some(vec!["new.example".to_owned()]))
+        .unwrap_err();
+    assert_eq!(failed.status, 500);
+    assert_eq!(
+        hit(&rules, "old.example"),
+        Some(Action::Block),
+        "still live"
+    );
+    assert_eq!(hit(&rules, "new.example"), None);
+    assert!(
+        !list_path(&root, &set.id, 2).exists(),
+        "staged list removed"
+    );
+    // A restart still has the old list with the old metadata.
+    drop(rules);
+    std::fs::remove_dir_all(&metadata).unwrap();
+    std::fs::write(&metadata, saved).unwrap();
+    let rules = owner(&root);
+    assert_eq!(hit(&rules, "old.example"), Some(Action::Block));
+    assert_eq!(hit(&rules, "new.example"), None);
+    assert_eq!(rules.ruleset_entries(&set.id).unwrap(), vec!["old.example"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_download_of_a_replaced_source_is_discarded() {
+    let root = scratch("download-race");
+    let rules = owner(&root);
+    let remote = |url: &str| Source::Remote {
+        url: url.to_owned(),
+        format: "text".to_owned(),
+        category: String::new(),
+    };
+    let set = rules
+        .create_ruleset("r", remote("https://a.example/list.txt"), Vec::new())
+        .unwrap();
+    let started_with = set.source.clone();
+    // The source changes while the download of A is still running.
+    rules
+        .update_ruleset(
+            &set.id,
+            None,
+            Some(remote("https://b.example/list.txt")),
+            None,
+        )
+        .unwrap();
+    let late = convert_download(b"from-a.example\n", "text", "", "x.txt");
+    let refused = rules
+        .store_download(&set.id, &started_with, late)
+        .unwrap_err();
+    assert_eq!(refused.status, 409, "{}", refused.message);
+    let current = rules.ruleset(&set.id).unwrap();
+    assert_eq!((current.revision, current.rule_count), (0, 0));
+    assert!(
+        current.last_error.is_empty(),
+        "the late result is not recorded"
+    );
+    let failed_late = rules.store_download(&set.id, &started_with, Err("x".to_owned()));
+    assert_eq!(failed_late.unwrap_err().status, 409);
+    // B's own download is installed.
+    let b = convert_download(b"from-b.example\n", "text", "", "x.txt");
+    let stored = rules.store_download(&set.id, &current.source, b).unwrap();
+    assert_eq!((stored.revision, stored.rule_count), (1, 1));
+    assert_eq!(
+        rules.ruleset_entries(&set.id).unwrap(),
+        vec!["domain:from-b.example"]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_referenced_list_file_must_exist() {
+    let root = scratch("missing-list");
+    let rules = owner(&root);
+    let local = rules
+        .create_ruleset("mine", Source::Local, vec!["a.example".to_owned()])
+        .unwrap();
+    // A remote set whose first download failed has no list: revision 0.
+    let remote = rules
+        .create_ruleset(
+            "remote",
+            Source::Remote {
+                url: "https://example.com/list.txt".to_owned(),
+                format: "text".to_owned(),
+                category: String::new(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+    let remote = rules
+        .store_download(
+            &remote.id,
+            &remote.source,
+            Err("下载失败: timed out".to_owned()),
+        )
+        .unwrap();
+    assert_eq!((remote.revision, remote.rule_count), (0, 0));
+    assert!(!list_path(&root, &remote.id, 0).exists());
+    drop(rules);
+    let rules = owner(&root);
+    assert!(rules.ruleset_entries(&remote.id).unwrap().is_empty());
+    drop(rules);
+    // A lost list file of a set that has one stops the load.
+    std::fs::remove_file(list_path(&root, &local.id, 1)).unwrap();
+    let error = load(&root).err().expect("refused");
+    assert!(error.contains(&local.id), "{error}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
