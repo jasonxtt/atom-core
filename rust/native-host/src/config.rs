@@ -416,6 +416,9 @@ impl LocalPlugins {
         for learner in &self.learners {
             learner.runtime.start();
         }
+        if let Some(rules) = &self.atom_rules {
+            rules.start();
+        }
     }
 
     /// Hands the live learned state of `previous` (the generation this one
@@ -1080,6 +1083,9 @@ fn finish_compile(
     compiled.flag_legacy_notes = std::mem::take(&mut applied.legacy_notes);
     compiled.settings_report = applied.items;
     compiled.effective_upstreams = applied.upstreams;
+    if let Some(rules) = &compiled.local.atom_rules {
+        rules.set_default_resolver(&compiled.effective_upstreams);
+    }
     compiled.yaml_defaults = applied.defaults;
     compiled.standard_groups = standard;
     Ok(compiled)
@@ -3837,7 +3843,7 @@ fn compile_atom_rules(
     use crate::atom_rules::{AtomRules, BuiltinSet, Marks};
     let path = format!("{}.args", plugin.source_path);
     let args = expect_map(&plugin.args, &path, "atom_rules args must be a mapping")?;
-    args.reject_unknown(&["marks", "builtin", "mapper", "socks5"], &path)?;
+    args.reject_unknown(&["marks", "builtin", "mapper", "socks5", "singbox"], &path)?;
     let marks_path = format!("{path}.marks");
     let marks = expect_map(
         args.required("marks", &path)?,
@@ -3902,9 +3908,83 @@ fn compile_atom_rules(
             builtin.push((name, set));
         }
     }
-    let rules = AtomRules::load(&plugin.root_dir, marks, mapper, socks5, builtin)
+    let singbox = match args.get("singbox") {
+        None | Some(RawValue::Null) => None,
+        Some(value) => Some(compile_singbox_host(
+            value,
+            &format!("{path}.singbox"),
+            &plugin.root_dir,
+        )?),
+    };
+    let rules = AtomRules::load(&plugin.root_dir, marks, mapper, socks5, builtin, singbox)
         .map_err(|reason| ConfigError::new(&path, reason))?;
     Ok(Rc::new(rules))
+}
+
+/// `atom_rules.args.singbox` (atom fork): where sing-box runs and how it is
+/// reloaded (design §6). Relative paths are under the configuration root.
+fn compile_singbox_host(
+    value: &RawValue,
+    path: &str,
+    root: &Path,
+) -> Result<crate::atom_singbox::Host, ConfigError> {
+    let args = expect_map(value, path, "singbox must be a mapping")?;
+    args.reject_unknown(
+        &[
+            "binary",
+            "dir",
+            "reload",
+            "clash_api",
+            "dns_in",
+            "atomdns",
+            "redirect_port",
+            "tproxy_port",
+            "resolver_group",
+        ],
+        path,
+    )?;
+    let string = |key: &str| -> Result<String, ConfigError> {
+        expect_string(args.required(key, path)?, &format!("{path}.{key}"))
+    };
+    let socket = |key: &str| -> Result<std::net::SocketAddr, ConfigError> {
+        let text = string(key)?;
+        text.parse().map_err(|_| {
+            ConfigError::new(format!("{path}.{key}"), format!("`{text}` is not IP:port"))
+        })
+    };
+    let port = |key: &str| -> Result<u16, ConfigError> {
+        let key_path = format!("{path}.{key}");
+        let value = expect_positive_integer(args.required(key, path)?, &key_path)?;
+        u16::try_from(value).map_err(|_| ConfigError::new(key_path, "a port is at most 65535"))
+    };
+    let under_root = |text: String| {
+        let candidate = PathBuf::from(&text);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            root.join(candidate)
+        }
+    };
+    let reload_path = format!("{path}.reload");
+    let reload: Vec<String> = expect_sequence(args.required("reload", path)?, &reload_path)?
+        .iter()
+        .enumerate()
+        .map(|(index, item)| expect_string(item, &format!("{reload_path}[{index}]")))
+        .collect::<Result<_, _>>()?;
+    if reload.is_empty() {
+        return Err(ConfigError::new(reload_path, "reload needs a command"));
+    }
+    Ok(crate::atom_singbox::Host {
+        binary: under_root(string("binary")?),
+        dir: under_root(string("dir")?),
+        reload,
+        clash_api: socket("clash_api")?,
+        dns_in: socket("dns_in")?,
+        atomdns: socket("atomdns")?,
+        redirect_port: port("redirect_port")?,
+        tproxy_port: port("tproxy_port")?,
+        resolver_group: string("resolver_group")?,
+    })
 }
 
 fn compile_webinfo(plugin: &RawPlugin) -> Result<(WebInfo, PathBuf), ConfigError> {

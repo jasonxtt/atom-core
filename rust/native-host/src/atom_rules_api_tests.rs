@@ -58,6 +58,7 @@ impl Api {
         let reply = self
             .assembly
             .block_on(handle(
+                None,
                 self.assembly.config(),
                 self.assembly.cache(),
                 method,

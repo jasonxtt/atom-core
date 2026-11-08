@@ -29,3 +29,11 @@ atom 删除了在线更新和配置包，这份配置随程序一起发布，用
 - 删除固定的广告屏蔽步骤（fast_mark 5 + `flag block_ads`）和 `block_ads` 开关：广告屏蔽是默认规则表里的一条规则，
   可以被排在前面的直连规则放行。`unified_matcher1` 仍给广告域名打 mark 5（只影响诊断标签）。
 - 黑名单、白名单、灰名单、`cuscn`、`cusnocn` 暂时留在原判断里，第 6 步换 WebUI 时并入规则表。
+
+第 3 步（sing-box 配置生成，atom 设计文档第 5、6 节）：
+
+- `sub_config/atom_rules.yaml` 的 `atom_rules` 插件加了 `singbox` 段：sing-box 程序、工作目录（配置根下的 `sing-box/`，
+  放 atom 生成的 `config.json` 和 `cache.db`）、重载命令（`systemctl reload-or-restart atom-sing-box.service`）、
+  Clash API `127.0.0.1:9090`、FakeIP DNS 入站 `127.0.0.1:6666`（和 `nocnfake` 一致）、本机 AtomDNS `127.0.0.1:53`、
+  redirect 7892 / tproxy 7893、默认 resolver 取自 `domestic` 组。节点、组、Final 和 sing-box 设置存在
+  `webinfo/atom_proxy.json`，由 `/api/v1/atom/` 管理，这份配置里不放。

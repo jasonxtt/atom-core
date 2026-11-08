@@ -2579,6 +2579,7 @@ async fn dispatch(
         .split_once('?')
         .map_or(request.target.as_str(), |(path, _)| path);
     if let Some(reply) = crate::atom_rules_api::handle(
+        control,
         config,
         cache,
         &request.method,

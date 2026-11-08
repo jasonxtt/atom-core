@@ -13,6 +13,9 @@
 //! | `rulesets/{id}` | GET (with `rules`), PUT, DELETE |
 //! | `rulesets/{id}/refresh` | POST (download a remote ruleset again) |
 //!
+//! Nodes, groups, Final, the sing-box settings, `status` and `apply` are in
+//! [`crate::atom_proxy_api`].
+//!
 //! Every successful change empties all caches (design §4.5, v0: clear
 //! everything), so no cached answer outlives the rule that produced it.
 
@@ -31,7 +34,7 @@ pub(crate) const PREFIX: &str = "/api/v1/atom/";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const DOWNLOAD_LIMIT: usize = 64 * 1024 * 1024;
 
-fn json(status: u16, value: &serde_json::Value) -> Reply {
+pub(crate) fn json(status: u16, value: &serde_json::Value) -> Reply {
     let mut body = serde_json::to_vec(value).unwrap_or_default();
     body.push(b'\n');
     Reply {
@@ -42,11 +45,11 @@ fn json(status: u16, value: &serde_json::Value) -> Reply {
     }
 }
 
-fn error(status: u16, message: impl std::fmt::Display) -> Reply {
+pub(crate) fn error(status: u16, message: impl std::fmt::Display) -> Reply {
     json(status, &serde_json::json!({ "error": message.to_string() }))
 }
 
-fn refusal(refusal: &Refusal) -> Reply {
+pub(crate) fn refusal(refusal: &Refusal) -> Reply {
     let mut value = serde_json::json!({ "error": refusal.message });
     if let Some(version) = refusal.version {
         value["version"] = version.into();
@@ -57,19 +60,24 @@ fn refusal(refusal: &Refusal) -> Reply {
     json(refusal.status, &value)
 }
 
-fn body<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Reply> {
+pub(crate) fn body<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Reply> {
     serde_json::from_slice(bytes).map_err(|e| error(400, format!("invalid request body: {e}")))
 }
 
 /// Whether a request changes the rule table or the rulesets (it then takes
 /// the management lease). `rules/test` only reads.
+/// `PUT settings` takes the lease itself: a mixed port change reloads the
+/// AtomDNS configuration afterwards, which waits for every lease.
 pub(crate) fn mutates(method: &str, path: &str) -> bool {
     path.strip_prefix(PREFIX).is_some_and(|rest| {
-        matches!(method, "POST" | "PUT" | "DELETE") && rest.trim_end_matches('/') != "rules/test"
+        let rest = rest.trim_end_matches('/');
+        matches!(method, "POST" | "PUT" | "DELETE")
+            && rest != "rules/test"
+            && !(method == "PUT" && rest == "settings")
     })
 }
 
-fn query_version(query: Option<&str>) -> Result<Option<u64>, Reply> {
+pub(crate) fn query_version(query: Option<&str>) -> Result<Option<u64>, Reply> {
     let Some(query) = query else {
         return Ok(None);
     };
@@ -89,7 +97,10 @@ fn query_version(query: Option<&str>) -> Result<Option<u64>, Reply> {
 /// persist its empty dump, the cache is discarded instead (memory cleared,
 /// dump file removed). What still fails is returned, and the change is
 /// reported as applied but not fully flushed.
-async fn flush_caches(config: &CompiledConfig, cache: &CacheCatalog) -> Result<(), String> {
+pub(crate) async fn flush_caches(
+    config: &CompiledConfig,
+    cache: &CacheCatalog,
+) -> Result<(), String> {
     let mut failed = Vec::new();
     for item in &config.caches {
         let Some(store) = cache.get(item.id) else {
@@ -114,6 +125,7 @@ async fn flush_caches(config: &CompiledConfig, cache: &CacheCatalog) -> Result<(
 }
 
 pub(crate) async fn handle(
+    control: Option<&crate::runtime_snapshot::RuntimeControl>,
     config: &CompiledConfig,
     cache: &CacheCatalog,
     method: &str,
@@ -134,17 +146,11 @@ pub(crate) async fn handle(
     let segments: Vec<&str> = rest.split('/').collect();
     let reply = match (method, segments.as_slice()) {
         ("GET", ["rules"]) => return Some(list_rules(rules)),
-        ("POST", ["rules"]) => create_rule(rules, request_body),
-        ("POST", ["rules", "move"]) => move_rule(rules, request_body),
+        ("POST", ["rules"]) => create_rule(rules, request_body).await,
+        ("POST", ["rules", "move"]) => move_rule(rules, request_body).await,
         ("POST", ["rules", "test"]) => return Some(test_rule(config, rules, request_body)),
-        ("PUT", ["rules", id]) => update_rule(rules, id, request_body),
-        ("DELETE", ["rules", id]) => match query_version(query) {
-            Ok(version) => match rules.delete(id, version) {
-                Ok(version) => Ok(json(200, &serde_json::json!({ "version": version }))),
-                Err(e) => Err(refusal(&e)),
-            },
-            Err(reply) => Err(reply),
-        },
+        ("PUT", ["rules", id]) => update_rule(rules, id, request_body).await,
+        ("DELETE", ["rules", id]) => delete_rule(rules, id, query).await,
         ("GET", ["rulesets"]) => return Some(list_rulesets(rules)),
         ("GET", ["rulesets", id]) => return Some(show_ruleset(rules, id)),
         ("POST", ["rulesets"]) => create_ruleset(rules, request_body, shutdown).await,
@@ -155,7 +161,21 @@ pub(crate) async fn handle(
         },
         ("POST", ["rulesets", id, "refresh"]) => refresh_ruleset(rules, id, shutdown).await,
         (_, ["rules" | "rulesets", ..]) => return Some(error(405, "method not allowed")),
-        _ => return Some(error(404, "not found")),
+        _ => {
+            return Some(
+                crate::atom_proxy_api::handle(
+                    control,
+                    config,
+                    cache,
+                    rules,
+                    method,
+                    &segments,
+                    query,
+                    request_body,
+                )
+                .await,
+            );
+        }
     };
     Some(match reply {
         Ok(reply) => match flush_caches(config, cache).await {
@@ -220,34 +240,43 @@ struct Replace {
     version: Option<u64>,
 }
 
-fn create_rule(rules: &AtomRules, bytes: &[u8]) -> Result<Reply, Reply> {
+async fn create_rule(rules: &AtomRules, bytes: &[u8]) -> Result<Reply, Reply> {
     let create: Create = body(bytes)?;
-    let (version, rule) = rules
-        .create(
+    let (next, (version, rule)) = rules
+        .plan_create(
             create.rule.into(),
             create.version,
             create.before_id.as_deref(),
             create.after_id.as_deref(),
         )
         .map_err(|e| refusal(&e))?;
+    rules.commit_rules(next).await.map_err(|e| refusal(&e))?;
     Ok(json(
         201,
         &serde_json::json!({ "version": version, "rule": rule }),
     ))
 }
 
-fn update_rule(rules: &AtomRules, id: &str, bytes: &[u8]) -> Result<Reply, Reply> {
+async fn update_rule(rules: &AtomRules, id: &str, bytes: &[u8]) -> Result<Reply, Reply> {
     let replace: Replace = body(bytes)?;
-    let (version, rule) = rules
-        .update(id, replace.rule.into(), replace.version)
+    let (next, (version, rule)) = rules
+        .plan_update(id, replace.rule.into(), replace.version)
         .map_err(|e| refusal(&e))?;
+    rules.commit_rules(next).await.map_err(|e| refusal(&e))?;
     Ok(json(
         200,
         &serde_json::json!({ "version": version, "rule": rule }),
     ))
 }
 
-fn move_rule(rules: &AtomRules, bytes: &[u8]) -> Result<Reply, Reply> {
+async fn delete_rule(rules: &AtomRules, id: &str, query: Option<&str>) -> Result<Reply, Reply> {
+    let version = query_version(query)?;
+    let (next, version) = rules.plan_delete(id, version).map_err(|e| refusal(&e))?;
+    rules.commit_rules(next).await.map_err(|e| refusal(&e))?;
+    Ok(json(200, &serde_json::json!({ "version": version })))
+}
+
+async fn move_rule(rules: &AtomRules, bytes: &[u8]) -> Result<Reply, Reply> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Move {
@@ -260,14 +289,15 @@ fn move_rule(rules: &AtomRules, bytes: &[u8]) -> Result<Reply, Reply> {
     let Some(version) = request.version else {
         return Err(error(400, "move 需要 version"));
     };
-    let version = rules
-        .move_rule(
+    let (next, version) = rules
+        .plan_move(
             &request.id,
             request.before_id.as_deref(),
             request.after_id.as_deref(),
             version,
         )
         .map_err(|e| refusal(&e))?;
+    rules.commit_rules(next).await.map_err(|e| refusal(&e))?;
     let (_, list) = rules.rules();
     Ok(json(
         200,

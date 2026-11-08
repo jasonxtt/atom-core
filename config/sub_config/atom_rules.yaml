@@ -15,6 +15,18 @@
 # builtin：规则的 ruleset 条件可以直接引用的内置集合。
 #   adguard 是 adguard_rule（sub_config/adguard.yaml），按它自己的屏蔽/放行规则匹配；
 #   geosite_cn、geosite_no_cn 是 unified_matcher1 打标的名单，按 mapper 给它们打的 fast_mark 判断（所以 $atom_rules 必须在 $unified_matcher1 之后）。
+#
+# singbox：本机 sing-box 怎么运行（atom 设计文档第 5、6 节）。节点、节点组、Final 和 sing-box 设置存在
+# webinfo/atom_proxy.json，由 /api/v1/atom/nodes、groups、final、settings 管理；atom 完整生成 sing-box
+# 的配置（dir 下的 config.json，用户不手改），改动时：sing-box check → 原子写入 → reload 命令 → 用 Clash API
+# 确认（每次换新密钥）→ 失败就写回旧配置再重载。
+#   binary          sing-box 程序（check 用）；dir 是它的工作目录（config.json、cache.db），相对路径在配置根目录下
+#   reload          写入配置后执行的命令：独立的 systemd 单元，ExecReload 发 SIGHUP；单元没在运行时 reload-or-restart 会启动它
+#   clash_api       Clash API 只监听本机
+#   dns_in          FakeIP DNS 入站，必须和 forward_1.yaml 里 nocnfake 的地址一致
+#   atomdns         本机 AtomDNS 的 DNS 地址，mixed 入站（settings 里的 mixed_port，默认 7890）先用它 resolve
+#   redirect_port / tproxy_port   nft 把 FakeIP 网段和 IP 规则网段的 TCP / UDP 导进来的端口
+#   resolver_group  解析节点域名的默认上游：取这个上游组里第一个 udp/tcp 地址（settings 的 resolver 可以另外指定）
 plugins:
   - tag: atom_rules
     type: atom_rules
@@ -23,3 +35,13 @@ plugins:
       mapper: unified_matcher1
       builtin: [adguard, geosite_cn, geosite_no_cn]
       proxy: $main_proxy                        #下载远程规则集用的代理；定义: sub_config/settings.yaml
+      singbox:
+        binary: /usr/local/bin/sing-box
+        dir: sing-box
+        reload: [systemctl, reload-or-restart, atom-sing-box.service]
+        clash_api: "127.0.0.1:9090"
+        dns_in: "127.0.0.1:6666"
+        atomdns: "127.0.0.1:53"
+        redirect_port: 7892
+        tproxy_port: 7893
+        resolver_group: domestic

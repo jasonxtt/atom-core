@@ -28,6 +28,7 @@ fn load(root: &Path) -> Result<AtomRules, String> {
         None,
         String::new(),
         vec![("adguard".to_owned(), BuiltinSet::Mark(ADS))],
+        None,
     )
 }
 
@@ -83,7 +84,8 @@ fn default_table_sends_lan_direct_and_blocks_ads() {
     );
     assert_eq!(hit(&rules, "example.com"), None, "falls through");
     // Without the adguard builtin only the LAN rule is installed.
-    let bare = AtomRules::load(Path::new(""), MARKS, None, String::new(), Vec::new()).unwrap();
+    let bare =
+        AtomRules::load(Path::new(""), MARKS, None, String::new(), Vec::new(), None).unwrap();
     assert_eq!(bare.rules().1.len(), 1);
 }
 
@@ -280,7 +282,7 @@ fn changes_persist_and_loading_writes_nothing() {
     assert!(text.contains("\"group_id\": \"g-1\""), "{text}");
     // A broken file stops the compile instead of being replaced.
     std::fs::write(root.join(RULES_FILE), b"{").unwrap();
-    assert!(AtomRules::load(&root, MARKS, None, String::new(), Vec::new()).is_err());
+    assert!(AtomRules::load(&root, MARKS, None, String::new(), Vec::new(), None).is_err());
     let _ = std::fs::remove_dir_all(&root);
 }
 

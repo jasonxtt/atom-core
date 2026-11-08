@@ -3,8 +3,12 @@
 
 mod api;
 mod assembly;
+mod atom_links;
+mod atom_proxy;
+mod atom_proxy_api;
 mod atom_rules;
 mod atom_rules_api;
+mod atom_singbox;
 mod bind;
 pub mod build_identity;
 mod cache;

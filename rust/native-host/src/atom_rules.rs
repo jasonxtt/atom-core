@@ -9,9 +9,15 @@
 //! Conditions: the name conditions (`domain`, `suffix`, `keyword`, `regex`,
 //! `ruleset`) are one class and the `client` addresses another. Within a
 //! class any entry may match; every class a rule uses must match. A rule
-//! with a `client` condition can only be direct or block. `ip_cidr`
-//! is matched by sing-box (design §4.6) and refused here until the sing-box
-//! configuration is generated.
+//! with a `client` condition can only be direct or block. `ip_cidr` rules
+//! are matched by sing-box (design §4.6): they stand alone (no name or
+//! client condition), take no part in the DNS table, and are compiled into
+//! the generated sing-box route rules in table order ([`singbox`]).
+//!
+//! With a `singbox` section in the plugin arguments the table also owns the
+//! proxy side (nodes, groups, Final, settings: [`crate::atom_proxy`]): a
+//! proxy rule's group must exist, and a change that alters the generated
+//! sing-box configuration is applied to sing-box before it is saved.
 //!
 //! The `atom_rules` plugin is a fixture: it only marks the query (one fast
 //! mark per action) and, for proxy, records the group in
@@ -37,8 +43,12 @@ use atomdns_sequence_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::atom_proxy::ProxyState;
 use crate::managed::DomainSetHandle;
 use crate::rule_sources::Live;
+
+mod singbox;
+pub(crate) use singbox::last_apply;
 
 pub(crate) const RULES_FILE: &str = "webinfo/atom_rules.json";
 pub(crate) const RULESETS_FILE: &str = "webinfo/atom_rulesets.json";
@@ -71,7 +81,8 @@ pub(crate) struct Match {
     /// Client addresses or prefixes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) client: Vec<String>,
-    /// Target IP prefixes (matched by sing-box; not accepted yet).
+    /// Target IP prefixes (matched by sing-box; a rule with them has no
+    /// other condition).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) ip_cidr: Vec<String>,
 }
@@ -89,8 +100,9 @@ impl Match {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum Action {
-    /// `group_id` is a sing-box outbound tag. Groups arrive with the sing-box
-    /// configuration (atom step 3); until then any well-formed tag is kept.
+    /// `group_id` is a sing-box outbound tag: a node group (`g-*`) or
+    /// Final (`final`). Without a proxy side (no `singbox` section) only its
+    /// form is checked.
     Proxy {
         group_id: String,
     },
@@ -322,7 +334,7 @@ impl Marks {
 }
 
 #[derive(Clone)]
-struct State {
+pub(crate) struct State {
     version: u64,
     rules: Vec<Rule>,
     rulesets: Vec<Ruleset>,
@@ -347,6 +359,11 @@ pub(crate) struct AtomRules {
     /// older snapshot over a newer one.
     downloads: RefCell<BTreeMap<String, u64>>,
     next_download: std::cell::Cell<u64>,
+    /// The proxy side (`singbox` section); `None`: rules only.
+    proxy: Option<singbox::Proxy>,
+    /// A change is being applied to sing-box: other changes are refused
+    /// until it is saved or rolled back.
+    busy: std::cell::Cell<bool>,
 }
 
 /// The default table of a new installation (design §4.4). The ads rule
@@ -395,7 +412,7 @@ fn now() -> i64 {
         })
 }
 
-fn new_id(prefix: &str, taken: &dyn Fn(&str) -> bool) -> String {
+pub(crate) fn new_id(prefix: &str, taken: &dyn Fn(&str) -> bool) -> String {
     loop {
         let mut bytes = [0u8; 4];
         if getrandom::fill(&mut bytes).is_err() {
@@ -474,8 +491,9 @@ fn parse_client(value: &str) -> Result<(IpAddr, u8), Refusal> {
         .ok_or_else(|| Refusal::invalid(format!("client 条目 `{value}` 不是 IP 地址或网段")))
 }
 
-/// Reserved for the group check of atom step 3 (the group must exist).
-fn validate_group(group: &str) -> Result<(), Refusal> {
+/// A proxy rule's group: a group of `proxy` or Final; without a proxy
+/// side, any well-formed tag.
+fn validate_group(group: &str, proxy: Option<&ProxyState>) -> Result<(), Refusal> {
     if group.trim().is_empty() {
         return Err(Refusal::invalid("代理动作需要 group_id"));
     }
@@ -485,7 +503,53 @@ fn validate_group(group: &str) -> Result<(), Refusal> {
             "group_id `{group}` 无效：不能有首尾空白或控制字符，最长 {MAX_GROUP_BYTES} 字节"
         )));
     }
+    if let Some(proxy) = proxy {
+        if !proxy.is_target(group) {
+            return Err(Refusal::invalid(format!("节点组 `{group}` 不存在")));
+        }
+    }
     Ok(())
+}
+
+/// An `ip_cidr` entry in its canonical `address/bits` form.
+fn ip_entry(value: &str) -> Result<String, Refusal> {
+    let (address, bits) = crate::rule_formats::parse_prefix(value.trim())
+        .ok_or_else(|| Refusal::invalid(format!("ip_cidr 条目 `{value}` 不是 IP 地址或网段")))?;
+    Ok(match address {
+        IpAddr::V4(v4) => {
+            let masked = if bits == 0 {
+                0
+            } else {
+                u32::from(v4) & (u32::MAX << (32 - u32::from(bits)))
+            };
+            format!("{}/{bits}", std::net::Ipv4Addr::from(masked))
+        }
+        IpAddr::V6(v6) => {
+            let masked = if bits == 0 {
+                0
+            } else {
+                u128::from(v6) & (u128::MAX << (128 - u32::from(bits)))
+            };
+            format!("{}/{bits}", std::net::Ipv6Addr::from(masked))
+        }
+    })
+}
+
+/// The enabled `ip_cidr` rules of `rules`, in order: what sing-box matches.
+pub(crate) fn ip_rules(rules: &[Rule]) -> Vec<crate::atom_singbox::IpRule> {
+    rules
+        .iter()
+        .filter(|rule| rule.enabled && !rule.matches.ip_cidr.is_empty())
+        .map(|rule| crate::atom_singbox::IpRule {
+            cidrs: rule
+                .matches
+                .ip_cidr
+                .iter()
+                .filter_map(|value| ip_entry(value).ok())
+                .collect(),
+            action: rule.action.clone(),
+        })
+        .collect()
 }
 
 impl AtomRules {
@@ -498,6 +562,7 @@ impl AtomRules {
         mapper: Option<String>,
         socks5: String,
         builtin: Vec<(String, BuiltinSet)>,
+        singbox: Option<crate::atom_singbox::Host>,
     ) -> Result<Self, String> {
         let adguard = builtin.iter().any(|(name, _)| name == "adguard");
         let (version, rules) = if root.as_os_str().is_empty() {
@@ -574,12 +639,20 @@ impl AtomRules {
             table: Live::new(Table::default()),
             downloads: RefCell::new(BTreeMap::new()),
             next_download: std::cell::Cell::new(0),
+            proxy: match singbox {
+                Some(host) => Some(singbox::Proxy::load(root, host)?),
+                None => None,
+            },
+            busy: std::cell::Cell::new(false),
         };
         let table = {
             let state = rules_owner.state.borrow();
-            rules_owner.compile(&state).map_err(|refusal| {
-                format!("{}: {}", root.join(RULES_FILE).display(), refusal.message)
-            })?
+            let proxy = rules_owner.proxy_state();
+            rules_owner
+                .compile(&state, proxy.as_ref())
+                .map_err(|refusal| {
+                    format!("{}: {}", root.join(RULES_FILE).display(), refusal.message)
+                })?
         };
         rules_owner.table.replace(Rc::new(table));
         Ok(rules_owner)
@@ -598,17 +671,44 @@ impl AtomRules {
             .map(|(_, set)| set)
     }
 
-    /// Validates one rule against `state` and compiles it.
-    fn compile_rule(&self, state: &State, index: usize, rule: &Rule) -> Result<Compiled, Refusal> {
+    /// Validates one rule against `state` (and the groups of `proxy`) and
+    /// compiles it; an `ip_cidr` rule is validated only (sing-box matches
+    /// it).
+    fn compile_rule(
+        &self,
+        state: &State,
+        proxy: Option<&ProxyState>,
+        index: usize,
+        rule: &Rule,
+    ) -> Result<Option<Compiled>, Refusal> {
         let at = |refusal: Refusal| Refusal {
             message: format!("规则 {}: {}", rule.id, refusal.message),
             ..refusal
         };
         let m = &rule.matches;
         if !m.ip_cidr.is_empty() {
-            return Err(at(Refusal::invalid(
-                "ip_cidr 条件由 sing-box 匹配，要等 sing-box 配置生成（atom 第 3 步）后才能使用",
-            )));
+            if self.proxy.is_none() {
+                return Err(at(Refusal::invalid(
+                    "ip_cidr 条件由 sing-box 匹配，需要配置里的 singbox 段",
+                )));
+            }
+            if m.has_name() || !m.client.is_empty() {
+                return Err(at(Refusal::invalid(
+                    "ip_cidr 规则只能单独使用，不能再带域名或 client 条件",
+                )));
+            }
+            if m.ip_cidr.len() > MAX_LIST_RULES {
+                return Err(at(Refusal::invalid(format!(
+                    "ip_cidr 条目超过 {MAX_LIST_RULES}"
+                ))));
+            }
+            for value in &m.ip_cidr {
+                ip_entry(value).map_err(at)?;
+            }
+            if let Action::Proxy { group_id } = &rule.action {
+                validate_group(group_id, proxy).map_err(at)?;
+            }
+            return Ok(None);
         }
         if !m.has_name() && m.client.is_empty() {
             return Err(at(Refusal::invalid("规则至少要有一个匹配条件")));
@@ -664,7 +764,7 @@ impl AtomRules {
                         "带 client 条件的规则只能直连或屏蔽：sing-box 只按域名绑定出站组、不区分客户端，代理规则对所有客户端必须一样",
                     )));
                 }
-                validate_group(group_id).map_err(at)?;
+                validate_group(group_id, proxy).map_err(at)?;
                 Verdict::Proxy(Arc::from(group_id.as_str()))
             }
             Action::Direct => Verdict::Direct,
@@ -675,7 +775,7 @@ impl AtomRules {
         } else {
             rule.remark.trim()
         };
-        Ok(Compiled {
+        Ok(Some(Compiled {
             index,
             inline,
             sets,
@@ -683,41 +783,45 @@ impl AtomRules {
             verdict,
             label: format!("规则:{}", shown.replace('|', "/")),
             source: format!("atom_rule:{}", rule.id),
-        })
+        }))
     }
 
     /// Compiles every enabled rule of `state`. A disabled rule is still
     /// validated, so it can be enabled later without surprises.
-    fn compile(&self, state: &State) -> Result<Table, Refusal> {
+    fn compile(&self, state: &State, proxy: Option<&ProxyState>) -> Result<Table, Refusal> {
         let mut ids = std::collections::BTreeSet::new();
         let mut rules = Vec::new();
         for (index, rule) in state.rules.iter().enumerate() {
             if !ids.insert(rule.id.as_str()) {
                 return Err(Refusal::invalid(format!("规则 ID `{}` 重复", rule.id)));
             }
-            let compiled = self.compile_rule(state, index, rule)?;
-            if rule.enabled {
+            let compiled = self.compile_rule(state, proxy, index, rule)?;
+            if let (true, Some(compiled)) = (rule.enabled, compiled) {
                 rules.push(compiled);
             }
         }
         Ok(Table { rules })
     }
 
-    /// Validates `next`, writes what changed, and publishes it.
+    /// Validates `next`, writes what changed, and publishes it. A change of
+    /// the IP rules goes through [`Self::commit_rules`] instead (sing-box
+    /// first).
     fn commit(&self, next: State, rules: bool, rulesets: bool) -> Result<(), Refusal> {
-        let table = self.compile(&next)?;
+        if self.busy.get() {
+            return Err(singbox::busy());
+        }
+        if self.proxy.is_some() && ip_rules(&next.rules) != ip_rules(&self.state.borrow().rules) {
+            return Err(Refusal::new(
+                500,
+                "内部错误：改动 IP 规则需要先应用 sing-box 配置",
+            ));
+        }
+        let proxy = self.proxy_state();
+        let table = self.compile(&next, proxy.as_ref())?;
         if !self.root.as_os_str().is_empty() {
             let failed = |error: std::io::Error| Refusal::new(500, format!("保存失败: {error}"));
             if rules {
-                let file = RulesFile {
-                    version: next.version,
-                    rules: next.rules.clone(),
-                };
-                let mut bytes = serde_json::to_vec_pretty(&file)
-                    .map_err(|error| Refusal::new(500, error.to_string()))?;
-                bytes.push(b'\n');
-                crate::runtime_snapshot::write_durably(&self.root.join(RULES_FILE), &bytes)
-                    .map_err(failed)?;
+                self.write_rules_file(&next).map_err(failed)?;
             }
             if rulesets {
                 let mut bytes = serde_json::to_vec_pretty(&next.rulesets)
@@ -730,6 +834,16 @@ impl AtomRules {
         *self.state.borrow_mut() = next;
         self.table.replace(Rc::new(table));
         Ok(())
+    }
+
+    fn write_rules_file(&self, state: &State) -> std::io::Result<()> {
+        let file = RulesFile {
+            version: state.version,
+            rules: state.rules.clone(),
+        };
+        let mut bytes = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
+        bytes.push(b'\n');
+        crate::runtime_snapshot::write_durably(&self.root.join(RULES_FILE), &bytes)
     }
 
     fn check_version(state: &State, version: Option<u64>) -> Result<(), Refusal> {
@@ -777,6 +891,7 @@ impl AtomRules {
         (state.version, state.rules.clone())
     }
 
+    #[cfg(test)]
     pub(crate) fn create(
         &self,
         input: RuleInput,
@@ -784,6 +899,54 @@ impl AtomRules {
         before: Option<&str>,
         after: Option<&str>,
     ) -> Result<(u64, Rule), Refusal> {
+        let (next, done) = self.plan_create(input, version, before, after)?;
+        self.commit(next, true, false)?;
+        Ok(done)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn update(
+        &self,
+        id: &str,
+        input: RuleInput,
+        version: Option<u64>,
+    ) -> Result<(u64, Rule), Refusal> {
+        let (next, done) = self.plan_update(id, input, version)?;
+        self.commit(next, true, false)?;
+        Ok(done)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete(&self, id: &str, version: Option<u64>) -> Result<u64, Refusal> {
+        let (next, done) = self.plan_delete(id, version)?;
+        self.commit(next, true, false)?;
+        Ok(done)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn move_rule(
+        &self,
+        id: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+        version: u64,
+    ) -> Result<u64, Refusal> {
+        let (next, done) = self.plan_move(id, before, after, version)?;
+        self.commit(next, true, false)?;
+        Ok(done)
+    }
+
+    // The four methods above are the synchronous form the tests use; the
+    // plans build the next state, and the API commits it with
+    // `commit_rules` (sing-box first when the IP rules change).
+
+    pub(crate) fn plan_create(
+        &self,
+        input: RuleInput,
+        version: Option<u64>,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<(State, (u64, Rule)), Refusal> {
         let mut next = self.state.borrow().clone();
         Self::check_version(&next, version)?;
         let at = Self::anchor(&next, before, after)?;
@@ -799,16 +962,15 @@ impl AtomRules {
             .insert(at.unwrap_or(next.rules.len()), rule.clone());
         next.version += 1;
         let version = next.version;
-        self.commit(next, true, false)?;
-        Ok((version, rule))
+        Ok((next, (version, rule)))
     }
 
-    pub(crate) fn update(
+    pub(crate) fn plan_update(
         &self,
         id: &str,
         input: RuleInput,
         version: Option<u64>,
-    ) -> Result<(u64, Rule), Refusal> {
+    ) -> Result<(State, (u64, Rule)), Refusal> {
         let mut next = self.state.borrow().clone();
         Self::check_version(&next, version)?;
         let at = Self::position(&next, id)?;
@@ -822,30 +984,32 @@ impl AtomRules {
         next.rules[at] = rule.clone();
         next.version += 1;
         let version = next.version;
-        self.commit(next, true, false)?;
-        Ok((version, rule))
+        Ok((next, (version, rule)))
     }
 
-    pub(crate) fn delete(&self, id: &str, version: Option<u64>) -> Result<u64, Refusal> {
+    pub(crate) fn plan_delete(
+        &self,
+        id: &str,
+        version: Option<u64>,
+    ) -> Result<(State, u64), Refusal> {
         let mut next = self.state.borrow().clone();
         Self::check_version(&next, version)?;
         let at = Self::position(&next, id)?;
         next.rules.remove(at);
         next.version += 1;
         let version = next.version;
-        self.commit(next, true, false)?;
-        Ok(version)
+        Ok((next, version))
     }
 
     /// Moves `id` right before `before` or right after `after`. The version
     /// is required: a reorder from a stale view would undo someone else's.
-    pub(crate) fn move_rule(
+    pub(crate) fn plan_move(
         &self,
         id: &str,
         before: Option<&str>,
         after: Option<&str>,
         version: u64,
-    ) -> Result<u64, Refusal> {
+    ) -> Result<(State, u64), Refusal> {
         let mut next = self.state.borrow().clone();
         Self::check_version(&next, Some(version))?;
         if before.is_none() && after.is_none() {
@@ -861,8 +1025,7 @@ impl AtomRules {
         next.rules.insert(to, rule);
         next.version += 1;
         let version = next.version;
-        self.commit(next, true, false)?;
-        Ok(version)
+        Ok((next, version))
     }
 
     /// The rule a query for `name` from `client` hits, with its position.

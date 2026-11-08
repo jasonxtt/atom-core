@@ -1,0 +1,264 @@
+use serde_json::json;
+
+use super::*;
+
+const RESERVED: &[u16] = &[6666, 53, 7892, 7893, 9090];
+
+fn node(name: &str) -> (String, Map<String, Value>) {
+    let outbound =
+        json!({"type": "trojan", "server": "a.example", "server_port": 443, "password": "x"});
+    (name.to_owned(), outbound.as_object().unwrap().clone())
+}
+
+fn group(name: &str, kind: GroupKind, members: &[&str]) -> GroupInput {
+    GroupInput {
+        name: name.to_owned(),
+        kind,
+        members: members.iter().map(|m| (*m).to_owned()).collect(),
+        selected: String::new(),
+        url: None,
+        interval: None,
+        tolerance: None,
+    }
+}
+
+fn message(result: Result<(), Refusal>) -> String {
+    result.unwrap_err().message
+}
+
+#[test]
+fn a_new_installation_is_valid_and_empty() {
+    let state = ProxyState::default();
+    state.validate(RESERVED).unwrap();
+    assert_eq!(state.group(DEFAULT_GROUP).unwrap().name, "默认代理");
+    assert_eq!(state.final_group.selected, DEFAULT_GROUP);
+    assert_eq!(state.empty_groups(), vec![DEFAULT_GROUP.to_owned()]);
+    assert!(state.is_target(FINAL) && state.is_target(DEFAULT_GROUP) && !state.is_target("direct"));
+}
+
+#[test]
+fn new_groups_join_final_and_get_urltest_defaults() {
+    let mut state = ProxyState::default();
+    let added = state.add_nodes(vec![node("香港"), node("日本")]);
+    assert!(added.iter().all(|node| is_id(&node.id, "n-")));
+    let auto = state.add_group(group(
+        "自动",
+        GroupKind::Urltest,
+        &[&added[0].id, &added[1].id],
+    ));
+    assert!(is_id(&auto.id, "g-"));
+    assert_eq!(auto.url.as_deref(), Some(DEFAULT_URL));
+    assert_eq!(auto.interval.as_deref(), Some(DEFAULT_INTERVAL));
+    assert_eq!(auto.tolerance, Some(DEFAULT_TOLERANCE));
+    assert_eq!(
+        state.final_group.members,
+        vec![DEFAULT_GROUP.to_owned(), auto.id.clone()]
+    );
+    state.validate(RESERVED).unwrap();
+}
+
+#[test]
+fn members_must_exist_and_never_be_direct() {
+    let mut state = ProxyState::default();
+    state.groups[0].members = vec!["n-deadbeef".into()];
+    assert!(message(state.validate(RESERVED)).contains("不存在"));
+    state.groups[0].members = vec!["direct".into()];
+    assert!(message(state.validate(RESERVED)).contains("直连不能做成员"));
+    let mut state = ProxyState::default();
+    state.final_group.members.push("direct".into());
+    assert!(message(state.validate(RESERVED)).contains("不存在"));
+}
+
+#[test]
+fn group_cycles_are_refused() {
+    let mut state = ProxyState::default();
+    let a = state.add_group(group("A", GroupKind::Selector, &[]));
+    let b = state.add_group(group("B", GroupKind::Selector, &[&a.id]));
+    state.validate(RESERVED).unwrap();
+    state
+        .update_group(&a.id, group("A", GroupKind::Selector, &[&b.id]))
+        .unwrap();
+    let refused = message(state.validate(RESERVED));
+    assert!(refused.contains("成环"), "{refused}");
+    let mut state = ProxyState::default();
+    state.groups[0].members = vec![DEFAULT_GROUP.into()];
+    assert!(message(state.validate(RESERVED)).contains("不能包含自己"));
+}
+
+#[test]
+fn the_builtin_group_cannot_be_deleted() {
+    let mut state = ProxyState::default();
+    assert_eq!(state.remove_group(DEFAULT_GROUP).unwrap_err().status, 400);
+    state.groups.clear();
+    assert!(message(state.validate(RESERVED)).contains("默认代理"));
+}
+
+#[test]
+fn deleting_a_group_drops_it_everywhere_and_final_falls_back() {
+    let mut state = ProxyState::default();
+    let inner = state.add_group(group("内层", GroupKind::Selector, &[]));
+    let outer = state.add_group(group("外层", GroupKind::Selector, &[&inner.id]));
+    state.select(&outer.id, &inner.id).unwrap();
+    state.select(FINAL, &inner.id).unwrap();
+    state.remove_group(&inner.id).unwrap();
+    assert!(state.group(&outer.id).unwrap().members.is_empty());
+    assert!(state.group(&outer.id).unwrap().selected.is_empty());
+    assert!(!state.final_group.members.contains(&inner.id));
+    assert_eq!(state.final_group.selected, DEFAULT_GROUP);
+    state.validate(RESERVED).unwrap();
+    // Without "默认代理" in Final, the first member is selected.
+    let mut state = ProxyState::default();
+    let a = state.add_group(group("A", GroupKind::Selector, &[]));
+    let b = state.add_group(group("B", GroupKind::Selector, &[]));
+    state.final_group.members = vec![a.id.clone(), b.id.clone()];
+    state.final_group.selected = a.id.clone();
+    state.remove_group(&a.id).unwrap();
+    assert_eq!(state.final_group.selected, b.id);
+}
+
+#[test]
+fn deleting_a_node_empties_groups_instead_of_failing() {
+    let mut state = ProxyState::default();
+    let added = state.add_nodes(vec![node("香港")]);
+    state.groups[0].members = vec![added[0].id.clone()];
+    state.final_group.members.push(added[0].id.clone());
+    state.select(FINAL, &added[0].id).unwrap();
+    state.remove_node(&added[0].id).unwrap();
+    assert!(state.groups[0].members.is_empty());
+    assert_eq!(state.final_group.selected, DEFAULT_GROUP);
+    assert_eq!(state.empty_groups(), vec![DEFAULT_GROUP.to_owned()]);
+    assert_eq!(state.remove_node(&added[0].id).unwrap_err().status, 404);
+}
+
+#[test]
+fn final_may_be_emptied_but_then_selects_nothing() {
+    let mut state = ProxyState::default();
+    state.final_group.members.clear();
+    assert!(message(state.validate(RESERVED)).contains("没有成员"));
+    state.final_group.selected.clear();
+    state.validate(RESERVED).unwrap();
+    assert_eq!(
+        state.empty_groups(),
+        vec![DEFAULT_GROUP.to_owned(), FINAL.to_owned()]
+    );
+}
+
+#[test]
+fn selection_rules() {
+    let mut state = ProxyState::default();
+    let added = state.add_nodes(vec![node("a"), node("b")]);
+    let auto = state.add_group(group("自动", GroupKind::Urltest, &[&added[0].id]));
+    state.groups[0].members = vec![added[0].id.clone(), added[1].id.clone()];
+    assert_eq!(
+        state.selection(DEFAULT_GROUP).as_deref(),
+        Some(added[0].id.as_str())
+    );
+    state.select(DEFAULT_GROUP, &added[1].id).unwrap();
+    assert_eq!(
+        state.selection(DEFAULT_GROUP).as_deref(),
+        Some(added[1].id.as_str())
+    );
+    assert!(
+        state
+            .select(&auto.id, &added[0].id)
+            .unwrap_err()
+            .message
+            .contains("urltest")
+    );
+    assert!(state.select(DEFAULT_GROUP, "n-00000000").is_err());
+    assert!(
+        state.select(FINAL, &added[0].id).is_err(),
+        "not a Final member"
+    );
+}
+
+#[test]
+fn outbounds_are_proxy_types_without_tag_or_detour() {
+    let check = |value: Value| check_outbound(value.as_object().unwrap()).map_err(|r| r.message);
+    check(json!({"type": "vless", "server": "a", "server_port": 1})).unwrap();
+    check(json!({"type": "wireguard", "peers": []})).unwrap();
+    assert!(
+        check(json!({"type": "direct"}))
+            .unwrap_err()
+            .contains("不支持")
+    );
+    assert!(
+        check(json!({"type": "selector", "outbounds": []}))
+            .unwrap_err()
+            .contains("不支持")
+    );
+    assert!(
+        check(json!({"type": "vless", "server": "a", "tag": "x"}))
+            .unwrap_err()
+            .contains("tag")
+    );
+    assert!(
+        check(json!({"type": "vless", "server": "a", "detour": "x"}))
+            .unwrap_err()
+            .contains("detour")
+    );
+    assert!(
+        check(json!({"type": "vless"}))
+            .unwrap_err()
+            .contains("server")
+    );
+}
+
+#[test]
+fn settings_are_checked() {
+    let ok = Settings::default();
+    check_settings(&ok, RESERVED).unwrap();
+    let with = |change: &dyn Fn(&mut Settings)| {
+        let mut settings = Settings::default();
+        change(&mut settings);
+        check_settings(&settings, RESERVED).map_err(|r| r.message)
+    };
+    with(&|s| s.fakeip_range = "198.18.0.0/15".into()).unwrap();
+    assert!(
+        with(&|s| s.fakeip_range = "28.0.0.1/8".into())
+            .unwrap_err()
+            .contains("主机位")
+    );
+    assert!(with(&|s| s.fakeip_range = "28.0.0.0/28".into()).is_err());
+    assert!(with(&|s| s.fakeip_range = "fc00::/7".into()).is_err());
+    assert!(with(&|s| s.fakeip_range = "127.0.0.0/8".into()).is_err());
+    with(&|s| s.resolver = "tcp://119.29.29.29:53".into()).unwrap();
+    with(&|s| s.resolver = "223.5.5.5".into()).unwrap();
+    assert!(with(&|s| s.resolver = "https://dns.alidns.com/dns-query".into()).is_err());
+    assert!(with(&|s| s.resolver = "udp://dns.example".into()).is_err());
+    assert!(with(&|s| s.mixed_port = 9090).unwrap_err().contains("占用"));
+    assert!(with(&|s| s.mixed_port = 0).is_err());
+    assert_eq!(
+        parse_resolver("udp://1.2.3.4:5353").unwrap(),
+        ("udp", "1.2.3.4".parse().unwrap(), 5353)
+    );
+}
+
+#[test]
+fn intervals_are_seconds_minutes_or_hours() {
+    for good in ["30s", "3m", "1h30m", "90s"] {
+        check_interval(good).unwrap();
+    }
+    for bad in ["", "3", "0s", "5ms", "m", "1d", "3 m"] {
+        assert!(check_interval(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn the_file_round_trips_and_a_bad_one_stops_loading() {
+    let root = std::env::temp_dir().join(format!("atom-proxy-file-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(load(&root, RESERVED).unwrap(), ProxyState::default());
+    let mut state = ProxyState::default();
+    state.add_nodes(vec![node("香港")]);
+    state.version = 3;
+    save(&root, &state).unwrap();
+    assert_eq!(load(&root, RESERVED).unwrap(), state);
+    std::fs::write(root.join(PROXY_FILE), br#"{"version":1}"#).unwrap();
+    assert!(load(&root, RESERVED).is_err());
+    let mut broken = ProxyState::default();
+    broken.groups.clear();
+    save(&root, &broken).unwrap();
+    assert!(load(&root, RESERVED).unwrap_err().contains("默认代理"));
+    let _ = std::fs::remove_dir_all(&root);
+}
