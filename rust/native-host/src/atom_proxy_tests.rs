@@ -346,3 +346,39 @@ fn tor_options_are_left_out_of_the_view_whole() {
     );
     assert!(!shown.to_string().contains("secret"));
 }
+
+#[test]
+fn credential_names_are_matched_as_sing_box_decodes_them() {
+    let http = json!({
+        "type": "http", "server": "proxy.example", "server_port": 8080,
+        "Username": "alice", "PASSWORD": "secret",
+        "Headers": {"AUTHORIZATION": "Basic x", "Host": "h"},
+        "Extra_Headers": {"Proxy-Authorization": "Basic y"},
+        "TLS": {"enabled": true, "Client_Key": ["KEY"], "Reality": {"Short_ID": "01", "public_key": "pk"}},
+        // Unicode simple folding: long s and the Kelvin sign.
+        "pa\u{17f}sword": "s1", "\u{212a}ey": "k1"
+    });
+    let shown = Value::Object(public_outbound(http.as_object().unwrap()));
+    assert_eq!(
+        shown,
+        json!({
+            "type": "http", "server": "proxy.example", "server_port": 8080,
+            "Headers": {"Host": "h"}, "Extra_Headers": {},
+            "TLS": {"enabled": true, "Reality": {"public_key": "pk"}}
+        })
+    );
+    let tor = json!({"type": "tor", "TORRC": {"HTTPSProxyAuthenticator": "a:b"}, "EXTRA_ARGS": ["x"], "Obfs": "o"});
+    assert_eq!(
+        Value::Object(public_outbound(tor.as_object().unwrap())),
+        json!({"type": "tor"})
+    );
+    // The refused fields are matched the same way.
+    for key in ["Detour", "TAG", "DeTour"] {
+        let mut outbound = json!({"type": "socks", "server": "s", "server_port": 1});
+        outbound[key] = json!("x");
+        let refused = check_outbound(outbound.as_object().unwrap())
+            .unwrap_err()
+            .message;
+        assert!(refused.contains("不能带"), "{key}: {refused}");
+    }
+}

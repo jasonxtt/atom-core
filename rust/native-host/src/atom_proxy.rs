@@ -231,7 +231,7 @@ pub(crate) fn check_outbound(outbound: &Map<String, Value>) -> Result<(), Refusa
         return Err(invalid(format!("不支持的节点类型 `{kind}`")));
     }
     for key in ["tag", "detour"] {
-        if outbound.contains_key(key) {
+        if outbound.keys().any(|name| fold(name) == key) {
             return Err(invalid(format!("节点的 outbound 不能带 `{key}`")));
         }
     }
@@ -242,6 +242,17 @@ pub(crate) fn check_outbound(outbound: &Map<String, Value>) -> Result<(), Refusa
         }
     }
     Ok(())
+}
+
+/// A field name as sing-box's JSON decoder compares it: case-insensitively,
+/// with Unicode simple folding (`ſ` is `s`, the Kelvin sign is `k`), like
+/// Go's `strings.EqualFold`. Uppercasing then lowercasing each character
+/// gives the same result for every name that folds to an ASCII one.
+pub(crate) fn fold(name: &str) -> String {
+    name.chars()
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// Outbound fields that are credentials: never shown by the API. Checked
@@ -282,15 +293,15 @@ const CREDENTIAL_HEADERS: &[&str] = &["authorization", "proxy-authorization", "c
 /// A node's outbound for the API: every credential field removed, at any
 /// depth (`obfs.password`, wireguard `peers[].pre_shared_key`, ...), plus
 /// hysteria's string `obfs` (its obfuscation password) and credential
-/// headers.
+/// headers. Names are matched folded ([`fold`]): sing-box accepts
+/// `Password` or `TORRC` as well.
 pub(crate) fn public_outbound(outbound: &Map<String, Value>) -> Map<String, Value> {
     fn clean(key: &str, value: &Value) -> Value {
+        let key = fold(key);
         match value {
             Value::Object(map) if key == "headers" || key == "extra_headers" => Value::Object(
                 map.iter()
-                    .filter(|(name, _)| {
-                        !CREDENTIAL_HEADERS.contains(&name.to_ascii_lowercase().as_str())
-                    })
+                    .filter(|(name, _)| !CREDENTIAL_HEADERS.contains(&fold(name).as_str()))
                     .map(|(name, value)| (name.clone(), value.clone()))
                     .collect(),
             ),
@@ -302,9 +313,10 @@ pub(crate) fn public_outbound(outbound: &Map<String, Value>) -> Map<String, Valu
     outbound
         .iter()
         .filter(|(key, value)| {
+            let key = fold(key);
             let hidden = CREDENTIAL_KEYS.contains(&key.as_str())
                 || OPAQUE_KEYS.contains(&key.as_str())
-                || (key.as_str() == "obfs" && value.is_string());
+                || (key == "obfs" && value.is_string());
             !hidden
         })
         .map(|(key, value)| (key.clone(), clean(key, value)))
