@@ -53,6 +53,12 @@ pub(crate) struct Host {
     pub(crate) tproxy_port: u16,
     /// The AtomDNS upstream group the default resolver comes from.
     pub(crate) resolver_group: String,
+    /// The nft table (`inet <name>`) whose sets atom keeps current
+    /// (design §9.4); `None`: no nft rules on this host.
+    pub(crate) nft_table: Option<String>,
+    /// The nft program (and leading arguments); the script file is appended
+    /// after `-f`.
+    pub(crate) nft: Vec<String>,
 }
 
 impl Host {
@@ -515,6 +521,71 @@ pub(crate) fn rollback(host: &Host, old: Option<&[u8]>, old_chosen: &[(String, S
         Ok(()) => "已回滚到旧配置".to_owned(),
         Err(error) => format!("已写回旧配置，但重载后没有确认: {error}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// nft sets (design §9.4)
+// ---------------------------------------------------------------------------
+
+/// What the nft rules send to sing-box: the FakeIP range and the IPv4 IP
+/// rule ranges (IPv6 IP rules work through the mixed inbound only).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct NftSets {
+    pub(crate) fakeip4: Vec<String>,
+    pub(crate) iprule4: Vec<String>,
+}
+
+impl NftSets {
+    pub(crate) fn of(fakeip_range: &str, ip_rules: &[IpRule]) -> Self {
+        let mut iprule4: Vec<String> = Vec::new();
+        for cidr in ip_rules.iter().flat_map(|rule| &rule.cidrs) {
+            if !cidr.contains(':') && !iprule4.contains(cidr) {
+                iprule4.push(cidr.clone());
+            }
+        }
+        Self {
+            fakeip4: vec![fakeip_range.to_owned()],
+            iprule4,
+        }
+    }
+}
+
+/// One nft transaction: both sets emptied and filled again. The sets are
+/// declared by the installed rules (`flags interval; auto-merge`), so
+/// overlapping ranges merge instead of failing.
+pub(crate) fn nft_script(table: &str, sets: &NftSets) -> String {
+    let mut script = String::new();
+    for (name, elements) in [("fakeip4", &sets.fakeip4), ("iprule4", &sets.iprule4)] {
+        script.push_str(&format!("flush set inet {table} {name}\n"));
+        if !elements.is_empty() {
+            script.push_str(&format!(
+                "add element inet {table} {name} {{ {} }}\n",
+                elements.join(", ")
+            ));
+        }
+    }
+    script
+}
+
+/// Replaces the sets of `host`'s table (atomically: `nft -f` runs the
+/// script as one transaction). `Ok(false)`: the host has no nft table.
+pub(crate) fn sync_nft(host: &Host, sets: &NftSets) -> Result<bool, String> {
+    let Some(table) = &host.nft_table else {
+        return Ok(false);
+    };
+    let file = std::env::temp_dir().join(format!(
+        "atom-nft-{}-{}.nft",
+        std::process::id(),
+        new_secret()
+    ));
+    std::fs::write(&file, nft_script(table, sets))
+        .map_err(|error| format!("写入 {} 失败: {error}", file.display()))?;
+    let mut command = host.nft.clone();
+    command.push("-f".to_owned());
+    command.push(file.display().to_string());
+    let result = run(&command, RELOAD_TIMEOUT, "更新 nft 集合");
+    let _ = std::fs::remove_file(&file);
+    result.map(|()| true)
 }
 
 // ---------------------------------------------------------------------------

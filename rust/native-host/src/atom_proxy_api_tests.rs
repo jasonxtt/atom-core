@@ -215,6 +215,21 @@ fn import_groups_rules_and_ip_rules_reach_sing_box() {
         serde_json::json!(["91.108.4.0/22"])
     );
     assert_eq!(status_view["nft"]["fakeip_range"], "28.0.0.0/8");
+    // The nft sets follow the IP rules (IPv4 only), in one script.
+    let scripts = api.fake.nft_scripts();
+    assert!(
+        scripts
+            .last()
+            .unwrap()
+            .contains("add element inet atom iprule4 { 91.108.4.0/22 }\n"),
+        "{scripts:?}"
+    );
+    assert_eq!(status_view["nft"]["table"], "atom");
+    assert_eq!(status_view["nft"]["sync"]["ok"], true, "{status_view}");
+    assert_eq!(
+        status_view["nft"]["sync"]["sets"]["iprule4"],
+        serde_json::json!(["91.108.4.0/22"])
+    );
     // The IP rule takes no part in the DNS table.
     let (_, test) = api.call(
         "POST",
@@ -264,6 +279,54 @@ fn import_groups_rules_and_ip_rules_reach_sing_box() {
         serde_json::from_slice(&std::fs::read(api.root.join("webinfo/atom_proxy.json")).unwrap())
             .unwrap();
     assert_eq!(saved["nodes"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_failed_nft_update_keeps_the_change_and_is_reported() {
+    let api = Api::new("nft");
+    let before = api.fake.nft_scripts().len();
+    let (status, _) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"suffix": ["example.com"]}, "action": {"type": "direct"}}"#,
+    );
+    assert_eq!(status, 201);
+    assert_eq!(
+        api.fake.nft_scripts().len(),
+        before,
+        "domain rules leave nft alone"
+    );
+    std::fs::write(api.fake.host.dir.join("nftfail"), "").unwrap();
+    let (status, rule) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"ip_cidr": ["1.1.1.1/32"]}, "action": {"type": "block"}}"#,
+    );
+    assert_eq!(status, 201, "{rule}");
+    let (_, view) = api.call("GET", "/api/v1/atom/status", "");
+    assert_eq!(view["nft"]["sync"]["ok"], false, "{view}");
+    assert!(
+        view["nft"]["sync"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("No such file")
+    );
+    assert_eq!(
+        api.live()["route"]["rules"][2]["ip_cidr"],
+        serde_json::json!(["1.1.1.1/32"])
+    );
+    std::fs::remove_file(api.fake.host.dir.join("nftfail")).unwrap();
+    let (status, _) = api.call("POST", "/api/v1/atom/apply", "");
+    assert_eq!(status, 200);
+    let (_, view) = api.call("GET", "/api/v1/atom/status", "");
+    assert_eq!(view["nft"]["sync"]["ok"], true, "{view}");
+    assert!(
+        api.fake
+            .nft_scripts()
+            .last()
+            .unwrap()
+            .contains("add element inet atom iprule4 { 1.1.1.1/32 }")
+    );
 }
 
 #[test]

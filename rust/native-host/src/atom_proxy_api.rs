@@ -575,6 +575,9 @@ async fn status(rules: &AtomRules) -> Reply {
             "nft": {
                 "fakeip_range": current.settings.fakeip_range,
                 "ip_cidr": {"inet4": v4, "inet6": v6},
+                "table": host.as_ref().and_then(|host| host.nft_table.clone()),
+                // The latest update of the nft sets (none: not kept here).
+                "sync": crate::atom_rules::last_nft(),
             },
         }),
     )

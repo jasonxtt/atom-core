@@ -1,6 +1,13 @@
 //! Listener socket creation. The IPv6 wildcard (`:port`, `[::]:port`) is
 //! bound dual-stack with `IPV6_V6ONLY` cleared explicitly, so IPv4 clients
 //! reach it too; every other address binds exactly as written.
+//!
+//! UDP listeners on a wildcard address set `SO_REUSEADDR` (atom fork, design
+//! §9.4): sing-box's TProxy inbound answers a client's UDP to a proxied
+//! address by binding a transparent socket to that address and port (say
+//! `8.8.8.8:53`), which fails with `EADDRINUSE` while this listener holds the
+//! wildcard of the same port without the option. A specific address does not
+//! conflict with that bind and keeps refusing a second listener.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -41,6 +48,9 @@ fn plain_udp(address: SocketAddr) -> io::Result<Socket> {
         Type::DGRAM,
         Some(Protocol::UDP),
     )?;
+    if address.ip().is_unspecified() {
+        socket.set_reuse_address(true)?;
+    }
     socket.bind(&address.into())?;
     socket.set_nonblocking(true)?;
     Ok(socket)
@@ -181,9 +191,8 @@ fn wildcard(ty: Type, protocol: Protocol, address: SocketAddr) -> io::Result<Wil
         Err(error) => return Ok(Wildcard::NoIpv6(error)),
     };
     socket.set_only_v6(false)?;
-    if ty == Type::STREAM {
-        socket.set_reuse_address(true)?;
-    }
+    // TCP: rebinding during TIME_WAIT; UDP: see the module comment.
+    socket.set_reuse_address(true)?;
     socket.bind(&address.into())?;
     socket.set_nonblocking(true)?;
     Ok(Wildcard::Bound(socket))
@@ -217,6 +226,36 @@ mod tests {
                 Wildcard::Other
             ));
         }
+    }
+
+    /// A transparent write-back socket of sing-box binds a specific address
+    /// on the listener's port (with `SO_REUSEADDR`); a specific loopback
+    /// address stands in for it (binding a foreign one needs privileges).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn udp_listeners_leave_the_port_to_specific_reuse_binds() {
+        let reusing_bind = |port: u16| {
+            let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+            socket.set_reuse_address(true).unwrap();
+            socket.bind(&SocketAddr::from(([127, 0, 0, 2], port)).into())
+        };
+        let mut listeners = vec![plain_udp("0.0.0.0:0".parse().unwrap()).unwrap()];
+        if let Wildcard::Bound(socket) =
+            wildcard(Type::DGRAM, Protocol::UDP, "[::]:0".parse().unwrap()).unwrap()
+        {
+            listeners.push(socket);
+        }
+        for listener in listeners {
+            let port = listener.local_addr().unwrap().as_socket().unwrap().port();
+            reusing_bind(port).expect("a specific bind beside the wildcard listener");
+        }
+        // Without the option on the listener the same bind fails (what sing-box hit).
+        let plain = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = plain.local_addr().unwrap().port();
+        assert_eq!(
+            reusing_bind(port).unwrap_err().kind(),
+            io::ErrorKind::AddrInUse
+        );
     }
 
     /// A kernel with a given `rmem_max` (Linux stores twice the capped request).

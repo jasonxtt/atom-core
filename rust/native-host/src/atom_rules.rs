@@ -48,7 +48,7 @@ use crate::managed::DomainSetHandle;
 use crate::rule_sources::Live;
 
 mod singbox;
-pub(crate) use singbox::last_apply;
+pub(crate) use singbox::{last_apply, last_nft};
 
 pub(crate) const RULES_FILE: &str = "webinfo/atom_rules.json";
 pub(crate) const RULESETS_FILE: &str = "webinfo/atom_rulesets.json";

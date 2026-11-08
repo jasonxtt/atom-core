@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use super::{AtomRules, Refusal, Rule, State, ip_rules, now};
 use crate::atom_proxy::{self, FINAL, ProxyState};
-use crate::atom_singbox::{self as sb, ApplyError, ApplyGuard, Host};
+use crate::atom_singbox::{self as sb, ApplyError, ApplyGuard, Host, NftSets};
 
 pub(crate) struct Proxy {
     pub(super) host: Host,
@@ -77,6 +77,23 @@ fn record(trigger: &str, changed: bool, error: Option<String>) {
             error: error.unwrap_or_default(),
         });
     }
+}
+
+/// The outcome of the latest nft set update (design §9.4; process-wide).
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NftRecord {
+    pub(crate) at: i64,
+    pub(crate) ok: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) error: String,
+    /// What was written (or tried).
+    pub(crate) sets: NftSets,
+}
+
+static LAST_NFT: Mutex<Option<NftRecord>> = Mutex::new(None);
+
+pub(crate) fn last_nft() -> Option<NftRecord> {
+    LAST_NFT.lock().ok().and_then(|record| record.clone())
 }
 
 pub(super) fn busy() -> Refusal {
@@ -223,6 +240,53 @@ impl AtomRules {
         .map_err(|message| Refusal::new(500, format!("生成 sing-box 配置失败: {message}")))
     }
 
+    /// The nft sets the current state needs, when this host keeps nft sets.
+    fn nft_sets(&self) -> Option<(Host, NftSets)> {
+        let proxy = self.proxy.as_ref()?;
+        if proxy.host.nft_table.is_none() || self.root.as_os_str().is_empty() {
+            return None;
+        }
+        let sets = NftSets::of(
+            &proxy.state.borrow().settings.fakeip_range,
+            &ip_rules(&self.state.borrow().rules),
+        );
+        Some((proxy.host.clone(), sets))
+    }
+
+    /// Brings the nft sets to the current state, under the application
+    /// exclusion (`guard`), so updates land in the order of the changes. A
+    /// failure does not undo the change: it is logged and recorded
+    /// (`status.nft.sync`).
+    async fn sync_nft(&self, guard: Arc<ApplyGuard>) {
+        let Some((host, sets)) = self.nft_sets() else {
+            return;
+        };
+        let result = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let result = sb::sync_nft(&host, &sets);
+            (sets, result)
+        })
+        .await;
+        let (sets, error) = match result {
+            Ok((sets, result)) => (sets, result.err()),
+            Err(error) => {
+                crate::diag::warn_line!("atom nft: the update task failed: {error}");
+                return;
+            }
+        };
+        if let Some(error) = &error {
+            crate::diag::warn_line!("atom nft: updating the sets failed: {error}");
+        }
+        if let Ok(mut last) = LAST_NFT.lock() {
+            *last = Some(NftRecord {
+                at: now(),
+                ok: error.is_none(),
+                error: error.unwrap_or_default(),
+                sets,
+            });
+        }
+    }
+
     /// Whether the running file is what the current state generates.
     pub(crate) fn in_sync(&self) -> Option<bool> {
         let proxy = self.proxy.as_ref()?;
@@ -363,6 +427,11 @@ impl AtomRules {
             let table = self.compile(&current, proxy_state.as_ref())?;
             *self.state.borrow_mut() = current;
             self.table.replace(std::rc::Rc::new(table));
+        }
+        // The FakeIP range and the IP rules only change with a new sing-box
+        // configuration.
+        if let Some(exclusive) = &exclusive {
+            self.sync_nft(Arc::clone(&exclusive.guard)).await;
         }
         drop(exclusive);
         Ok(())
@@ -600,6 +669,9 @@ impl AtomRules {
             "apply".to_owned(),
         )
         .await;
+        if result.is_ok() {
+            self.sync_nft(Arc::clone(&exclusive.guard)).await;
+        }
         drop(exclusive);
         result.map_err(apply_refusal)
     }
@@ -620,16 +692,19 @@ impl AtomRules {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        if self.in_sync() == Some(true) {
-            record("startup", false, None);
-            return;
-        }
         let Ok(exclusive) = self.exclusive() else {
             crate::diag::warn_line!(
                 "atom sing-box: another application is running; startup check skipped"
             );
             return;
         };
+        // The nft sets are brought up at every start (the rules may have
+        // been loaded again since), whatever sing-box needs.
+        if self.in_sync() == Some(true) {
+            record("startup", false, None);
+            self.sync_nft(Arc::clone(&exclusive.guard)).await;
+            return;
+        }
         let secret = sb::new_secret();
         let state = owner.state.borrow().clone();
         let rules = self.state.borrow().rules.clone();
@@ -637,6 +712,7 @@ impl AtomRules {
             Ok(bytes) => bytes,
             Err(refusal) => {
                 record("startup", false, Some(refusal.message.clone()));
+                self.sync_nft(Arc::clone(&exclusive.guard)).await;
                 return;
             }
         };
@@ -650,6 +726,7 @@ impl AtomRules {
             "startup".to_owned(),
         )
         .await;
+        self.sync_nft(Arc::clone(&exclusive.guard)).await;
         drop(exclusive);
         if let Err(error) = result {
             crate::diag::warn_line!(
