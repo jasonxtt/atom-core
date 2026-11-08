@@ -74,16 +74,6 @@ plugins:
       kind: bool
       default: true
 
-#原 switch7
-  - tag: block_ads
-    type: feature_flag
-    args:
-      label: 广告屏蔽
-      description: 启用 AdGuard 在线规则屏蔽广告；开启后“广告拦截”中已启用的在线列表才会生效。
-      section: blocking
-      kind: bool
-      default: true
-
 #原 switch6：无 IPv6 网络时建议开启
   - tag: block_aaaa
     type: feature_flag

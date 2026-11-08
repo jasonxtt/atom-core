@@ -666,7 +666,7 @@ pub(super) fn apply(
                     defaults.show_when.insert(plugin.tag.clone(), conditions);
                 }
             }
-            "sd_set_light" | "si_set" | "adguard_rule" => {
+            "sd_set_light" | "si_set" | "adguard_rule" | "atom_rules" => {
                 let path = format!("{}.args", plugin.source_path);
                 if let Some(args) = args_mut(plugin) {
                     resolve_proxy_key(args, &path, &objects, "socks5", None)?;

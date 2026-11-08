@@ -1148,6 +1148,13 @@ fn route(target: &str) -> Route<'_> {
 }
 
 fn request_mutates_managed_state(request: &Request) -> bool {
+    let path = request
+        .target
+        .split_once('?')
+        .map_or(request.target.as_str(), |(path, _)| path);
+    if crate::atom_rules_api::mutates(&request.method, path) {
+        return true;
+    }
     match route(&request.target) {
         Route::Plugin { action: "post", .. } => request.method == "POST",
         Route::Plugin {
@@ -2571,6 +2578,23 @@ async fn dispatch(
         .target
         .split_once('?')
         .map_or(request.target.as_str(), |(path, _)| path);
+    if let Some(reply) = crate::atom_rules_api::handle(
+        config,
+        cache,
+        &request.method,
+        &request.target,
+        &request.body,
+        shutdown,
+    )
+    .await
+    {
+        return Response {
+            status: reply.status,
+            content_type: reply.content_type,
+            body: reply.body,
+            headers: reply.headers,
+        };
+    }
     if let Some(reply) =
         crate::standard_groups_api::handle(control, config, &request.method, path, &request.body)
             .await

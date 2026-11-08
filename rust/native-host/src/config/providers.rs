@@ -1536,6 +1536,16 @@ pub(crate) fn build_mapper_matcher<'a>(
 
 impl MapperSpec {
     /// The compiled mapper around an already built matcher.
+    /// Every provider this mapper marks, with its fast mark (atom rules
+    /// reference mapper providers by these marks).
+    pub(crate) fn marks(&self) -> Vec<(String, u8)> {
+        self.rules
+            .iter()
+            .filter(|rule| rule.mark > 0)
+            .map(|rule| (rule.tag.clone(), rule.mark))
+            .collect()
+    }
+
     pub(super) fn config(&self, matcher: ValuedDomainMatcher) -> DomainMapperConfig {
         DomainMapperConfig {
             tag: self.tag.clone(),

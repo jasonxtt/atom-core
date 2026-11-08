@@ -399,6 +399,8 @@ pub struct LocalPlugins {
     pub requeries: Vec<RequeryConfig>,
     pub learners: Vec<crate::route_learner::RouteLearnerConfig>,
     pub learns: Vec<crate::route_learner::RouteLearnConfig>,
+    /// atom fork: the user rule table (`atom_rules`), at most one.
+    pub(crate) atom_rules: Option<Rc<crate::atom_rules::AtomRules>>,
 }
 
 impl LocalPlugins {
@@ -1928,6 +1930,7 @@ enum PluginKind {
     Requery,
     Socks5Proxy,
     EcsAddress,
+    AtomRules,
 }
 
 /// The collected definition catalog used to resolve named references. It is
@@ -2060,6 +2063,7 @@ fn compile_definitions(
             "socks5_proxy" => PluginKind::Socks5Proxy,
             "ecs_address" => PluginKind::EcsAddress,
             "feature_flag" => PluginKind::FeatureFlag,
+            "atom_rules" => PluginKind::AtomRules,
             other if flags::legacy_switch(other) => {
                 return Err(ConfigError::new(
                     format!("{}.type", plugin.source_path),
@@ -2327,6 +2331,8 @@ fn compile_definitions(
             PluginKind::DomainMapper => {}
             // Validated and resolved by the settings layer (`flags`).
             PluginKind::FeatureFlag => {}
+            // Compiled with the sequences: it needs the provider catalog.
+            PluginKind::AtomRules => {}
             PluginKind::FastMark => {
                 let config = compile_fast_mark(plugin)?;
                 fast_marks.push((plugin.tag.clone(), config));
@@ -2437,6 +2443,8 @@ fn compile_definitions(
     // provider declared later without changing the result.
     let mut domain_mappers: Vec<DomainMapperConfig> = Vec::new();
     let mut mapper_slots: Vec<Rc<crate::rule_sources::MapperSlot>> = Vec::new();
+    // (mapper, provider, fast mark) for the atom rules' builtin sets.
+    let mut mapper_marks: Vec<(String, String, u8)> = Vec::new();
     {
         let provider_kinds: Vec<(String, String)> = definitions
             .iter()
@@ -2457,6 +2465,9 @@ fn compile_definitions(
                     provider_rules.get(tag).map(|rules| rules.as_slice())
                 })?;
                 let mapper = spec.config(matcher);
+                for (provider, mark) in spec.marks() {
+                    mapper_marks.push((spec.tag.clone(), provider, mark));
+                }
                 mapper_slots.push(Rc::new(crate::rule_sources::MapperSlot::new(
                     spec,
                     Rc::clone(&mapper.matcher),
@@ -2575,6 +2586,24 @@ fn compile_definitions(
             plugin_fixture_name(&mapper.tag),
             mapper.executor(),
         ));
+    }
+    let mut atom_rules: Option<Rc<crate::atom_rules::AtomRules>> = None;
+    for (index, plugin) in definitions.iter().enumerate() {
+        if kinds[index].1 != PluginKind::AtomRules {
+            continue;
+        }
+        if atom_rules.is_some() {
+            return Err(ConfigError::new(
+                format!("{}.type", plugin.source_path),
+                "only one atom_rules plugin may be declared",
+            ));
+        }
+        let rules = compile_atom_rules(plugin, &catalog, &mapper_marks)?;
+        fixtures.push(atomdns_sequence_core::FixtureSpec::new(
+            plugin_fixture_name(&plugin.tag),
+            rules.executor(),
+        ));
+        atom_rules = Some(rules);
     }
     let resolved_fallback_definitions = fallback_definitions
         .into_iter()
@@ -2999,6 +3028,7 @@ fn compile_definitions(
             requeries,
             learners,
             learns,
+            atom_rules,
         },
         sequence: SequenceConfig {
             tag: listener.entry.clone(),
@@ -3795,6 +3825,88 @@ fn compile_requery(plugin: &RawPlugin) -> Result<(Requery, PathBuf), ConfigError
 }
 
 /// `webinfo`: the JSON document file.
+/// `atom_rules` (atom fork): the user rule table. `marks` are the fast marks
+/// set per action; `builtin` names the sets rules may reference: an
+/// `adguard_rule` or `domain_set` is matched directly, any other provider by
+/// the mark `mapper` sets for it (the mapper must run first).
+fn compile_atom_rules(
+    plugin: &RawPlugin,
+    catalog: &PluginCatalog<'_>,
+    mapper_marks: &[(String, String, u8)],
+) -> Result<Rc<crate::atom_rules::AtomRules>, ConfigError> {
+    use crate::atom_rules::{AtomRules, BuiltinSet, Marks};
+    let path = format!("{}.args", plugin.source_path);
+    let args = expect_map(&plugin.args, &path, "atom_rules args must be a mapping")?;
+    args.reject_unknown(&["marks", "builtin", "mapper", "socks5"], &path)?;
+    let marks_path = format!("{path}.marks");
+    let marks = expect_map(
+        args.required("marks", &path)?,
+        &marks_path,
+        "marks must be a mapping",
+    )?;
+    marks.reject_unknown(&["proxy", "direct", "block"], &marks_path)?;
+    let mark = |key: &str| -> Result<u8, ConfigError> {
+        let key_path = format!("{marks_path}.{key}");
+        let value = expect_positive_integer(marks.required(key, &marks_path)?, &key_path)?;
+        u8::try_from(value)
+            .ok()
+            .filter(|mark| *mark <= 63)
+            .ok_or_else(|| ConfigError::new(key_path, "a fast mark is between 1 and 63"))
+    };
+    let marks = Marks {
+        proxy: mark("proxy")?,
+        direct: mark("direct")?,
+        block: mark("block")?,
+    };
+    if marks.proxy == marks.direct || marks.proxy == marks.block || marks.direct == marks.block {
+        return Err(ConfigError::new(marks_path, "the three marks must differ"));
+    }
+    let mapper = match args.get("mapper") {
+        None | Some(RawValue::Null) => None,
+        Some(value) => Some(expect_string(value, &format!("{path}.mapper"))?),
+    };
+    if let Some(tag) = &mapper {
+        if catalog.kind_of(tag) != Some(PluginKind::DomainMapper) {
+            return Err(ConfigError::new(
+                format!("{path}.mapper"),
+                format!("`{tag}` is not a domain_mapper"),
+            ));
+        }
+    }
+    let socks5 = match args.get("socks5") {
+        None | Some(RawValue::Null) => String::new(),
+        Some(value) => expect_string(value, &format!("{path}.socks5"))?,
+    };
+    let mut builtin = Vec::new();
+    if let Some(value) = args.get("builtin") {
+        let builtin_path = format!("{path}.builtin");
+        for (index, item) in expect_sequence(value, &builtin_path)?.iter().enumerate() {
+            let item_path = format!("{builtin_path}[{index}]");
+            let name = expect_string(item, &item_path)?;
+            let set = if let Some(handle) = catalog.adguard_matcher(&name) {
+                BuiltinSet::Handle(handle.map_err(|reason| ConfigError::new(&item_path, reason))?)
+            } else if let Some(handle) = catalog.domain_set(&name) {
+                BuiltinSet::Handle(handle)
+            } else if let Some((_, _, mark)) = mapper_marks.iter().find(|(owner, provider, _)| {
+                mapper.as_deref() == Some(owner.as_str()) && *provider == name
+            }) {
+                BuiltinSet::Mark(1u64 << mark)
+            } else {
+                return Err(ConfigError::new(
+                    item_path,
+                    format!(
+                        "`{name}` is neither an adguard_rule, a domain_set, nor a provider the mapper marks"
+                    ),
+                ));
+            };
+            builtin.push((name, set));
+        }
+    }
+    let rules = AtomRules::load(&plugin.root_dir, marks, mapper, socks5, builtin)
+        .map_err(|reason| ConfigError::new(&path, reason))?;
+    Ok(Rc::new(rules))
+}
+
 fn compile_webinfo(plugin: &RawPlugin) -> Result<(WebInfo, PathBuf), ConfigError> {
     let path = format!("{}.args", plugin.source_path);
     let args = expect_map(&plugin.args, &path, "webinfo args must be a mapping")?;
@@ -3930,7 +4042,8 @@ fn resolve_policy_target_name(
             PluginKind::FastMark
             | PluginKind::FlowSetter
             | PluginKind::TagSetter
-            | PluginKind::DomainMapper,
+            | PluginKind::DomainMapper
+            | PluginKind::AtomRules,
         ) => Ok(PolicyTargetName::Fixture(plugin_fixture_name(tag))),
         Some(
             PluginKind::DomainSet
@@ -4995,7 +5108,8 @@ fn compile_exec_item(
                     PluginKind::FastMark
                     | PluginKind::FlowSetter
                     | PluginKind::TagSetter
-                    | PluginKind::DomainMapper,
+                    | PluginKind::DomainMapper
+                    | PluginKind::AtomRules,
                 ) => Ok(ExecutableSpec::Fixture {
                     target: atomdns_sequence_core::FixtureRef::new(plugin_fixture_name(tag)),
                 }),

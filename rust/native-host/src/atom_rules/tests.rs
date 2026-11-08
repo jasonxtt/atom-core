@@ -1,0 +1,665 @@
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use atomdns_sequence_core::ExecutionState;
+
+use super::*;
+
+const MARKS: Marks = Marks {
+    proxy: 41,
+    direct: 42,
+    block: 40,
+};
+/// The mark the test mapper would set for the `adguard` builtin.
+const ADS: u64 = 1 << 5;
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("atom-rules-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn owner(root: &Path) -> AtomRules {
+    AtomRules::load(
+        root,
+        MARKS,
+        None,
+        String::new(),
+        vec![("adguard".to_owned(), BuiltinSet::Mark(ADS))],
+    )
+    .unwrap()
+}
+
+fn input(matches: Match, action: Action) -> RuleInput {
+    RuleInput {
+        enabled: true,
+        remark: String::new(),
+        matches,
+        action,
+    }
+}
+
+fn suffix(names: &[&str]) -> Match {
+    Match {
+        suffix: names.iter().map(|name| (*name).to_owned()).collect(),
+        ..Match::default()
+    }
+}
+
+fn proxy(group: &str) -> Action {
+    Action::Proxy {
+        group_id: group.to_owned(),
+    }
+}
+
+fn hit(rules: &AtomRules, name: &str) -> Option<Action> {
+    rules.test(name, None, 0).map(|(_, rule)| rule.action)
+}
+
+fn ip(text: &str) -> Option<IpAddr> {
+    Some(text.parse().unwrap())
+}
+
+#[test]
+fn default_table_sends_lan_direct_and_blocks_ads() {
+    let rules = owner(Path::new(""));
+    let (version, list) = rules.rules();
+    assert_eq!(version, 0);
+    assert_eq!(
+        list.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+        ["r-lan", "r-ads"]
+    );
+    assert_eq!(hit(&rules, "nas.lan"), Some(Action::Direct));
+    assert_eq!(hit(&rules, "printer.home.arpa."), Some(Action::Direct));
+    assert_eq!(hit(&rules, "localhost"), Some(Action::Direct));
+    assert_eq!(
+        rules.test("ads.example", None, ADS).map(|(_, r)| r.action),
+        Some(Action::Block)
+    );
+    assert_eq!(hit(&rules, "example.com"), None, "falls through");
+    // Without the adguard builtin only the LAN rule is installed.
+    let bare = AtomRules::load(Path::new(""), MARKS, None, String::new(), Vec::new()).unwrap();
+    assert_eq!(bare.rules().1.len(), 1);
+}
+
+#[test]
+fn first_enabled_match_wins_and_move_changes_it() {
+    let rules = owner(Path::new(""));
+    let (v1, proxied) = rules
+        .create(
+            input(suffix(&["example.com"]), proxy("g-a")),
+            Some(0),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(v1, 1);
+    let www = Match {
+        domain: vec!["www.example.com".to_owned()],
+        ..Match::default()
+    };
+    let (v2, direct) = rules
+        .create(input(www, Action::Direct), Some(v1), None, None)
+        .unwrap();
+    assert_eq!(hit(&rules, "www.example.com"), Some(proxy("g-a")));
+    assert_eq!(hit(&rules, "WWW.Example.COM."), Some(proxy("g-a")));
+    let v3 = rules
+        .move_rule(&direct.id, Some(&proxied.id), None, v2)
+        .unwrap();
+    assert_eq!(hit(&rules, "www.example.com"), Some(Action::Direct));
+    assert_eq!(hit(&rules, "a.example.com"), Some(proxy("g-a")));
+    // after_id puts it back below.
+    let v4 = rules
+        .move_rule(&direct.id, None, Some(&proxied.id), v3)
+        .unwrap();
+    assert_eq!(hit(&rules, "www.example.com"), Some(proxy("g-a")));
+    // A disabled rule is skipped.
+    let mut disabled = input(suffix(&["example.com"]), proxy("g-a"));
+    disabled.enabled = false;
+    rules.update(&proxied.id, disabled, Some(v4)).unwrap();
+    assert_eq!(hit(&rules, "www.example.com"), Some(Action::Direct));
+    assert_eq!(hit(&rules, "a.example.com"), None);
+}
+
+#[test]
+fn stale_versions_are_refused_with_the_current_one() {
+    let rules = owner(Path::new(""));
+    let (version, rule) = rules
+        .create(input(suffix(&["a.test"]), Action::Block), None, None, None)
+        .unwrap();
+    let stale = rules
+        .move_rule(&rule.id, Some("r-lan"), None, version - 1)
+        .unwrap_err();
+    assert_eq!(stale.status, 409);
+    assert_eq!(stale.version, Some(version));
+    let stale = rules
+        .create(
+            input(suffix(&["b.test"]), Action::Block),
+            Some(0),
+            None,
+            None,
+        )
+        .unwrap_err();
+    assert_eq!((stale.status, stale.version), (409, Some(version)));
+    assert_eq!(rules.delete(&rule.id, Some(0)).unwrap_err().status, 409);
+    assert_eq!(rules.rules().1.len(), 3, "nothing changed");
+    assert_eq!(rules.delete("r-none", None).unwrap_err().status, 404);
+    assert_eq!(
+        rules
+            .move_rule(&rule.id, Some(&rule.id), None, version)
+            .unwrap_err()
+            .status,
+        400
+    );
+    assert_eq!(
+        rules
+            .move_rule(&rule.id, None, None, version)
+            .unwrap_err()
+            .status,
+        400
+    );
+    assert_eq!(rules.delete(&rule.id, Some(version)).unwrap(), version + 1);
+}
+
+#[test]
+fn classes_are_anded_and_entries_ored() {
+    let rules = owner(Path::new(""));
+    let matches = Match {
+        suffix: vec!["google.com".to_owned(), "youtube.com".to_owned()],
+        client: vec!["192.168.1.0/24".to_owned(), "10.0.0.7".to_owned()],
+        ..Match::default()
+    };
+    rules
+        .create(input(matches, proxy("g-tv")), None, None, None)
+        .unwrap();
+    let only_client = Match {
+        client: vec!["192.168.9.9".to_owned()],
+        ..Match::default()
+    };
+    rules
+        .create(input(only_client, Action::Direct), None, None, None)
+        .unwrap();
+    let action = |name: &str, client: &str| rules.test(name, ip(client), 0).map(|(_, r)| r.action);
+    assert_eq!(
+        action("www.youtube.com", "192.168.1.50"),
+        Some(proxy("g-tv"))
+    );
+    assert_eq!(action("google.com", "10.0.0.7"), Some(proxy("g-tv")));
+    assert_eq!(action("google.com", "10.0.0.8"), None);
+    assert_eq!(action("example.com", "192.168.1.50"), None);
+    assert_eq!(
+        rules.test("google.com", None, 0),
+        None,
+        "no client: no match"
+    );
+    // A rule with only a client condition matches every name of that client.
+    assert_eq!(
+        action("anything.example", "192.168.9.9"),
+        Some(Action::Direct)
+    );
+    // keyword and regex are name entries of the same class.
+    let names = Match {
+        keyword: vec!["tracker".to_owned()],
+        regex: vec![r"^ad[0-9]+\.".to_owned()],
+        ..Match::default()
+    };
+    rules
+        .create(input(names, Action::Block), None, None, None)
+        .unwrap();
+    assert_eq!(hit(&rules, "eu.tracker.net"), Some(Action::Block));
+    assert_eq!(hit(&rules, "ad12.cdn.net"), Some(Action::Block));
+    assert_eq!(hit(&rules, "bad12.cdn.net"), None);
+}
+
+#[test]
+fn invalid_rules_are_refused_and_change_nothing() {
+    let rules = owner(Path::new(""));
+    let refuse = |matches: Match, action: Action| {
+        let refusal = rules
+            .create(input(matches, action), None, None, None)
+            .unwrap_err();
+        assert_eq!(refusal.status, 400, "{}", refusal.message);
+        refusal.message
+    };
+    let ip_rule = Match {
+        ip_cidr: vec!["91.108.4.0/22".to_owned()],
+        ..Match::default()
+    };
+    assert!(refuse(ip_rule, proxy("g")).contains("ip_cidr"));
+    assert!(refuse(Match::default(), Action::Direct).contains("至少"));
+    let regex = Match {
+        regex: vec!["(".to_owned()],
+        ..Match::default()
+    };
+    refuse(regex, Action::Block);
+    let unknown = Match {
+        ruleset: vec!["rs-missing".to_owned()],
+        ..Match::default()
+    };
+    assert!(refuse(unknown, Action::Block).contains("rs-missing"));
+    let client = Match {
+        client: vec!["192.168.1.0/33".to_owned()],
+        ..Match::default()
+    };
+    refuse(client, Action::Direct);
+    refuse(suffix(&["a b.com"]), Action::Direct);
+    refuse(suffix(&[""]), Action::Direct);
+    refuse(suffix(&["例子.cn"]), Action::Direct);
+    refuse(suffix(&["a.com"]), proxy(""));
+    refuse(suffix(&["a.com"]), proxy(" g"));
+    refuse(suffix(&["a.com"]), proxy(&"g".repeat(65)));
+    assert_eq!(rules.rules().0, 0);
+    assert_eq!(rules.rules().1.len(), 2);
+}
+
+#[test]
+fn changes_persist_and_loading_writes_nothing() {
+    let root = scratch("persist");
+    let rules = owner(&root);
+    assert!(!root.join(RULES_FILE).exists(), "load must not write");
+    let (version, rule) = rules
+        .create(
+            input(suffix(&["kept.test"]), proxy("g-1")),
+            None,
+            Some("r-lan"),
+            None,
+        )
+        .unwrap();
+    drop(rules);
+    let again = owner(&root);
+    let (loaded, list) = again.rules();
+    assert_eq!(loaded, version);
+    assert_eq!(list[0], rule, "inserted before r-lan");
+    assert_eq!(hit(&again, "a.kept.test"), Some(proxy("g-1")));
+    let text = std::fs::read_to_string(root.join(RULES_FILE)).unwrap();
+    assert!(text.contains("\"group_id\": \"g-1\""), "{text}");
+    // A broken file stops the compile instead of being replaced.
+    std::fs::write(root.join(RULES_FILE), b"{").unwrap();
+    assert!(AtomRules::load(&root, MARKS, None, String::new(), Vec::new()).is_err());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn local_rulesets_are_referenced_edited_and_guarded() {
+    let root = scratch("rulesets");
+    let rules = owner(&root);
+    let set = rules
+        .create_ruleset(
+            "streaming",
+            Source::Local,
+            vec!["netflix.com".to_owned(), "full:www.hulu.com".to_owned()],
+        )
+        .unwrap();
+    assert!(set.id.starts_with("rs-"));
+    assert_eq!(set.rule_count, 2);
+    let matches = Match {
+        ruleset: vec![set.id.clone()],
+        ..Match::default()
+    };
+    let (_, rule) = rules
+        .create(input(matches, proxy("g-us")), None, None, None)
+        .unwrap();
+    assert_eq!(hit(&rules, "api.netflix.com"), Some(proxy("g-us")));
+    assert_eq!(hit(&rules, "www.hulu.com"), Some(proxy("g-us")));
+    assert_eq!(hit(&rules, "hulu.com"), None, "full: is exact");
+    rules
+        .update_ruleset(&set.id, None, None, Some(vec!["disneyplus.com".to_owned()]))
+        .unwrap();
+    assert_eq!(hit(&rules, "api.netflix.com"), None, "the edit is live");
+    assert_eq!(hit(&rules, "www.disneyplus.com"), Some(proxy("g-us")));
+    assert_eq!(
+        rules.ruleset_entries(&set.id).unwrap(),
+        vec!["disneyplus.com".to_owned()]
+    );
+    // Reload: metadata and list come back from disk.
+    drop(rules);
+    let rules = owner(&root);
+    assert_eq!(hit(&rules, "www.disneyplus.com"), Some(proxy("g-us")));
+    let blocked = rules.delete_ruleset(&set.id).unwrap_err();
+    assert_eq!(
+        (blocked.status, blocked.rules.clone()),
+        (409, vec![rule.id.clone()])
+    );
+    rules.delete(&rule.id, None).unwrap();
+    rules.delete_ruleset(&set.id).unwrap();
+    assert!(
+        !root
+            .join(RULESET_DIR)
+            .join(format!("{}.txt", set.id))
+            .exists()
+    );
+    assert!(rules.rulesets().is_empty());
+    // Bad entries and bad sources are refused.
+    assert_eq!(
+        rules
+            .create_ruleset("x", Source::Local, vec!["regexp:(".to_owned()])
+            .unwrap_err()
+            .status,
+        400
+    );
+    let ftp = Source::Remote {
+        url: "ftp://example.com/list.txt".to_owned(),
+        format: "auto".to_owned(),
+        category: String::new(),
+    };
+    assert_eq!(
+        rules
+            .create_ruleset("x", ftp, Vec::new())
+            .unwrap_err()
+            .status,
+        400
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn remote_downloads_are_converted_and_failures_recorded() {
+    let root = scratch("remote");
+    let rules = owner(&root);
+    let source = Source::Remote {
+        url: "https://example.com/list.yaml".to_owned(),
+        format: "auto".to_owned(),
+        category: String::new(),
+    };
+    let set = rules.create_ruleset("remote", source, Vec::new()).unwrap();
+    assert_eq!(set.rule_count, 0);
+    let yaml = b"payload:\n  - '+.openai.com'\n  - 'chat.example.org'\n";
+    let converted = convert_download(yaml, "auto", "", "https://example.com/list.yaml");
+    let stored = rules.store_download(&set.id, converted).unwrap();
+    assert_eq!(stored.rule_count, 2);
+    assert!(stored.last_error.is_empty());
+    let matches = Match {
+        ruleset: vec![set.id.clone()],
+        ..Match::default()
+    };
+    rules
+        .create(input(matches, proxy("g-ai")), None, None, None)
+        .unwrap();
+    assert_eq!(hit(&rules, "api.openai.com"), Some(proxy("g-ai")));
+    assert_eq!(hit(&rules, "chat.example.org"), Some(proxy("g-ai")));
+    // A failed refresh keeps the list and records the reason.
+    let failed = rules
+        .store_download(&set.id, Err("下载失败: timed out".to_owned()))
+        .unwrap();
+    assert_eq!(failed.rule_count, 2);
+    assert!(failed.last_error.contains("timed out"));
+    assert_eq!(hit(&rules, "api.openai.com"), Some(proxy("g-ai")));
+    assert!(convert_download(b"\n# nothing\n", "text", "", "x.txt").is_err());
+    let text = convert_download(b"a.com\nfull:b.com\n", "text", "", "x.txt").unwrap();
+    assert_eq!(text.0.len(), 2);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn wire(name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for label in name.split('.') {
+        out.push(u8::try_from(label.len()).unwrap());
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    out
+}
+
+fn state(name: &str, client: Option<&str>) -> ExecutionState {
+    let mut raw = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    raw.extend_from_slice(&wire(name));
+    raw.extend_from_slice(&[0, 1, 0, 1]);
+    let (header, question) = atomdns_dns_core::parse_query(&raw).unwrap();
+    let mut state = ExecutionState::new(header, question);
+    if let Some(client) = client {
+        state.query.client = atomdns_sequence_core::ClientContext::from_peer(
+            client.parse().unwrap(),
+            atomdns_sequence_core::ClientTransport::Udp,
+        );
+    }
+    state
+}
+
+#[test]
+fn the_fixture_marks_the_action_and_records_the_group() {
+    let rules = Rc::new(owner(Path::new("")));
+    rules
+        .create(
+            RuleInput {
+                remark: "流|媒体".to_owned(),
+                ..input(suffix(&["netflix.com"]), proxy("g-us"))
+            },
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let executor = rules.executor();
+    let mut proxied = state("www.netflix.com", Some("192.168.1.2"));
+    executor.execute(&mut proxied).unwrap();
+    assert_eq!(proxied.fast_flags, 1 << 41);
+    assert_eq!(proxied.outbound.as_deref(), Some("g-us"));
+    assert_eq!(proxied.routing.domain_set.as_deref(), Some("规则:流/媒体"));
+    assert!(
+        proxied
+            .routing
+            .matched_rule_source
+            .as_deref()
+            .is_some_and(|source| source.starts_with("atom_rule:r-"))
+    );
+    let mut lan = state("nas.lan", None);
+    executor.execute(&mut lan).unwrap();
+    assert_eq!((lan.fast_flags, lan.outbound.clone()), (1 << 42, None));
+    let mut ads = state("ads.example", None);
+    ads.fast_flags = ADS;
+    executor.execute(&mut ads).unwrap();
+    assert_eq!(ads.fast_flags, ADS | 1 << 40);
+    let mut other = state("example.com", None);
+    executor.execute(&mut other).unwrap();
+    assert_eq!((other.fast_flags, other.outbound.clone()), (0, None));
+    assert_eq!(other.routing.domain_set, None);
+}
+
+mod engine {
+    //! The whole path through a compiled configuration: the fixture's marks
+    //! dispatch the query, and the forward of the FakeIP upstream receives
+    //! the rule's group (SET) or none (CLEAR).
+    use std::cell::RefCell;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use atomdns_sequence_core::ExecutableId;
+    use atomdns_upstream_core::{ExchangeResponse, Transport, TransportCancellation};
+
+    use crate::assembly::HostOptions;
+    use crate::execution::{
+        ExchangeError, ExchangeExecutor, ExecutionRequest, InvocationExchange,
+        execute_request_with_observation,
+    };
+    use crate::observer::{ExecutionCheckpoint, UpstreamAttemptLedgerHandle};
+
+    /// Records `(upstream tag, 65001 payload as sent)` and answers 30.0.0.1.
+    struct Recorder {
+        /// Every forward invocation's executable and its definition's tag.
+        tags: Vec<(ExecutableId, String)>,
+        calls: RefCell<Vec<(String, Option<Vec<u8>>)>>,
+    }
+
+    impl Recorder {
+        fn tag(&self, executable: ExecutableId) -> String {
+            self.tags
+                .iter()
+                .find(|(id, _)| *id == executable)
+                .map(|(_, tag)| tag.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    fn directive(wire: &[u8]) -> Option<Vec<u8>> {
+        let message = hickory_proto::op::Message::from_vec(wire).ok()?;
+        let edns = message.extensions().as_ref()?;
+        edns.options().as_ref().iter().find_map(|(code, option)| {
+            (u16::from(*code) == 65001).then(|| match option {
+                hickory_proto::rr::rdata::opt::EdnsOption::Unknown(_, data) => data.clone(),
+                other => panic!("unexpected option {other:?}"),
+            })
+        })
+    }
+
+    fn answer(query: &[u8]) -> Vec<u8> {
+        let (header, question) = atomdns_dns_core::parse_query(query).unwrap();
+        let mut wire = vec![
+            (header.id >> 8) as u8,
+            header.id as u8,
+            0x81,
+            0x80,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+        ];
+        wire.extend_from_slice(&question.qname_wire);
+        wire.extend_from_slice(&[0, 1, 0, 1, 0xc0, 12, 0, 1, 0, 1, 0, 0, 1, 44, 0, 4]);
+        wire.extend_from_slice(&[30, 0, 0, 1]);
+        wire
+    }
+
+    impl ExchangeExecutor for Recorder {
+        fn exchange<'a>(
+            &'a self,
+            _executable: ExecutableId,
+            query: &'a [u8],
+            _deadline: Instant,
+            _cancellation: TransportCancellation,
+        ) -> Pin<Box<dyn Future<Output = Result<ExchangeResponse, ExchangeError>> + 'a>> {
+            let id = u16::from_be_bytes([query[0], query[1]]);
+            let wire = answer(query);
+            Box::pin(async move { Ok(ExchangeResponse::new(wire, id, id, Transport::Udp, false)) })
+        }
+
+        fn exchange_invocation_with_outbound<'a>(
+            &'a self,
+            executable: ExecutableId,
+            query: &'a [u8],
+            deadline: Instant,
+            cancellation: TransportCancellation,
+            attempts: UpstreamAttemptLedgerHandle,
+            outbound: Option<Arc<str>>,
+        ) -> Pin<Box<dyn Future<Output = Result<InvocationExchange, ExchangeError>> + 'a>> {
+            let sent = crate::edns_directive::outgoing_query(
+                query,
+                self.tag(executable) == crate::edns_directive::FAKEIP_UPSTREAM,
+                outbound.as_deref(),
+            )
+            .unwrap();
+            self.calls
+                .borrow_mut()
+                .push((self.tag(executable), directive(&sent)));
+            self.exchange_invocation(executable, query, deadline, cancellation, attempts)
+        }
+    }
+
+    const YAML: &str = r"log: {level: error}
+plugins:
+  - tag: domestic
+    type: forward
+    args: {upstreams: [{addr: 'udp://127.0.0.1:15000'}]}
+  - tag: nocnfake
+    type: forward
+    args: {upstreams: [{addr: 'udp://127.0.0.1:16666'}]}
+  - tag: atom_rules
+    type: atom_rules
+    args: {marks: {proxy: 41, direct: 42, block: 40}}
+  - tag: main
+    type: sequence
+    args:
+      - exec: $atom_rules
+      - matches: fast_mark 40
+        exec: reject 0
+      - matches: fast_mark 41
+        exec: [$nocnfake, exit]
+      - matches: fast_mark 42
+        exec: [$domestic, exit]
+      - exec: $nocnfake
+  - tag: listener
+    type: udp_server
+    args: {entry: main, listen: '127.0.0.1:3099'}
+";
+
+    #[test]
+    fn rule_actions_reach_the_upstreams_and_the_fakeip_directive() {
+        let root = super::scratch("engine");
+        let file = r#"{"version": 3, "rules": [
+            {"id": "r-p", "enabled": true, "match": {"suffix": ["proxy.test"]},
+             "action": {"type": "proxy", "group_id": "g-x"}},
+            {"id": "r-d", "enabled": true, "match": {"domain": ["direct.test"]},
+             "action": {"type": "direct"}},
+            {"id": "r-b", "enabled": true, "match": {"suffix": ["block.test"]},
+             "action": {"type": "block"}}
+        ]}"#;
+        std::fs::create_dir_all(root.join("webinfo")).unwrap();
+        std::fs::write(root.join(super::RULES_FILE), file).unwrap();
+        let assembly = crate::HostAssembly::with_options(
+            crate::config::compile_yaml_with_base(YAML, &root).expect("config"),
+            HostOptions::default(),
+        )
+        .expect("assembly");
+        let config = assembly.config();
+        let tags: Vec<_> = config
+            .forward_invocations
+            .iter()
+            .map(|invocation| {
+                let definition = &config.forward_definitions[invocation.definition];
+                (invocation.executable, definition.tag.clone())
+            })
+            .collect();
+        let recorder = Recorder {
+            tags,
+            calls: RefCell::new(Vec::new()),
+        };
+        let run = |name: &str| {
+            recorder.calls.borrow_mut().clear();
+            let mut raw = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+            raw.extend_from_slice(&super::wire(name));
+            raw.extend_from_slice(&[0, 1, 0, 1]);
+            let (header, question) = atomdns_dns_core::parse_query(&raw).unwrap();
+            let result = assembly.block_on(execute_request_with_observation(
+                ExecutionRequest {
+                    client: Default::default(),
+                    config,
+                    cache: assembly.cache(),
+                    options: &HostOptions::default(),
+                    raw: &raw,
+                    header,
+                    question,
+                },
+                &recorder,
+                TransportCancellation::new(),
+                &mut ExecutionCheckpoint::new(true),
+            ));
+            (result, recorder.calls.borrow().clone())
+        };
+        let (result, calls) = run("www.proxy.test");
+        assert_eq!(
+            calls,
+            vec![("nocnfake".to_owned(), Some(b"\x01\x01g-x".to_vec()))]
+        );
+        assert_eq!(result.domain_set.as_deref(), Some("规则:r-p"));
+        let (_, calls) = run("direct.test");
+        assert_eq!(calls, vec![("domestic".to_owned(), None)]);
+        let (result, calls) = run("x.block.test");
+        assert!(calls.is_empty());
+        let message = hickory_proto::op::Message::from_vec(&result.response_wire).unwrap();
+        assert_eq!(u16::from(message.response_code()), 0, "NOERROR");
+        assert!(message.answers().is_empty(), "empty answer");
+        let (_, calls) = run("other.test");
+        assert_eq!(
+            calls,
+            vec![("nocnfake".to_owned(), Some(vec![1, 2]))],
+            "CLEAR"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

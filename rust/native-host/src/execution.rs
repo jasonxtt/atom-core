@@ -74,6 +74,21 @@ pub(crate) trait ExchangeExecutor {
                 })
         })
     }
+
+    /// [`Self::exchange_invocation`] for a query whose rule chose `outbound`
+    /// (atom fork, `ExecutionState::outbound`). Only the host catalog sends
+    /// it (to the FakeIP upstream, as EDNS0 65001 SET); the default ignores it.
+    fn exchange_invocation_with_outbound<'a>(
+        &'a self,
+        executable: ExecutableId,
+        query: &'a [u8],
+        deadline: Instant,
+        cancellation: TransportCancellation,
+        attempts: UpstreamAttemptLedgerHandle,
+        _outbound: Option<std::sync::Arc<str>>,
+    ) -> Pin<Box<dyn Future<Output = Result<InvocationExchange, ExchangeError>> + 'a>> {
+        self.exchange_invocation(executable, query, deadline, cancellation, attempts)
+    }
 }
 
 pub(crate) struct InvocationExchange {
@@ -2096,12 +2111,13 @@ pub(crate) async fn execute_request_with_observation<E: ExchangeExecutor + ?Size
                 facts.checkpoint.begin_attempt_ledger();
                 facts.install_root_attempt_trace(dispatch.executable(), question.qtype);
                 let exchange = executor
-                    .exchange_invocation(
+                    .exchange_invocation_with_outbound(
                         dispatch.executable(),
                         raw,
                         request_deadline,
                         request_shutdown.clone(),
                         facts.checkpoint.attempt_ledger_handle(),
+                        machine.state().outbound.clone(),
                     )
                     .await;
                 let attempt_ledger = facts.checkpoint.take_attempt_ledger();
@@ -2898,12 +2914,13 @@ async fn drive_branch_inner<'a, E: ExchangeExecutor + ?Sized>(
                     BranchLedgerGuard::new(&context, dispatch.executable(), ledger.clone(), None);
                 let exchange = context
                     .executor
-                    .exchange_invocation(
+                    .exchange_invocation_with_outbound(
                         dispatch.executable(),
                         context.raw(),
                         context.deadline,
                         branch_cancellation,
                         ledger.clone(),
+                        machine.state().outbound.clone(),
                     )
                     .await;
                 let selected_entry = exchange
@@ -3278,12 +3295,13 @@ fn run_target<'a, E: ExchangeExecutor + ?Sized>(
                     BranchLedgerGuard::new(&context, executable, ledger.clone(), None);
                 let exchange = context
                     .executor
-                    .exchange_invocation(
+                    .exchange_invocation_with_outbound(
                         executable,
                         context.raw(),
                         context.deadline,
                         cancellation,
                         ledger.clone(),
+                        successor.state().outbound.clone(),
                     )
                     .await;
                 let selected_entry = exchange

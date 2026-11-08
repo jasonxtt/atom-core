@@ -3,6 +3,8 @@
 
 mod api;
 mod assembly;
+mod atom_rules;
+mod atom_rules_api;
 mod bind;
 pub mod build_identity;
 mod cache;

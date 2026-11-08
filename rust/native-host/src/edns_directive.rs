@@ -5,7 +5,10 @@
 //!
 //! sing-box trusts whatever 65001 it receives, so the trust boundary is here:
 //! every query leaving for an upstream loses the 65001 options the client put
-//! in it, and only the FakeIP upstream (`nocnfake`) gets one, written by us.
+//! in it, and only the FakeIP upstream (`nocnfake`) gets one, written by us:
+//! SET with the group a user rule chose (`ExecutionState::outbound`, set by
+//! [`crate::atom_rules`]), otherwise CLEAR (the original judgment's foreign
+//! result, left to sing-box's `route.final`).
 use std::borrow::Cow;
 
 use atomdns_sequence_core::ExecutorError;
@@ -14,6 +17,7 @@ pub(crate) const OPTION_CODE: u16 = 65001;
 /// The `aliapi` group whose queries go to sing-box's `dns-in`.
 pub(crate) const FAKEIP_UPSTREAM: &str = "nocnfake";
 const VERSION: u8 = 1;
+const OP_SET: u8 = 1;
 const OP_CLEAR: u8 = 2;
 
 /// The query as it is sent to one upstream. A query for a normal upstream that
@@ -22,8 +26,13 @@ const OP_CLEAR: u8 = 2;
 /// duplicate ECS is still stripped); a query whose additional record cannot be
 /// walked is refused rather than forwarded with options we could not see. A
 /// query for the FakeIP upstream must also pass the full OPT validation: it
-/// never reaches sing-box with options we did not check.
-pub(crate) fn outgoing_query(raw: &[u8], fakeip: bool) -> Result<Cow<'_, [u8]>, ExecutorError> {
+/// never reaches sing-box with options we did not check. `outbound` is the
+/// tag a FakeIP query carries in SET (`None`: CLEAR); other upstreams ignore it.
+pub(crate) fn outgoing_query<'a>(
+    raw: &'a [u8],
+    fakeip: bool,
+    outbound: Option<&str>,
+) -> Result<Cow<'a, [u8]>, ExecutorError> {
     if fakeip {
         crate::ecs::query_opt(raw)?;
     }
@@ -70,8 +79,21 @@ pub(crate) fn outgoing_query(raw: &[u8], fakeip: bool) -> Result<Cow<'_, [u8]>, 
         return Ok(Cow::Borrowed(raw));
     }
     if fakeip {
+        let payload = match outbound {
+            Some(tag) => {
+                let mut payload = vec![VERSION, OP_SET];
+                payload.extend_from_slice(tag.as_bytes());
+                payload
+            }
+            None => vec![VERSION, OP_CLEAR],
+        };
         options.extend_from_slice(&OPTION_CODE.to_be_bytes());
-        options.extend_from_slice(&[0, 2, VERSION, OP_CLEAR]);
+        options.extend_from_slice(
+            &u16::try_from(payload.len())
+                .map_err(|_| ExecutorError::new("oversized outbound tag"))?
+                .to_be_bytes(),
+        );
+        options.extend_from_slice(&payload);
     }
     // Rebuild header + question from the expanded name: a compressed question
     // name may point into bytes after it (name storage, or option payloads
@@ -144,7 +166,7 @@ mod tests {
     #[test]
     fn fakeip_upstream_gets_clear_without_client_opt() {
         let plain = query(None);
-        let out = outgoing_query(&plain, true).unwrap();
+        let out = outgoing_query(&plain, true, None).unwrap();
         assert_eq!(directives(&out), vec![vec![1, 2]]);
         assert_eq!(&out[..10], &plain[..10]);
         assert_eq!(&out[10..12], &[0, 1], "ARCOUNT");
@@ -155,7 +177,7 @@ mod tests {
     fn forged_set_is_replaced_by_clear_for_fakeip_upstream() {
         let forged = [0xfd, 0xe9, 0, 5, 1, 1, b'b', b'a', b'd'];
         let wire = query(Some(&forged));
-        let out = outgoing_query(&wire, true).unwrap();
+        let out = outgoing_query(&wire, true, None).unwrap();
         assert_eq!(directives(&out), vec![vec![1, 2]]);
     }
 
@@ -167,7 +189,7 @@ mod tests {
         options.extend_from_slice(&[0, 8, 0, 7, 0, 1, 24, 0, 1, 2, 3]);
         options.extend_from_slice(&CLEAR);
         let wire = query(Some(&options));
-        let out = outgoing_query(&wire, false).unwrap();
+        let out = outgoing_query(&wire, false, None).unwrap();
         assert!(directives(&out).is_empty());
         assert_eq!(
             edns_options(&out),
@@ -181,11 +203,11 @@ mod tests {
     fn other_upstreams_get_the_query_unchanged() {
         let plain = query(None);
         assert!(matches!(
-            outgoing_query(&plain, false).unwrap(),
+            outgoing_query(&plain, false, None).unwrap(),
             Cow::Borrowed(_)
         ));
         let cookie = query(Some(&[0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8]));
-        let out = outgoing_query(&cookie, false).unwrap();
+        let out = outgoing_query(&cookie, false, None).unwrap();
         assert!(matches!(out, Cow::Borrowed(_)));
         assert_eq!(out.as_ref(), cookie.as_slice());
     }
@@ -193,7 +215,7 @@ mod tests {
     #[test]
     fn fakeip_upstream_keeps_other_options_and_payload_size() {
         let wire = query(Some(&[0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8]));
-        let out = outgoing_query(&wire, true).unwrap();
+        let out = outgoing_query(&wire, true, None).unwrap();
         let mut expected = vec![0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8];
         expected.extend_from_slice(&CLEAR);
         assert_eq!(edns_options(&out), expected.as_slice());
@@ -210,12 +232,12 @@ mod tests {
         options.extend_from_slice(&ecs);
         let wire = query(Some(&options));
         assert!(crate::ecs::query_opt(&wire).is_err());
-        let out = outgoing_query(&wire, false).unwrap();
+        let out = outgoing_query(&wire, false, None).unwrap();
         assert!(directives(&out).is_empty());
         assert_eq!(edns_options(&out), [ecs, ecs].concat().as_slice());
         assert_eq!(&out[12..22], &wire[12..22], "question");
         // The FakeIP upstream still refuses an OPT it cannot validate.
-        assert!(outgoing_query(&wire, true).is_err());
+        assert!(outgoing_query(&wire, true, None).is_err());
     }
 
     #[test]
@@ -231,7 +253,7 @@ mod tests {
         wire.extend_from_slice(b"\x01x\x04test\x00");
         let cookie = wire[38..].to_vec();
         for fakeip in [false, true] {
-            let out = outgoing_query(&wire, fakeip).unwrap();
+            let out = outgoing_query(&wire, fakeip, None).unwrap();
             let message = hickory_proto::op::Message::from_vec(&out).unwrap();
             assert_eq!(message.queries()[0].name().to_ascii(), "x.test.");
             assert_eq!(&out[12..20], b"\x01x\x04test\x00", "expanded question");
@@ -247,8 +269,23 @@ mod tests {
     fn unwalkable_opt_is_refused() {
         // The option claims more payload than the OPT holds.
         let wire = query(Some(&[0xfd, 0xe9, 0, 9, 1, 1]));
-        assert!(outgoing_query(&wire, false).is_err());
-        assert!(outgoing_query(&wire, true).is_err());
+        assert!(outgoing_query(&wire, false, None).is_err());
+        assert!(outgoing_query(&wire, true, None).is_err());
+    }
+
+    #[test]
+    fn fakeip_upstream_gets_set_for_a_rule_outbound() {
+        let forged = [0xfd, 0xe9, 0, 5, 1, 1, b'b', b'a', b'd'];
+        for wire in [query(None), query(Some(&forged))] {
+            let out = outgoing_query(&wire, true, Some("g-7f3a")).unwrap();
+            assert_eq!(directives(&out), vec![b"\x01\x01g-7f3a".to_vec()]);
+            hickory_proto::op::Message::from_vec(&out).unwrap();
+        }
+        // Other upstreams never see the outbound.
+        let plain = query(None);
+        let out = outgoing_query(&plain, false, Some("g-7f3a")).unwrap();
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert!(directives(&out).is_empty());
     }
 
     #[test]
@@ -273,15 +310,15 @@ mod tests {
             }
             wire.extend_from_slice(&pointer);
             wire.extend_from_slice(&[0, 41, 16, 0, 0, 0, 0, 0, 0, 0]);
-            assert!(outgoing_query(&wire, false).is_err(), "{name}");
-            assert!(outgoing_query(&wire, true).is_err(), "{name}");
+            assert!(outgoing_query(&wire, false, None).is_err(), "{name}");
+            assert!(outgoing_query(&wire, true, None).is_err(), "{name}");
         }
         // A pointer to the (valid) question name is still accepted.
         let mut wire = base.clone();
         wire[11] = 1;
         wire.extend_from_slice(&[0xc0, 12, 0, 41, 16, 0, 0, 0, 0, 0, 0, 0]);
         assert!(matches!(
-            outgoing_query(&wire, false).unwrap(),
+            outgoing_query(&wire, false, None).unwrap(),
             Cow::Borrowed(_)
         ));
     }

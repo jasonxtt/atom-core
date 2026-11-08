@@ -15,6 +15,10 @@ pub struct ExecutionState {
     pub routing: RoutingState,
     /// Query-local dynamic labels; never part of response provenance or dumps.
     pub domain_set_overlay: Option<RoutingLabelOverlay>,
+    /// atom fork: the outbound tag a matched rule chose for this query. The
+    /// host sends it to the `FakeIP` upstream as EDNS0 65001 SET; `None` sends
+    /// CLEAR there. Other upstreams never see it.
+    pub outbound: Option<Arc<str>>,
     response_generation: u64,
     response_origin: Option<ResponseOrigin>,
 }
@@ -33,6 +37,7 @@ impl ExecutionState {
             response: ResponseState::None,
             routing: RoutingState::default(),
             domain_set_overlay: None,
+            outbound: None,
             response_generation: 0,
             response_origin: None,
         }

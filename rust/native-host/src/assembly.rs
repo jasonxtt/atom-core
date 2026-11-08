@@ -1196,8 +1196,9 @@ impl ForwardCatalog {
         &self,
         executable: atomdns_sequence_core::ExecutableId,
         query: &[u8],
+        outbound: Option<&str>,
     ) -> Result<Vec<u8>, ExchangeError> {
-        crate::edns_directive::outgoing_query(query, self.fakeip.contains(&executable))
+        crate::edns_directive::outgoing_query(query, self.fakeip.contains(&executable), outbound)
             .map(std::borrow::Cow::into_owned)
             .map_err(|_| {
                 ExchangeError::Upstream(UpstreamError::InvalidRequest(
@@ -1293,7 +1294,7 @@ impl ExchangeExecutor for ForwardCatalog {
         else {
             return Box::pin(async move { Err(ExchangeError::UnknownExecutable(executable)) });
         };
-        let query = self.outgoing_query(executable, query);
+        let query = self.outgoing_query(executable, query, None);
         Box::pin(async move {
             owner
                 .exchange(&query?, deadline, cancellation)
@@ -1312,11 +1313,32 @@ impl ExchangeExecutor for ForwardCatalog {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<InvocationExchange, ExchangeError>> + 'a>,
     > {
+        self.exchange_invocation_with_outbound(
+            executable,
+            query,
+            deadline,
+            cancellation,
+            ledger,
+            None,
+        )
+    }
+
+    fn exchange_invocation_with_outbound<'a>(
+        &'a self,
+        executable: atomdns_sequence_core::ExecutableId,
+        query: &'a [u8],
+        deadline: std::time::Instant,
+        cancellation: TransportCancellation,
+        ledger: UpstreamAttemptLedgerHandle,
+        outbound: Option<std::sync::Arc<str>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<InvocationExchange, ExchangeError>> + 'a>,
+    > {
         let Some(owners) = self.owners.get(&executable) else {
             return Box::pin(async move { Err(ExchangeError::UnknownExecutable(executable)) });
         };
         let concurrent = self.concurrent.get(&executable).copied().unwrap_or(1);
-        let query = match self.outgoing_query(executable, query) {
+        let query = match self.outgoing_query(executable, query, outbound.as_deref()) {
             Ok(query) => query,
             Err(error) => return Box::pin(async move { Err(error) }),
         };

@@ -9,9 +9,11 @@
 #   2. 屏蔽类型（SOA/PTR/HTTPS，可选 AAAA）       reject
 #   3. unified_matcher1 给域名打 fast_mark        一次匹配拿到黑名单/广告/DDNS/各名单/学习结果的 mark
 #   4. IPv4 优先                                  开启「IPv4 优先」时执行 prefer_ipv4
-#   5. 记忆无 V4/V6、黑名单、广告                 直接空应答 / NXDOMAIN
-#   6. （atom 已删除专属分流组）
-#   7. DDNS 域名                                  国内；开启「DDNS 优先国外」则国外为主（兼容模式可回退国内，安全模式不回退）
+#   5. DDNS 域名                                  国内；开启「DDNS 优先国外」则国外为主（兼容模式可回退国内，安全模式不回退）
+#   6. atom 用户规则表（atom_rules）              有序，第一条命中的生效：代理 → 组（FakeIP + EDNS0 65001 SET，不问国内外 DNS）、
+#                                                 直连（国内 DNS）、屏蔽（空应答）；没命中才往下走 → sub_config/atom_rules.yaml
+#                                                 广告屏蔽是规则表里的一条普通规则（默认规则表），不再是固定步骤
+#   7. 记忆无 V4/V6、黑名单                       直接空应答 / NXDOMAIN（以下属于原国内外判断）
 #   8. 指定客户端直连（client_routing）           国内并结束
 #   9. 全局缓存（compat 用 cache_all，safe 用 cache_all_noleak）、域名排行
 #  10. $sequence_listed                           域名在名单里或有学习记录：按 mark 的优先级交给对应的结果序列 → process_listed.yaml
@@ -29,6 +31,7 @@
 #   sub_config/settings.yaml    可在 WebUI 调整的值（代理、ECS）
 #   sub_config/flags.yaml       所有功能开关（flag），以及它们在 WebUI 的名字和说明
 #   sub_config/rule_set.yaml    重写、各类名单与规则源、unified_matcher1（域名 → fast_mark 对照表）
+#   sub_config/atom_rules.yaml  atom 用户规则表插件（规则存在 webinfo/atom_rules.json，由 /api/v1/atom/rules 管理）
 #   sub_config/route_learner.yaml  路由学习：记忆直连 / 记忆代理 / 无 V4 / 无 V6 / 特殊域名
 #   sub_config/cache.yaml       全部缓存及容量
 #   sub_config/forward_local.yaml / forward_nocn.yaml / forward_nocn_ecs.yaml
@@ -65,6 +68,7 @@ include:
   - "sub_config/domain_output.yaml"             #域名规则生成输出插件定义
   - "sub_config/route_learner.yaml"             #路由学习（记忆直连/代理/无V4/无V6/特殊域名）
   - "sub_config/rule_set.yaml"                  #数据插件定义
+  - "sub_config/atom_rules.yaml"                #atom 用户规则表
   - "sub_config/cache.yaml"                     #缓存插件定义
   - "sub_config/forward_local.yaml"             #带过期缓存的内部使用国内dns服务器
   - "sub_config/forward_nocn.yaml"              #带过期缓存的内部使用国外dns服务器
@@ -95,24 +99,6 @@ plugins:
       - exec: $unified_matcher1                 #一次匹配给域名打上所有名单和学习结果的 fast_mark；定义: sub_config/rule_set.yaml
       - matches: flag prefer_v4                 #IPv4优先：存在A记录时抑制AAAA结果；定义: sub_config/flags.yaml
         exec: prefer_ipv4
-      - matches:                                #记忆无V4 的域名，A 查询直接返回空
-        - fast_mark 2
-        - qtype 1
-        - flag block_empty                      #定义: sub_config/flags.yaml
-        exec: reject 0
-      - matches:                                #记忆无V6 的域名，AAAA 查询直接返回空
-        - fast_mark 3
-        - qtype 28
-        - flag block_empty                      #定义: sub_config/flags.yaml
-        exec: reject 0
-      - matches:                                #屏蔽黑名单域名
-        - fast_mark 1
-        - flag block_blocklist                  #定义: sub_config/flags.yaml
-        exec: reject 3
-      - matches:                                #屏蔽广告
-        - fast_mark 5
-        - flag block_ads                        #定义: sub_config/flags.yaml
-        exec: reject 3
       - matches:                                #DDNS域名 + 安全模式 + 国外优先：只问国外，不回退国内
         - fast_mark 6
         - flag ddns_foreign                     #DDNS优先国外解析；定义: sub_config/flags.yaml
@@ -130,6 +116,35 @@ plugins:
         exec:
           - $domestic                           #定义: sub_config/forward_local.yaml
           - exit
+      - exec: $atom_rules                       #atom 用户规则表：第一条命中的规则给查询打上动作标记；定义: sub_config/atom_rules.yaml
+      - matches: fast_mark 40                   #规则：屏蔽，返回空应答
+        exec: reject 0
+      - matches:                                #规则：代理 → 组。A/AAAA 直接向 sing-box 要 FakeIP，查询带 EDNS0 65001 SET 组，不问国内外 DNS
+        - fast_mark 41
+        - qtype 1 28
+        exec: $sequence_fakeip_exit             #定义: sub_config/forward_1.yaml
+      - matches: fast_mark 41                   #规则：代理，其他类型（MX、TXT 等）问国外 DNS
+        exec: [$sequence_google, exit]          #定义: sub_config/forward_1.yaml
+      - matches:                                #规则：直连，A/AAAA 问国内 DNS 要真实 IP
+        - fast_mark 42
+        - qtype 1 28
+        exec: [$sequence_local_exit, exit]      #定义: sub_config/forward_1.yaml
+      - matches: fast_mark 42                   #规则：直连，其他类型问国内 DNS
+        exec: [$sequence_local, exit]           #定义: sub_config/forward_1.yaml
+      - matches:                                #记忆无V4 的域名，A 查询直接返回空（排在规则表后面：规则命中代理的域名不受学习结果影响）
+        - fast_mark 2
+        - qtype 1
+        - flag block_empty                      #定义: sub_config/flags.yaml
+        exec: reject 0
+      - matches:                                #记忆无V6 的域名，AAAA 查询直接返回空
+        - fast_mark 3
+        - qtype 28
+        - flag block_empty                      #定义: sub_config/flags.yaml
+        exec: reject 0
+      - matches:                                #屏蔽黑名单域名（排在规则表后面：直连规则可以放行）
+        - fast_mark 1
+        - flag block_blocklist                  #定义: sub_config/flags.yaml
+        exec: reject 3
       - matches:                                #客户端分流「仅名单内客户端走代理」：client_ip.txt 以外的客户端一律直连
         - flag client_routing=only_listed_proxy #需要本程序占用 53 端口直面客户端；定义: sub_config/flags.yaml
         - "!client_ip $client_ip"               #定义: sub_config/rule_set.yaml
@@ -199,14 +214,6 @@ plugins:
       - matches: flag prefer_v4                 #IPv4优先：存在A记录时抑制AAAA结果；定义: sub_config/flags.yaml
         exec: prefer_ipv4
       #刷新分流时不因记忆无V4/无V6而提前空答：要重新探测，才能再确认（刷新记录的最近确认时间）这两类记录
-      - matches:                                #屏蔽黑名单域名
-        - fast_mark 1
-        - flag block_blocklist                  #定义: sub_config/flags.yaml
-        exec: reject 3
-      - matches:                                #屏蔽广告
-        - fast_mark 5
-        - flag block_ads                        #定义: sub_config/flags.yaml
-        exec: reject 3
       - matches:                                #DDNS域名 + 安全模式 + 国外优先：只问国外，不回退国内
         - fast_mark 6
         - flag ddns_foreign                     #DDNS优先国外解析；定义: sub_config/flags.yaml
@@ -224,6 +231,25 @@ plugins:
         exec:
           - $domestic                           #定义: sub_config/forward_local.yaml
           - exit
+      - exec: $atom_rules                       #atom 用户规则表：第一条命中的规则给查询打上动作标记；定义: sub_config/atom_rules.yaml
+      - matches: fast_mark 40                   #规则：屏蔽，返回空应答
+        exec: reject 0
+      - matches:                                #规则：代理 → 组。A/AAAA 直接向 sing-box 要 FakeIP，查询带 EDNS0 65001 SET 组，不问国内外 DNS
+        - fast_mark 41
+        - qtype 1 28
+        exec: $sequence_fakeip_exit             #定义: sub_config/forward_1.yaml
+      - matches: fast_mark 41                   #规则：代理，其他类型（MX、TXT 等）问国外 DNS
+        exec: [$sequence_google, exit]          #定义: sub_config/forward_1.yaml
+      - matches:                                #规则：直连，A/AAAA 问国内 DNS 要真实 IP
+        - fast_mark 42
+        - qtype 1 28
+        exec: [$sequence_local_exit, exit]      #定义: sub_config/forward_1.yaml
+      - matches: fast_mark 42                   #规则：直连，其他类型问国内 DNS
+        exec: [$sequence_local, exit]           #定义: sub_config/forward_1.yaml
+      - matches:                                #屏蔽黑名单域名（排在规则表后面：直连规则可以放行）
+        - fast_mark 1
+        - flag block_blocklist                  #定义: sub_config/flags.yaml
+        exec: reject 3
       - matches:                                #客户端分流「仅名单内客户端走代理」：client_ip.txt 以外的客户端一律直连
         - flag client_routing=only_listed_proxy #需要本程序占用 53 端口直面客户端；定义: sub_config/flags.yaml
         - "!client_ip $client_ip"               #定义: sub_config/rule_set.yaml
