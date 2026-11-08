@@ -34,7 +34,12 @@ pub(crate) fn outgoing_query(raw: &[u8], fakeip: bool) -> Result<Cow<'_, [u8]>, 
     // OPT class (UDP payload size) and TTL (extended rcode, version, flags).
     let mut fields = vec![4, 208, 0, 0, 0, 0];
     if header.arcount == 1 {
-        let record = crate::ecs::name_end(raw, crate::ecs::name_end(raw, 12)? + 4)?;
+        let owner = crate::ecs::name_end(raw, 12)? + 4;
+        // The owner name must be a valid name, pointers followed: a pointer
+        // past the end, onto itself or into a loop must not pass as the
+        // OPT's name (the walk below only skips it).
+        atomdns_dns_core::parse_question(raw, owner).map_err(|_| invalid())?;
+        let record = crate::ecs::name_end(raw, owner)?;
         let fixed = raw.get(record..record + 10).ok_or_else(invalid)?;
         let rdata = record + 10;
         let end = rdata + usize::from(u16::from_be_bytes([fixed[8], fixed[9]]));
@@ -244,5 +249,40 @@ mod tests {
         let wire = query(Some(&[0xfd, 0xe9, 0, 9, 1, 1]));
         assert!(outgoing_query(&wire, false).is_err());
         assert!(outgoing_query(&wire, true).is_err());
+    }
+
+    #[test]
+    fn opt_owner_pointer_must_reach_a_valid_name() {
+        // An OPT (TYPE 41, RDLENGTH 0) whose owner is a compression pointer:
+        // past the end, onto itself, or into a loop through the header's ID
+        // bytes (owner -> 0 -> owner). Skipping the owner alone accepts all
+        // three; they must be refused for every upstream, not forwarded as
+        // they are.
+        let base = query(None);
+        let owner = u8::try_from(base.len()).unwrap();
+        let cases = [
+            ("out of range", [0xc0, 0xff], None::<[u8; 2]>),
+            ("self", [0xc0, owner], None),
+            ("loop", [0xc0, 0], Some([0xc0, owner])),
+        ];
+        for (name, pointer, id) in cases {
+            let mut wire = base.clone();
+            wire[11] = 1;
+            if let Some(id) = id {
+                wire[..2].copy_from_slice(&id);
+            }
+            wire.extend_from_slice(&pointer);
+            wire.extend_from_slice(&[0, 41, 16, 0, 0, 0, 0, 0, 0, 0]);
+            assert!(outgoing_query(&wire, false).is_err(), "{name}");
+            assert!(outgoing_query(&wire, true).is_err(), "{name}");
+        }
+        // A pointer to the (valid) question name is still accepted.
+        let mut wire = base.clone();
+        wire[11] = 1;
+        wire.extend_from_slice(&[0xc0, 12, 0, 41, 16, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(matches!(
+            outgoing_query(&wire, false).unwrap(),
+            Cow::Borrowed(_)
+        ));
     }
 }
