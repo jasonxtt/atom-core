@@ -342,6 +342,11 @@ pub(crate) struct AtomRules {
     builtin: Vec<(String, BuiltinSet)>,
     state: RefCell<State>,
     table: Live<Table>,
+    /// The newest download started per ruleset (in memory): only that one
+    /// may install its result, so overlapping refreshes cannot publish an
+    /// older snapshot over a newer one.
+    downloads: RefCell<BTreeMap<String, u64>>,
+    next_download: std::cell::Cell<u64>,
 }
 
 /// The default table of a new installation (design §4.4). The ads rule
@@ -525,6 +530,25 @@ impl AtomRules {
             }
             for set in &rulesets {
                 let set: &Ruleset = set;
+                // Revision 0 is only a remote set that never downloaded a
+                // list; anything else claiming no list is not trusted (it
+                // would load as an empty set and match nothing).
+                if set.revision == 0 {
+                    let why = if matches!(set.source, Source::Local) {
+                        "本地规则集一定有列表".to_owned()
+                    } else if set.rule_count != 0 {
+                        format!("rule_count 为 {}", set.rule_count)
+                    } else {
+                        String::new()
+                    };
+                    if !why.is_empty() {
+                        return Err(format!(
+                            "{}: 规则集 `{}` 的状态不一致：revision 为 0（没有列表文件），但{why}",
+                            path.display(),
+                            set.id
+                        ));
+                    }
+                }
                 let list = if set.revision == 0 {
                     MixSetBuilder::new().finish()
                 } else {
@@ -548,6 +572,8 @@ impl AtomRules {
                 lists,
             }),
             table: Live::new(Table::default()),
+            downloads: RefCell::new(BTreeMap::new()),
+            next_download: std::cell::Cell::new(0),
         };
         let table = {
             let state = rules_owner.state.borrow();
@@ -1064,20 +1090,39 @@ impl AtomRules {
         let revision = next.rulesets.remove(at).revision;
         next.lists.remove(id);
         self.commit(next, false, true)?;
+        self.downloads.borrow_mut().remove(id);
         self.remove_list(id, revision);
         Ok(())
     }
 
+    /// Starts a download of ruleset `id`: the ticket [`Self::store_download`]
+    /// needs. A later start makes every earlier ticket stale.
+    pub(crate) fn begin_download(&self, id: &str) -> u64 {
+        let ticket = self.next_download.get() + 1;
+        self.next_download.set(ticket);
+        self.downloads.borrow_mut().insert(id.to_owned(), ticket);
+        ticket
+    }
+
     /// Installs a converted download (`Ok`) or records why it failed.
-    /// `source` is what was downloaded: a download is installed only while
-    /// the set still has that source (409 otherwise), so a slow download of
-    /// a replaced URL cannot overwrite the list of the new one.
+    /// Only the newest download started ([`Self::begin_download`]) of a set
+    /// that still has the downloaded `source` is installed; any other is
+    /// discarded with 409, so neither a slow download of a replaced URL nor
+    /// an older overlapping refresh (or its late failure) replaces a newer
+    /// result.
     pub(crate) fn store_download(
         &self,
         id: &str,
         source: &Source,
+        ticket: u64,
         result: Result<(Vec<String>, MixSet), String>,
     ) -> Result<Ruleset, Refusal> {
+        if self.downloads.borrow().get(id) != Some(&ticket) {
+            return Err(Refusal::new(
+                409,
+                format!("规则集 `{id}` 有更新的一次下载，这次下载的结果已丢弃"),
+            ));
+        }
         let mut next = self.state.borrow().clone();
         let at = next
             .rulesets

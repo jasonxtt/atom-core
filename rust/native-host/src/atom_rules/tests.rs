@@ -370,7 +370,12 @@ fn remote_downloads_are_converted_and_failures_recorded() {
     let yaml = b"payload:\n  - '+.openai.com'\n  - 'chat.example.org'\n";
     let converted = convert_download(yaml, "auto", "", "https://example.com/list.yaml");
     let stored = rules
-        .store_download(&set.id, &set.source, converted)
+        .store_download(
+            &set.id,
+            &set.source,
+            rules.begin_download(&set.id),
+            converted,
+        )
         .unwrap();
     assert_eq!(stored.rule_count, 2);
     assert!(stored.last_error.is_empty());
@@ -385,7 +390,12 @@ fn remote_downloads_are_converted_and_failures_recorded() {
     assert_eq!(hit(&rules, "chat.example.org"), Some(proxy("g-ai")));
     // A failed refresh keeps the list and records the reason.
     let failed = rules
-        .store_download(&set.id, &set.source, Err("下载失败: timed out".to_owned()))
+        .store_download(
+            &set.id,
+            &set.source,
+            rules.begin_download(&set.id),
+            Err("下载失败: timed out".to_owned()),
+        )
         .unwrap();
     assert_eq!(failed.rule_count, 2);
     assert!(failed.last_error.contains("timed out"));
@@ -509,6 +519,7 @@ fn a_download_of_a_replaced_source_is_discarded() {
         .create_ruleset("r", remote("https://a.example/list.txt"), Vec::new())
         .unwrap();
     let started_with = set.source.clone();
+    let ticket = rules.begin_download(&set.id);
     // The source changes while the download of A is still running.
     rules
         .update_ruleset(
@@ -520,7 +531,7 @@ fn a_download_of_a_replaced_source_is_discarded() {
         .unwrap();
     let late = convert_download(b"from-a.example\n", "text", "", "x.txt");
     let refused = rules
-        .store_download(&set.id, &started_with, late)
+        .store_download(&set.id, &started_with, ticket, late)
         .unwrap_err();
     assert_eq!(refused.status, 409, "{}", refused.message);
     let current = rules.ruleset(&set.id).unwrap();
@@ -529,16 +540,110 @@ fn a_download_of_a_replaced_source_is_discarded() {
         current.last_error.is_empty(),
         "the late result is not recorded"
     );
-    let failed_late = rules.store_download(&set.id, &started_with, Err("x".to_owned()));
+    let failed_late = rules.store_download(&set.id, &started_with, ticket, Err("x".to_owned()));
     assert_eq!(failed_late.unwrap_err().status, 409);
     // B's own download is installed.
     let b = convert_download(b"from-b.example\n", "text", "", "x.txt");
-    let stored = rules.store_download(&set.id, &current.source, b).unwrap();
+    let stored = rules
+        .store_download(&set.id, &current.source, rules.begin_download(&set.id), b)
+        .unwrap();
     assert_eq!((stored.revision, stored.rule_count), (1, 1));
     assert_eq!(
         rules.ruleset_entries(&set.id).unwrap(),
         vec!["domain:from-b.example"]
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn only_the_newest_overlapping_download_is_installed() {
+    let root = scratch("download-overlap");
+    let rules = owner(&root);
+    let set = rules
+        .create_ruleset(
+            "r",
+            Source::Remote {
+                url: "https://a.example/list.txt".to_owned(),
+                format: "text".to_owned(),
+                category: String::new(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+    let list = |name: &str| convert_download(name.as_bytes(), "text", "", "x.txt");
+    // Refresh 1 starts (an older snapshot), then refresh 2 of the same URL.
+    let first = rules.begin_download(&set.id);
+    let second = rules.begin_download(&set.id);
+    let newer = rules
+        .store_download(&set.id, &set.source, second, list("newer.example\n"))
+        .unwrap();
+    assert_eq!(newer.revision, 1);
+    // Refresh 1 finishes last: neither its list nor its failure lands.
+    for late in [
+        list("older.example\n"),
+        Err("下载失败: timed out".to_owned()),
+    ] {
+        let refused = rules
+            .store_download(&set.id, &set.source, first, late)
+            .unwrap_err();
+        assert_eq!(refused.status, 409, "{}", refused.message);
+    }
+    let current = rules.ruleset(&set.id).unwrap();
+    assert_eq!((current.revision, current.last_error.as_str()), (1, ""));
+    assert_eq!(
+        rules.ruleset_entries(&set.id).unwrap(),
+        vec!["domain:newer.example"]
+    );
+    // A ticket is single-generation: a newer start also retires the
+    // ticket that already published.
+    rules.begin_download(&set.id);
+    assert_eq!(
+        rules
+            .store_download(&set.id, &set.source, second, list("x.example\n"))
+            .unwrap_err()
+            .status,
+        409
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn rulesets_claiming_no_list_are_checked_on_load() {
+    let root = scratch("revision-zero");
+    let rules = owner(&root);
+    rules
+        .create_ruleset("mine", Source::Local, vec!["a.example".to_owned()])
+        .unwrap();
+    drop(rules);
+    let metadata = root.join(RULESETS_FILE);
+    let saved = std::fs::read_to_string(&metadata).unwrap();
+    let forge = |edits: &[(&str, &str)]| {
+        let mut forged = saved.clone();
+        for (from, to) in edits {
+            assert!(forged.contains(from), "{from}");
+            forged = forged.replacen(from, to, 1);
+        }
+        std::fs::write(&metadata, forged).unwrap();
+        load(&root).err().expect("refused")
+    };
+    // A local set always has a list (revision >= 1).
+    let error = forge(&[(r#""revision": 1"#, r#""revision": 0"#)]);
+    assert!(error.contains("revision"), "{error}");
+    // The step-2 format before revisions: no field means 0, refused too.
+    let error = forge(&[(",\n    \"revision\": 1", "")]);
+    assert!(error.contains("revision"), "{error}");
+    // A remote set with revision 0 but a rule count is inconsistent.
+    let error = forge(&[
+        (
+            r#""type": "local","#,
+            r#""type": "remote", "url": "https://example.com/l.txt","#,
+        ),
+        (r#""revision": 1"#, r#""revision": 0"#),
+    ]);
+    assert!(error.contains("rule_count 为 1"), "{error}");
+    // The file as written loads.
+    std::fs::write(&metadata, &saved).unwrap();
+    assert!(load(&root).is_ok());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -565,6 +670,7 @@ fn a_referenced_list_file_must_exist() {
         .store_download(
             &remote.id,
             &remote.source,
+            rules.begin_download(&remote.id),
             Err("下载失败: timed out".to_owned()),
         )
         .unwrap();

@@ -419,6 +419,7 @@ async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancella
     else {
         return error(400, "本地规则集不需要刷新");
     };
+    let ticket = rules.begin_download(&set.id);
     let fetched = crate::rule_download::fetch(
         crate::rule_download::Fetch {
             url: &url,
@@ -439,7 +440,7 @@ async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancella
         Err(e) => Err(format!("下载失败: {e}")),
     };
     let failed = converted.as_ref().err().cloned();
-    match rules.store_download(&set.id, &set.source, converted) {
+    match rules.store_download(&set.id, &set.source, ticket, converted) {
         // The set is kept with `last_error`; the caller sees the failure.
         Ok(set) => match failed {
             None => json(200, &ruleset_view(&set)),
