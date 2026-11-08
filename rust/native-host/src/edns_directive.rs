@@ -17,32 +17,48 @@ const VERSION: u8 = 1;
 const OP_CLEAR: u8 = 2;
 
 /// The query as it is sent to one upstream. A query for a normal upstream that
-/// carries no 65001 is returned as it is; one whose OPT this host cannot read
-/// is passed on unchanged too, as before (a query for the FakeIP upstream is
-/// then an error: it must never reach sing-box with options we did not check).
+/// carries no 65001 is returned as it is. Stripping walks the OPT record only
+/// structurally, so it does not depend on what the other options mean (a
+/// duplicate ECS is still stripped); a query whose additional record cannot be
+/// walked is refused rather than forwarded with options we could not see. A
+/// query for the FakeIP upstream must also pass the full OPT validation: it
+/// never reaches sing-box with options we did not check.
 pub(crate) fn outgoing_query(raw: &[u8], fakeip: bool) -> Result<Cow<'_, [u8]>, ExecutorError> {
-    let opt = match crate::ecs::query_opt(raw) {
-        Ok(opt) => opt,
-        Err(error) if fakeip => return Err(error),
-        Err(_) => return Ok(Cow::Borrowed(raw)),
-    };
+    if fakeip {
+        crate::ecs::query_opt(raw)?;
+    }
+    let invalid = || ExecutorError::new("invalid query");
+    let (header, question) = atomdns_dns_core::parse_query(raw).map_err(|_| invalid())?;
     let mut options = Vec::new();
     let mut stripped = false;
-    if let Some(opt) = &opt {
-        // query_opt has validated every option's length.
-        let mut rest = opt.other.as_slice();
-        while let [a, b, c, d, ..] = *rest {
+    // OPT class (UDP payload size) and TTL (extended rcode, version, flags).
+    let mut fields = vec![4, 208, 0, 0, 0, 0];
+    if header.arcount == 1 {
+        let record = crate::ecs::name_end(raw, crate::ecs::name_end(raw, 12)? + 4)?;
+        let fixed = raw.get(record..record + 10).ok_or_else(invalid)?;
+        let rdata = record + 10;
+        let end = rdata + usize::from(u16::from_be_bytes([fixed[8], fixed[9]]));
+        let mut rest = raw.get(rdata..end).ok_or_else(invalid)?;
+        if u16::from_be_bytes([fixed[0], fixed[1]]) != 41 {
+            // Not an OPT record: no EDNS options to strip (fakeip already
+            // refused it in query_opt).
+            return Ok(Cow::Borrowed(raw));
+        }
+        fields = fixed[2..8].to_vec();
+        while !rest.is_empty() {
+            let [a, b, c, d, ..] = *rest else {
+                return Err(ExecutorError::new("short EDNS option"));
+            };
             let len = 4 + usize::from(u16::from_be_bytes([c, d]));
-            let (option, tail) = rest.split_at(len.min(rest.len()));
+            let option = rest
+                .get(..len)
+                .ok_or_else(|| ExecutorError::new("short EDNS payload"))?;
             if u16::from_be_bytes([a, b]) == OPTION_CODE {
                 stripped = true;
             } else {
                 options.extend_from_slice(option);
             }
-            rest = tail;
-        }
-        if let Some(ecs) = &opt.ecs {
-            options.extend_from_slice(&ecs.option());
+            rest = &rest[len..];
         }
     }
     if !fakeip && !stripped {
@@ -52,22 +68,16 @@ pub(crate) fn outgoing_query(raw: &[u8], fakeip: bool) -> Result<Cow<'_, [u8]>, 
         options.extend_from_slice(&OPTION_CODE.to_be_bytes());
         options.extend_from_slice(&[0, 2, VERSION, OP_CLEAR]);
     }
-    let (mut wire, fixed) = match opt {
-        Some(opt) => (raw[..opt.offset].to_vec(), opt.fixed),
-        None => {
-            // Rebuild header + question: the question name may point into
-            // trailing name storage that must not stay before the OPT.
-            let (_, question) = atomdns_dns_core::parse_query(raw)
-                .map_err(|_| ExecutorError::new("invalid query"))?;
-            let mut wire = raw[..12].to_vec();
-            wire.extend_from_slice(&question.qname_wire);
-            wire.extend_from_slice(&question.qtype.to_be_bytes());
-            wire.extend_from_slice(&question.qclass.to_be_bytes());
-            (wire, vec![0, 0, 41, 4, 208, 0, 0, 0, 0])
-        }
-    };
+    // Rebuild header + question from the expanded name: a compressed question
+    // name may point into bytes after it (name storage, or option payloads
+    // that move once a 65001 is removed).
+    let mut wire = raw[..12].to_vec();
     wire[10..12].copy_from_slice(&1u16.to_be_bytes());
-    wire.extend_from_slice(&fixed);
+    wire.extend_from_slice(&question.qname_wire);
+    wire.extend_from_slice(&question.qtype.to_be_bytes());
+    wire.extend_from_slice(&question.qclass.to_be_bytes());
+    wire.extend_from_slice(&[0, 0, 41]);
+    wire.extend_from_slice(&fields);
     wire.extend_from_slice(
         &u16::try_from(options.len())
             .map_err(|_| ExecutorError::new("oversized OPT"))?
@@ -98,10 +108,6 @@ mod tests {
 
     /// The 65001 payloads of the query's OPT, in order.
     fn directives(wire: &[u8]) -> Vec<Vec<u8>> {
-        let message = hickory_proto::op::Message::from_vec(wire).expect("valid query");
-        let Some(edns) = message.extensions() else {
-            return Vec::new();
-        };
         let mut found = Vec::new();
         let mut rest = edns_options(wire);
         while rest.len() >= 4 {
@@ -111,13 +117,23 @@ mod tests {
             }
             rest = &rest[4 + len..];
         }
-        assert!(edns.max_payload() >= 512);
         found
     }
 
+    /// The option bytes of the OPT right after the question (none without
+    /// one). Independent of ECS validation, which duplicate ECS fails.
     fn edns_options(wire: &[u8]) -> &[u8] {
-        let opt = crate::ecs::query_opt(wire).unwrap().expect("OPT");
-        &wire[opt.offset + 11..]
+        let opt = crate::ecs::name_end(wire, 12).unwrap() + 4;
+        if u16::from_be_bytes([wire[10], wire[11]]) == 0 {
+            return &[];
+        }
+        assert_eq!(&wire[opt..opt + 3], &[0, 0, 41], "root-named OPT");
+        let options = &wire[opt + 11..];
+        assert_eq!(
+            options.len(),
+            usize::from(u16::from_be_bytes([wire[opt + 9], wire[opt + 10]]))
+        );
+        options
     }
 
     #[test]
@@ -178,5 +194,55 @@ mod tests {
         assert_eq!(edns_options(&out), expected.as_slice());
         let message = hickory_proto::op::Message::from_vec(&out).unwrap();
         assert_eq!(message.extensions().as_ref().unwrap().max_payload(), 4096);
+    }
+
+    #[test]
+    fn forged_set_with_duplicate_ecs_is_stripped_for_other_upstreams() {
+        // query_opt refuses duplicate ECS; stripping must not depend on it.
+        let ecs = [0, 8, 0, 7, 0, 1, 24, 0, 1, 2, 3];
+        let mut options = vec![0xfd, 0xe9, 0, 5, 1, 1, b'b', b'a', b'd'];
+        options.extend_from_slice(&ecs);
+        options.extend_from_slice(&ecs);
+        let wire = query(Some(&options));
+        assert!(crate::ecs::query_opt(&wire).is_err());
+        let out = outgoing_query(&wire, false).unwrap();
+        assert!(directives(&out).is_empty());
+        assert_eq!(edns_options(&out), [ecs, ecs].concat().as_slice());
+        assert_eq!(&out[12..22], &wire[12..22], "question");
+        // The FakeIP upstream still refuses an OPT it cannot validate.
+        assert!(outgoing_query(&wire, true).is_err());
+    }
+
+    #[test]
+    fn question_pointing_into_a_moved_option_is_expanded() {
+        // The question name is a pointer to `x.test` stored in a cookie
+        // payload after a forged SET; removing the SET moves the cookie.
+        let mut wire = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1];
+        wire.extend_from_slice(&[0xc0, 42, 0, 1, 0, 1]);
+        wire.extend_from_slice(&[0, 0, 41, 16, 0, 0, 0, 0, 0, 0, 21]);
+        wire.extend_from_slice(&[0xfd, 0xe9, 0, 5, 1, 1, b'b', b'a', b'd']);
+        assert_eq!(wire.len(), 38);
+        wire.extend_from_slice(&[0, 10, 0, 8]);
+        wire.extend_from_slice(b"\x01x\x04test\x00");
+        let cookie = wire[38..].to_vec();
+        for fakeip in [false, true] {
+            let out = outgoing_query(&wire, fakeip).unwrap();
+            let message = hickory_proto::op::Message::from_vec(&out).unwrap();
+            assert_eq!(message.queries()[0].name().to_ascii(), "x.test.");
+            assert_eq!(&out[12..20], b"\x01x\x04test\x00", "expanded question");
+            let mut expected = cookie.clone();
+            if fakeip {
+                expected.extend_from_slice(&CLEAR);
+            }
+            assert_eq!(edns_options(&out), expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn unwalkable_opt_is_refused() {
+        // The option claims more payload than the OPT holds.
+        let wire = query(Some(&[0xfd, 0xe9, 0, 9, 1, 1]));
+        assert!(outgoing_query(&wire, false).is_err());
+        assert!(outgoing_query(&wire, true).is_err());
     }
 }

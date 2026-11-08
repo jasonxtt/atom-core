@@ -191,3 +191,16 @@ fn fakeip_upstream_gets_clear_and_forged_directives_never_leave() {
         "no OPT is added for other upstreams"
     );
 }
+
+#[test]
+fn forged_directive_with_duplicate_ecs_never_reaches_other_upstreams() {
+    // Duplicate ECS fails the ECS parser; the forged SET must still be stripped.
+    let ecs = [0, 8, 0, 7, 0, 1, 24, 0, 1, 2, 3];
+    let mut forged = SET_BAD.to_vec();
+    forged.extend_from_slice(&ecs);
+    forged.extend_from_slice(&ecs);
+    let (fakeip, foreign) = run(&[query(0x0201, 28, Some(&forged))]);
+    assert!(fakeip.is_empty());
+    assert_eq!(foreign.len(), 1);
+    assert!(directives(&foreign[0]).is_empty(), "forged SET stripped");
+}

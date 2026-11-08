@@ -309,7 +309,7 @@ pub(crate) fn response_wire(
         .to_vec()
         .map_err(|_| error("response ECS encode failed"))
 }
-fn name_end(raw: &[u8], mut pos: usize) -> Result<usize, ExecutorError> {
+pub(crate) fn name_end(raw: &[u8], mut pos: usize) -> Result<usize, ExecutorError> {
     loop {
         let byte = *raw.get(pos).ok_or_else(|| error("short DNS name"))?;
         pos += 1;
