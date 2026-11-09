@@ -238,7 +238,7 @@ pub(crate) async fn handle(
     let rest = path.strip_prefix(PREFIX)?.trim_end_matches('/');
     // The query audit (DNS logs and statistics) is AtomDNS's own API, also
     // served under this prefix; `api.rs` routes it.
-    if rest == "audit" || rest.starts_with("audit/") {
+    if rest.starts_with("audit/") {
         return None;
     }
     let Some(rules) = config.local.atom_rules.as_deref() else {

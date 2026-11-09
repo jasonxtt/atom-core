@@ -1125,4 +1125,7 @@ fn the_openapi_document_matches_the_routes() {
     }
     let (status, value) = api.call("GET", "/api/v1/atom/nothing-here", "");
     assert_eq!((status, value["error"].is_string()), (404, true));
+    // The audit root itself is no audit route: the atom API's JSON 404.
+    let (status, value) = api.call("GET", "/api/v1/atom/audit", "");
+    assert_eq!((status, value["error"].is_string()), (404, true));
 }

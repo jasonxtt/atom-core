@@ -783,10 +783,15 @@ pub(crate) fn proxies(host: &Host, secret: &str) -> Result<Value, String> {
     }
 }
 
-/// The open connections (`GET /connections`, the snapshot form).
-pub(crate) fn connections(host: &Host, secret: &str) -> Result<Value, String> {
+/// The open connections (`GET /connections`, the snapshot form): sing-box's
+/// JSON bytes as they are, once checked to be a JSON object.
+pub(crate) fn connections(host: &Host, secret: &str) -> Result<Vec<u8>, String> {
     match clash(host.clash_api, secret, "GET", "/connections", None)? {
-        (200, body) => serde_json::from_slice(&body).map_err(|error| error.to_string()),
+        (200, body) => match serde_json::from_slice::<serde::de::IgnoredAny>(&body) {
+            Ok(_) if body.trim_ascii_start().starts_with(b"{") => Ok(body),
+            Ok(_) => Err("Clash API 的连接应答不是 JSON 对象".to_owned()),
+            Err(error) => Err(format!("Clash API 的连接应答无效: {error}")),
+        },
         (status, body) => Err(format!(
             "Clash API 读取连接失败（{status}）: {}",
             String::from_utf8_lossy(&body).trim()

@@ -540,8 +540,16 @@ async fn runtime(rules: &AtomRules) -> Answer {
 async fn connections(rules: &AtomRules, method: &str, id: Option<&str>) -> Answer {
     let (host, secret) = live(rules)?;
     if method == "GET" {
-        let value = blocking(move || crate::atom_singbox::connections(&host, &secret)).await?;
-        return Ok(reply_json(200, &value));
+        // Passed through as bytes: a large snapshot is neither parsed nor
+        // serialized on the runtime thread that serves DNS.
+        let mut body = blocking(move || crate::atom_singbox::connections(&host, &secret)).await?;
+        body.push(b'\n');
+        return Ok(Reply {
+            status: 200,
+            content_type: Some("application/json"),
+            body,
+            headers: Vec::new(),
+        });
     }
     let id = id.map(str::to_owned);
     let closed = id.clone();
