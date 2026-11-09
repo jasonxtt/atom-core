@@ -1301,7 +1301,7 @@ impl ExchangeExecutor for ForwardCatalog {
                 .exchange(&query?, deadline, cancellation)
                 .await
                 .map_err(ExchangeError::Upstream)?;
-            if let Some(name) = name {
+            if let Some(name) = name.filter(|_| crate::atom_ledger::acknowledges(response.wire())) {
                 crate::atom_ledger::record(&name, None);
             }
             Ok(response)
@@ -1362,8 +1362,10 @@ impl ExchangeExecutor for ForwardCatalog {
         );
         Box::pin(async move {
             let result = exchange.await;
-            if result.is_ok() {
-                crate::atom_ledger::record(&name, directive.as_deref());
+            if let Ok(exchange) = &result {
+                if crate::atom_ledger::acknowledges(exchange.response.wire()) {
+                    crate::atom_ledger::record(&name, directive.as_deref());
+                }
             }
             result
         })

@@ -203,14 +203,15 @@ fn a_recomputation_skips_rules_with_a_client_condition() {
 type Received = Arc<Mutex<Vec<(Vec<u8>, Option<Vec<u8>>)>>>;
 
 /// A stand-in for sing-box's `dns-in`: answers every query except those for
-/// `silent` names and records the directives it got.
+/// `silent` names (no reply) and `refused` names (SERVFAIL, as sing-box does
+/// when it cannot save a binding), and records the directives it got.
 struct FakeDnsIn {
     address: SocketAddr,
     got: Received,
 }
 
 impl FakeDnsIn {
-    fn start(silent: BTreeSet<Vec<u8>>) -> Self {
+    fn start(silent: BTreeSet<Vec<u8>>, refused: BTreeSet<Vec<u8>>) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let address = socket.local_addr().unwrap();
         let got: Received = Arc::new(Mutex::new(Vec::new()));
@@ -226,6 +227,9 @@ impl FakeDnsIn {
                 }
                 let mut reply = query.to_vec();
                 reply[2] |= 0x80;
+                if refused.contains(&name) {
+                    reply[3] = (reply[3] & 0xf0) | 2;
+                }
                 let _ = socket.send_to(&reply, peer);
             }
         });
@@ -263,7 +267,8 @@ fn host(dns_in: SocketAddr) -> crate::atom_singbox::Host {
 #[test]
 fn a_resync_sends_the_changes_and_keeps_what_failed() {
     let silent = wire("www.ledger-e.test");
-    let fake = FakeDnsIn::start([silent.clone()].into());
+    let refused = wire("www.ledger-g.test");
+    let fake = FakeDnsIn::start([silent.clone()].into(), [refused.clone()].into());
     let rules = AtomRules::load(
         Path::new(""),
         Marks {
@@ -282,6 +287,7 @@ fn a_resync_sends_the_changes_and_keeps_what_failed() {
         ("ledger-d.test", Action::Direct),
         ("ledger-e.test", Action::Block),
         ("ledger-f.test", proxy("g-default")),
+        ("ledger-g.test", Action::Direct),
     ] {
         rules
             .create(rule(suffix(name), action), None, None, None)
@@ -296,6 +302,7 @@ fn a_resync_sends_the_changes_and_keeps_what_failed() {
         ("www.ledger-d.test", set("g-default")),
         ("www.ledger-e.test", set("g-default")),
         ("www.ledger-f.test", set("g-default")),
+        ("www.ledger-g.test", set("g-default")),
     ] {
         ledger.lock().unwrap().record(&wire(name), binding);
     }
@@ -325,6 +332,8 @@ fn a_resync_sends_the_changes_and_keeps_what_failed() {
         ]
     );
     assert!(fake.got("www.ledger-f.test").is_empty());
+    // Refused (the binding was not saved): tried twice, then kept.
+    assert_eq!(fake.got("www.ledger-g.test").len(), 2);
     {
         let ledger = ledger.lock().unwrap();
         assert_eq!(ledger.get(&wire("www.ledger-a.test")), Some(&set("final")));
@@ -334,20 +343,36 @@ fn a_resync_sends_the_changes_and_keeps_what_failed() {
         );
         assert_eq!(ledger.get(&wire("www.ledger-d.test")), Some(&set("direct")));
         assert_eq!(ledger.get(&silent), Some(&set("g-default")));
+        assert_eq!(ledger.get(&refused), Some(&set("g-default")));
         assert_eq!(
             ledger.get(&wire("www.ledger-f.test")),
             Some(&set("g-default"))
         );
     }
     assert_eq!(done.trigger, "rules");
-    assert_eq!(done.changed, 4, "{done:?}");
-    assert_eq!(done.failed, 1, "{done:?}");
-    assert!(done.error.contains("no answer"), "{done:?}");
+    assert_eq!(done.changed, 5, "{done:?}");
+    assert_eq!(done.failed, 2, "{done:?}");
+    assert!(
+        done.error.contains("no answer") || done.error.contains("refused"),
+        "{done:?}"
+    );
     // The next recomputation tries the failed one again, and only it.
     let again = runtime
         .block_on(resync_with(&ledger, &rules, |_| 0, "rules"))
         .unwrap();
-    assert_eq!((again.changed, again.failed), (1, 1));
+    assert_eq!((again.changed, again.failed), (2, 2));
     assert_eq!(fake.got("www.ledger-e.test").len(), 4);
     assert_eq!(fake.got("www.ledger-a.test").len(), 1);
+}
+
+#[test]
+fn only_a_noerror_response_acknowledges() {
+    let mut reply = vec![0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
+    assert!(acknowledges(&reply));
+    reply[3] = 0x82; // SERVFAIL
+    assert!(!acknowledges(&reply));
+    reply[3] = 0x80;
+    reply[2] = 0x01; // a query, not a response
+    assert!(!acknowledges(&reply));
+    assert!(!acknowledges(&[0, 1, 0x81]));
 }

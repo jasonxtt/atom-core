@@ -167,6 +167,13 @@ fn ledger() -> std::sync::MutexGuard<'static, Lru> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Whether a reply of sing-box's FakeIP DNS confirms the directive: a
+/// response with NOERROR (sing-box answers with an error when it cannot
+/// save the binding).
+pub(crate) fn acknowledges(reply: &[u8]) -> bool {
+    reply.len() >= 12 && reply[2] & 0x80 != 0 && reply[3] & 0x0f == 0
+}
+
 /// Records a directive sing-box answered (the FakeIP upstream's queries;
 /// `outbound` `None` is CLEAR).
 pub(crate) fn record(name: &[u8], outbound: Option<&str>) {
@@ -316,11 +323,18 @@ async fn send_all(dns_in: SocketAddr, changes: &[(Vec<u8>, Binding)]) -> (Vec<bo
                 match tokio::time::timeout_at(deadline, socket.recv(&mut buffer)).await {
                     Ok(Ok(len)) => {
                         let reply = &buffer[..len];
-                        if len >= 12 && reply[2] & 0x80 != 0 {
+                        if len >= 12 {
                             if let Some(index) =
                                 waiting.remove(&u16::from_be_bytes([reply[0], reply[1]]))
                             {
-                                acknowledged[index] = true;
+                                if acknowledges(reply) {
+                                    acknowledged[index] = true;
+                                } else {
+                                    error = format!(
+                                        "sing-box refused the directive (rcode {})",
+                                        reply[3] & 0x0f
+                                    );
+                                }
                             }
                         }
                     }
