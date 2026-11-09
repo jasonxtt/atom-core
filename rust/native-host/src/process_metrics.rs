@@ -25,7 +25,7 @@ pub(crate) struct ProcessSample {
 /// The fields of `/proc/<pid>/stat` after the parenthesised command name:
 /// `(utime + stime in ticks, threads, start ticks after boot, vsize bytes, rss pages)`.
 #[cfg(any(target_os = "linux", test))]
-fn parse_stat(text: &str) -> Option<(u64, u64, u64, u64, u64)> {
+pub(crate) fn parse_stat(text: &str) -> Option<(u64, u64, u64, u64, u64)> {
     let fields: Vec<&str> = text.rsplit_once(')')?.1.split_whitespace().collect();
     // Field numbers of proc(5) minus 3: the state is the first field after the name.
     let field = |number: usize| fields.get(number - 3)?.parse::<u64>().ok();

@@ -98,11 +98,29 @@ impl FakeSingbox {
                     let (status, reply) = if refused || secret.is_empty() || auth != secret {
                         ("401 Unauthorized", "{}".to_owned())
                     } else if method == "GET" && path == "/proxies" {
-                        // Chunked, like Go's net/http for a large body.
+                        // Chunked, like Go's net/http for a large body. Every
+                        // outbound of the running file: a group's `now` is its
+                        // first member, a node has one delay test of 88 ms.
+                        let config: Value = serde_json::from_slice(&live).unwrap_or(Value::Null);
+                        let mut proxies = serde_json::Map::new();
+                        proxies.insert(FINAL.to_owned(), json!({"type": "Selector"}));
+                        for outbound in config["outbounds"].as_array().into_iter().flatten() {
+                            let tag = outbound["tag"].as_str().unwrap_or("").to_owned();
+                            let entry = match outbound["outbounds"].as_array() {
+                                Some(members) => json!({"type": "Selector", "now": members.first()}),
+                                None => json!({"type": "Trojan", "history":
+                                    [{"time": "2026-11-10T00:00:00Z", "delay": 88}]}),
+                            };
+                            proxies.insert(tag, entry);
+                        }
+                        ("200 OK", json!({ "proxies": proxies }).to_string())
+                    } else if method == "GET" && path == "/connections" {
                         (
                             "200 OK",
-                            r#"{"proxies":{"final":{"type":"Selector"}}}"#.to_owned(),
+                            r#"{"downloadTotal":10,"uploadTotal":20,"memory":30,"connections":[{"id":"c-1","chains":["n-00000001","final"],"rule":"final"}]}"#.to_owned(),
                         )
+                    } else if method == "DELETE" && path.starts_with("/connections") {
+                        ("204 No Content", String::new())
                     } else if method == "PUT" && path.starts_with("/proxies/") {
                         selects.lock().unwrap().push((
                             path["/proxies/".len()..].to_owned(),

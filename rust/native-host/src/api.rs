@@ -1019,29 +1019,38 @@ fn route(target: &str) -> Route<'_> {
     if path == "/api/v1/capture/logs" {
         return Route::CaptureLogs;
     }
+    let audit_v2 = |suffix: &str| match suffix {
+        "stats" => Some(Route::AuditV2(AuditV2Route::Stats)),
+        "stats/windows" => Some(Route::AuditV2(AuditV2Route::Windows)),
+        "logs" => Some(Route::AuditV2(AuditV2Route::Logs)),
+        "logs/domain" => Some(Route::AuditV2(AuditV2Route::LogsDomain)),
+        "rank/domain" => Some(Route::AuditV2(AuditV2Route::RankDomain)),
+        "rank/client" => Some(Route::AuditV2(AuditV2Route::RankClient)),
+        "rank/domain_set" => Some(Route::AuditV2(AuditV2Route::RankDomainSet)),
+        "rank/effective" => Some(Route::AuditV2(AuditV2Route::RankEffective)),
+        "rank/slowest" => Some(Route::AuditV2(AuditV2Route::RankSlowest)),
+        _ => None,
+    };
+    let audit_v1 = |suffix: &str| match suffix {
+        "status" => Some(Route::Audit(AuditRoute::Status)),
+        "start" => Some(Route::Audit(AuditRoute::Start)),
+        "stop" => Some(Route::Audit(AuditRoute::Stop)),
+        "clear" => Some(Route::Audit(AuditRoute::Clear)),
+        "capacity" => Some(Route::Audit(AuditRoute::Capacity)),
+        _ => None,
+    };
     if let Some(suffix) = path.strip_prefix("/api/v2/audit/") {
-        return match suffix {
-            "stats" => Route::AuditV2(AuditV2Route::Stats),
-            "stats/windows" => Route::AuditV2(AuditV2Route::Windows),
-            "logs" => Route::AuditV2(AuditV2Route::Logs),
-            "logs/domain" => Route::AuditV2(AuditV2Route::LogsDomain),
-            "rank/domain" => Route::AuditV2(AuditV2Route::RankDomain),
-            "rank/client" => Route::AuditV2(AuditV2Route::RankClient),
-            "rank/domain_set" => Route::AuditV2(AuditV2Route::RankDomainSet),
-            "rank/effective" => Route::AuditV2(AuditV2Route::RankEffective),
-            "rank/slowest" => Route::AuditV2(AuditV2Route::RankSlowest),
-            _ => Route::Unknown,
-        };
+        return audit_v2(suffix).unwrap_or(Route::Unknown);
     }
     if let Some(suffix) = path.strip_prefix("/api/v1/audit/") {
-        return match suffix {
-            "status" => Route::Audit(AuditRoute::Status),
-            "start" => Route::Audit(AuditRoute::Start),
-            "stop" => Route::Audit(AuditRoute::Stop),
-            "clear" => Route::Audit(AuditRoute::Clear),
-            "capacity" => Route::Audit(AuditRoute::Capacity),
-            _ => Route::Unknown,
-        };
+        return audit_v1(suffix).unwrap_or(Route::Unknown);
+    }
+    // atom fork: both under the management API's prefix as well
+    // (`/api/v1/atom/audit/...`, listed in `atom_rules_api::ROUTES`).
+    if let Some(suffix) = path.strip_prefix("/api/v1/atom/audit/") {
+        return audit_v2(suffix)
+            .or_else(|| audit_v1(suffix))
+            .unwrap_or(Route::Unknown);
     }
     let Some(rest) = path.strip_prefix("/plugins/") else {
         return Route::Unknown;
@@ -2319,8 +2328,49 @@ async fn dispatch_audit_read(
     .unwrap_or_else(|_| Response::error(500, "audit read failed"))
 }
 
+/// [`dispatch_routes`]; under `/api/v1/atom/audit/` its answers follow the
+/// atom API's conventions (atom fork: JSON errors and confirmations).
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
+    control: Option<&crate::runtime_snapshot::RuntimeControl>,
+    config: &CompiledConfig,
+    cache: &CacheCatalog,
+    observer: &Arc<QueryObserver>,
+    state_root: Option<&Path>,
+    audit_persist_lock: &Arc<AsyncMutex<()>>,
+    audit_persistence_faults: &AuditPersistenceFaults,
+    audit_clock: &Arc<dyn AuditClock>,
+    audit_read_slots: &Arc<Semaphore>,
+    shutdown: &TransportCancellation,
+    request: &Request,
+) -> Response {
+    let response = dispatch_routes(
+        control,
+        config,
+        cache,
+        observer,
+        state_root,
+        audit_persist_lock,
+        audit_persistence_faults,
+        audit_clock,
+        audit_read_slots,
+        shutdown,
+        request,
+    )
+    .await;
+    let path = request
+        .target
+        .split_once('?')
+        .map_or(request.target.as_str(), |(path, _)| path);
+    if path.starts_with("/api/v1/atom/audit/") {
+        atom_envelope(response)
+    } else {
+        response
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_routes(
     control: Option<&crate::runtime_snapshot::RuntimeControl>,
     config: &CompiledConfig,
     cache: &CacheCatalog,
@@ -2552,6 +2602,33 @@ async fn dispatch(
         Route::Plugin { .. } => Response::error(404, "404 page not found"),
         // Mirrors Go's `http.NotFound` for an unmatched route.
         Route::Unknown => Response::error(404, "404 page not found"),
+    }
+}
+
+/// Whether `target` reaches one of the audit handlers (the OpenAPI test).
+#[cfg(test)]
+pub(crate) fn routes_to_audit(target: &str) -> bool {
+    matches!(route(target), Route::Audit(_) | Route::AuditV2(_))
+}
+
+/// An audit answer in the atom API's form: an error becomes `{"error"}`, a
+/// text confirmation `{"message"}`; JSON passes through.
+fn atom_envelope(response: Response) -> Response {
+    let is_json = response
+        .content_type
+        .is_some_and(|kind| kind.starts_with("application/json"));
+    if is_json {
+        return response;
+    }
+    let text = String::from_utf8_lossy(&response.body).trim().to_owned();
+    let key = if response.status >= 400 { "error" } else { "message" };
+    let mut body = serde_json::to_vec(&serde_json::json!({ key: text })).unwrap_or_default();
+    body.push(b'\n');
+    Response {
+        status: response.status,
+        content_type: Some("application/json"),
+        body,
+        headers: response.headers,
     }
 }
 

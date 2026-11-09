@@ -69,6 +69,10 @@ tags:
     description: The fixed items ahead of the rule table (DDNS list, rewrite rules).
   - name: status
     description: Status of both processes and of the latest application.
+  - name: runtime
+    description: What sing-box runs right now (current members, delays, connections) and the machine's load.
+  - name: audit
+    description: AtomDNS's query audit (DNS logs and statistics), also served at `/api/v2/audit/` and `/api/v1/audit/` in their original form.
 
 paths:
   /rules:
@@ -642,19 +646,24 @@ paths:
   /groups:
     get:
       tags: [groups]
-      summary: Every node group
+      summary: Every node group, in display order
       operationId: listGroups
       responses:
         "200":
-          description: The groups.
+          description: The groups in display order, and that order with Final (`final`) in it.
           content:
             application/json:
               schema:
                 type: object
-                required: [version, groups]
+                required: [version, order, groups]
                 properties:
                   version:
                     $ref: "#/components/schemas/Version"
+                  order:
+                    type: array
+                    description: Every group ID and `final`, in the order a UI shows them (`groups/move`).
+                    items:
+                      type: string
                   groups:
                     type: array
                     items:
@@ -1321,8 +1330,588 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /groups/move:
+    post:
+      tags: [groups]
+      summary: Move a group or Final in the display order (drag and drop)
+      description: |
+        Only the order a UI shows the groups in changes; the generated
+        sing-box configuration does not, so sing-box is not reloaded.
+      operationId: moveGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [id]
+              description: Exactly one of `before_id` and `after_id`; any ID may be `final`.
+              properties:
+                id:
+                  type: string
+                before_id:
+                  type: string
+                after_id:
+                  type: string
+                version:
+                  $ref: "#/components/schemas/Version"
+      responses:
+        "200":
+          description: Moved; the groups in their new order (as `GET groups`).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, order, groups]
+                properties:
+                  version:
+                    $ref: "#/components/schemas/Version"
+                  order:
+                    type: array
+                    items:
+                      type: string
+                  groups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Group"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+  /runtime:
+    get:
+      tags: [runtime]
+      summary: Current members and the latest delays, from sing-box
+      operationId: getRuntime
+      responses:
+        "200":
+          description: |
+            `groups`: the member each group (and Final) uses now, an automatic
+            group's choice included. `nodes`: each node's latest delay test
+            (by a request or by an automatic group); `delay` null when there
+            was none or it failed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups, nodes]
+                properties:
+                  groups:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      required: [now]
+                      properties:
+                        now:
+                          type: string
+                  nodes:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      required: [delay, time]
+                      properties:
+                        delay:
+                          type: integer
+                          nullable: true
+                          description: Milliseconds.
+                        time:
+                          type: string
+                          nullable: true
+                          description: When it was measured (RFC 3339).
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: sing-box has not been given a configuration yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: The Clash API did not answer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /connections:
+    get:
+      tags: [runtime]
+      summary: The open connections (sing-box's Clash API snapshot, passed through)
+      description: |
+        sing-box's `GET /connections` as it answers: `downloadTotal`,
+        `uploadTotal`, `memory` (sing-box's memory use, bytes) and
+        `connections` (`id`, `metadata`, `upload`, `download`, `start`,
+        `chains` with outbound tags innermost first, `rule`, `rulePayload`).
+        Outbound tags are atom IDs (`n-…`, `g-…`, `final`, `direct`,
+        `block`). A UI polls it; rates are differences between polls.
+      operationId: listConnections
+      responses:
+        "200":
+          description: The snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                properties:
+                  downloadTotal:
+                    type: integer
+                  uploadTotal:
+                    type: integer
+                  memory:
+                    type: integer
+                  connections:
+                    type: array
+                    nullable: true
+                    items:
+                      type: object
+                      additionalProperties: true
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [runtime]
+      summary: Close every connection
+      operationId: closeConnections
+      responses:
+        "200":
+          description: Closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Closed"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /connections/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    delete:
+      tags: [runtime]
+      summary: Close one connection (an unknown ID is no error)
+      operationId: closeConnection
+      responses:
+        "200":
+          description: Closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Closed"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /system:
+    get:
+      tags: [runtime]
+      summary: CPU and memory of the machine, atomdns and sing-box
+      description: |
+        Counters, not rates: take two samples and divide the differences.
+        The machine's CPU use is Δ`busy_seconds` / Δ`total_seconds`; a
+        program's share of the machine is its Δ`cpu_seconds` / Δ`total_seconds`.
+        Read from `/proc`; a figure that cannot be read is null (all of them
+        off Linux, `singbox` when its process is not found).
+      operationId: getSystem
+      responses:
+        "200":
+          description: One sample.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/System"
+        "404":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/status:
+    get:
+      tags: [audit]
+      summary: Whether queries are being recorded
+      operationId: getAuditStatus
+      responses:
+        "200":
+          description: The state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capturing]
+                properties:
+                  capturing:
+                    type: boolean
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/start:
+    post:
+      tags: [audit]
+      summary: Start recording queries
+      operationId: startAudit
+      responses:
+        "200":
+          $ref: "#/components/responses/Message"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/stop:
+    post:
+      tags: [audit]
+      summary: Stop recording queries
+      operationId: stopAudit
+      responses:
+        "200":
+          $ref: "#/components/responses/Message"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/clear:
+    post:
+      tags: [audit]
+      summary: Drop every recorded query
+      operationId: clearAudit
+      responses:
+        "200":
+          $ref: "#/components/responses/Message"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/capacity:
+    get:
+      tags: [audit]
+      summary: How many queries are kept (the newest)
+      operationId: getAuditCapacity
+      responses:
+        "200":
+          description: The capacity.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capacity]
+                properties:
+                  capacity:
+                    type: integer
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [audit]
+      summary: Change the capacity (the recorded queries are dropped)
+      operationId: setAuditCapacity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [capacity]
+              properties:
+                capacity:
+                  type: integer
+                  minimum: 0
+                  maximum: 400000
+      responses:
+        "200":
+          $ref: "#/components/responses/Message"
+        "400":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/stats:
+    get:
+      tags: [audit]
+      summary: Totals over the recorded queries
+      operationId: getAuditStats
+      responses:
+        "200":
+          description: The totals.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total_queries, average_duration_ms]
+                properties:
+                  total_queries:
+                    type: integer
+                  average_duration_ms:
+                    type: number
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/stats/windows:
+    get:
+      tags: [audit]
+      summary: Query counts and average duration over recent time windows
+      operationId: getAuditWindows
+      responses:
+        "200":
+          description: One item per window.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generated_at, items]
+                properties:
+                  generated_at:
+                    type: string
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, label, window_seconds, request_count, average_duration_ms, complete]
+                      properties:
+                        key:
+                          type: string
+                        label:
+                          type: string
+                        window_seconds:
+                          type: integer
+                        request_count:
+                          type: integer
+                        average_duration_ms:
+                          type: number
+                        complete:
+                          type: boolean
+                          description: False when the recorded queries do not reach back to the window's start.
+                        coverage_start:
+                          type: string
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/logs:
+    get:
+      tags: [audit]
+      summary: Recorded queries, newest first, filtered and paged
+      operationId: listAuditLogs
+      parameters:
+        - $ref: "#/components/parameters/AuditPage"
+        - $ref: "#/components/parameters/AuditLimit"
+        - name: q
+          in: query
+          description: Text searched in the name, client, answers and tags.
+          schema:
+            type: string
+        - name: exact
+          in: query
+          description: With `q`, match whole values only.
+          schema:
+            type: boolean
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: client_ip
+          in: query
+          description: Repeatable.
+          schema:
+            type: string
+        - name: answer_ip
+          in: query
+          schema:
+            type: string
+        - name: cname
+          in: query
+          schema:
+            type: string
+        - name: domain_set
+          in: query
+          schema:
+            type: string
+        - name: effective_tag
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogPage"
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/logs/domain:
+    get:
+      tags: [audit]
+      summary: Recorded queries of one name
+      operationId: listAuditLogsOfDomain
+      parameters:
+        - name: domain
+          in: query
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/AuditPage"
+        - $ref: "#/components/parameters/AuditLimit"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogPage"
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/rank/domain:
+    get:
+      tags: [audit]
+      summary: The names asked most
+      operationId: rankAuditDomains
+      parameters:
+        - $ref: "#/components/parameters/AuditRankLimit"
+      responses:
+        "200":
+          description: Most first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditRankItem"
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/rank/client:
+    get:
+      tags: [audit]
+      summary: The clients asking most
+      operationId: rankAuditClients
+      parameters:
+        - $ref: "#/components/parameters/AuditRankLimit"
+      responses:
+        "200":
+          description: Most first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditRankItem"
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/rank/domain_set:
+    get:
+      tags: [audit]
+      summary: The domain sets matched most
+      operationId: rankAuditDomainSets
+      parameters:
+        - $ref: "#/components/parameters/AuditRankLimit"
+      responses:
+        "200":
+          description: Most first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditRankItem"
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/rank/effective:
+    get:
+      tags: [audit]
+      summary: The deciding tags seen most
+      operationId: rankAuditEffective
+      parameters:
+        - $ref: "#/components/parameters/AuditRankLimit"
+      responses:
+        "200":
+          description: Most first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditRankItem"
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /audit/rank/slowest:
+    get:
+      tags: [audit]
+      summary: The slowest recorded queries
+      operationId: rankAuditSlowest
+      parameters:
+        - $ref: "#/components/parameters/AuditRankLimit"
+      responses:
+        "200":
+          description: Slowest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditLog"
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
 components:
   parameters:
+    AuditPage:
+      name: page
+      in: query
+      description: From 1 (default 1).
+      schema:
+        type: integer
+        minimum: 1
+    AuditLimit:
+      name: limit
+      in: query
+      description: Items per page, 1 to 500 (default 50).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+    AuditRankLimit:
+      name: limit
+      in: query
+      description: 1 to 500 (default 20).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
     Id:
       name: id
       in: path
@@ -1337,6 +1926,22 @@ components:
         type: integer
         minimum: 0
   responses:
+    MethodNotAllowed:
+      description: The path does not take this method.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Message:
+      description: Done.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [message]
+            properties:
+              message:
+                type: string
     Error:
       description: An error.
       content:
@@ -1363,6 +1968,162 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
+    Closed:
+      type: object
+      required: [closed]
+      properties:
+        closed:
+          type: string
+          nullable: true
+          description: The connection's ID; null when every connection was closed.
+    ProcessFigures:
+      type: object
+      nullable: true
+      required: [pid, cpu_seconds, resident_bytes]
+      properties:
+        pid:
+          type: integer
+        cpu_seconds:
+          type: number
+          description: CPU time used since the program started (user + system).
+        resident_bytes:
+          type: integer
+        start_time_seconds:
+          type: number
+          description: atomdns only; Unix seconds.
+    System:
+      type: object
+      required: [cpu, memory, load, uptime_seconds, atomdns, singbox]
+      properties:
+        cpu:
+          type: object
+          nullable: true
+          required: [cores, busy_seconds, total_seconds]
+          properties:
+            cores:
+              type: integer
+            busy_seconds:
+              type: number
+              description: Every core's busy time since boot, summed.
+            total_seconds:
+              type: number
+              description: Every core's time since boot, summed.
+        memory:
+          type: object
+          nullable: true
+          required: [total_bytes, available_bytes]
+          properties:
+            total_bytes:
+              type: integer
+            available_bytes:
+              type: integer
+        load:
+          type: array
+          nullable: true
+          description: The 1, 5 and 15 minute load averages.
+          items:
+            type: number
+        uptime_seconds:
+          type: number
+          nullable: true
+        atomdns:
+          $ref: "#/components/schemas/ProcessFigures"
+        singbox:
+          $ref: "#/components/schemas/ProcessFigures"
+    AuditRankItem:
+      type: object
+      required: [key, count]
+      properties:
+        key:
+          type: string
+        count:
+          type: integer
+    AuditLog:
+      type: object
+      description: One recorded query (fields that do not apply are left out).
+      required: [query_time, query_name, query_type, query_class, client_ip, trace_id, duration_ms, response_code, response_flags, answers, answer_details_status]
+      additionalProperties: true
+      properties:
+        query_time:
+          type: string
+        query_name:
+          type: string
+        query_type:
+          type: string
+        query_class:
+          type: string
+        client_ip:
+          type: string
+        trace_id:
+          type: string
+        duration_ms:
+          type: number
+        response_code:
+          type: string
+        response_flags:
+          type: object
+          properties:
+            AA:
+              type: boolean
+            TC:
+              type: boolean
+            RA:
+              type: boolean
+        answers:
+          type: array
+          items:
+            type: object
+            required: [type, ttl, data]
+            properties:
+              type:
+                type: string
+              ttl:
+                type: integer
+              data:
+                type: string
+        answer_details_status:
+          type: string
+        answer_decode_error:
+          type: string
+        domain_set:
+          type: string
+        effective_tag:
+          type: string
+        matched_group:
+          type: string
+        final_sequence:
+          type: string
+        final_upstream:
+          type: string
+        upstream_targets:
+          type: string
+        selected_upstream:
+          type: string
+        upstream_diagnostics:
+          type: object
+          additionalProperties: true
+        matched_rule_source:
+          type: string
+    AuditLogPage:
+      type: object
+      required: [pagination, logs]
+      properties:
+        pagination:
+          type: object
+          required: [total_items, total_pages, current_page, items_per_page]
+          properties:
+            total_items:
+              type: integer
+            total_pages:
+              type: integer
+            current_page:
+              type: integer
+            items_per_page:
+              type: integer
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLog"
     Error:
       type: object
       required: [error]

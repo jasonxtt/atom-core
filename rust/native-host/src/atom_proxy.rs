@@ -162,6 +162,11 @@ pub(crate) struct ProxyState {
     #[serde(rename = "final")]
     pub(crate) final_group: Final,
     pub(crate) settings: Settings,
+    /// The order the UI shows the groups and Final in (`groups/move`); it
+    /// leaves the generated sing-box configuration alone. Empty: the
+    /// default order ([`ProxyState::display_order`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) order: Vec<String>,
 }
 
 impl Default for ProxyState {
@@ -185,6 +190,7 @@ impl Default for ProxyState {
                 selected: DEFAULT_GROUP.to_owned(),
             },
             settings: Settings::default(),
+            order: Vec::new(),
         }
     }
 }
@@ -480,6 +486,32 @@ impl ProxyState {
 
     pub(crate) fn group(&self, id: &str) -> Option<&Group> {
         self.groups.iter().find(|group| group.id == id)
+    }
+
+    /// Every group ID and Final, in the order the UI shows them: the stored
+    /// `order` (IDs that no longer exist dropped), then the groups it does
+    /// not name in their own order; Final, when not placed, right after
+    /// "默认代理" (first when that is gone).
+    pub(crate) fn display_order(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for id in &self.order {
+            if (id == FINAL || self.group(id).is_some()) && !out.contains(id) {
+                out.push(id.clone());
+            }
+        }
+        for group in &self.groups {
+            if !out.contains(&group.id) {
+                out.push(group.id.clone());
+            }
+        }
+        if !out.iter().any(|id| id == FINAL) {
+            let at = out
+                .iter()
+                .position(|id| id == DEFAULT_GROUP)
+                .map_or(0, |index| index + 1);
+            out.insert(at, FINAL.to_owned());
+        }
+        out
     }
 
     /// Whether a rule may proxy to `id`: a group or Final.

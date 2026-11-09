@@ -771,6 +771,44 @@ pub(crate) fn node_delay(
     }
 }
 
+/// The runtime view of every outbound (`GET /proxies`): `{"proxies": {tag:
+/// {now?, history: [{time, delay}]}}}`.
+pub(crate) fn proxies(host: &Host, secret: &str) -> Result<Value, String> {
+    match clash(host.clash_api, secret, "GET", "/proxies", None)? {
+        (200, body) => serde_json::from_slice(&body).map_err(|error| error.to_string()),
+        (status, body) => Err(format!(
+            "Clash API 读取出站失败（{status}）: {}",
+            String::from_utf8_lossy(&body).trim()
+        )),
+    }
+}
+
+/// The open connections (`GET /connections`, the snapshot form).
+pub(crate) fn connections(host: &Host, secret: &str) -> Result<Value, String> {
+    match clash(host.clash_api, secret, "GET", "/connections", None)? {
+        (200, body) => serde_json::from_slice(&body).map_err(|error| error.to_string()),
+        (status, body) => Err(format!(
+            "Clash API 读取连接失败（{status}）: {}",
+            String::from_utf8_lossy(&body).trim()
+        )),
+    }
+}
+
+/// Closes one connection, or every one (`id` `None`).
+pub(crate) fn close_connections(host: &Host, secret: &str, id: Option<&str>) -> Result<(), String> {
+    let path = match id {
+        Some(id) => format!("/connections/{}", query_encode(id)),
+        None => "/connections".to_owned(),
+    };
+    match clash(host.clash_api, secret, "DELETE", &path, None)? {
+        (200..=299, _) => Ok(()),
+        (status, body) => Err(format!(
+            "Clash API 关闭连接失败（{status}）: {}",
+            String::from_utf8_lossy(&body).trim()
+        )),
+    }
+}
+
 /// sing-box's version through the Clash API, if it answers.
 pub(crate) fn version(host: &Host, secret: &str) -> Option<String> {
     let (status, body) = clash(host.clash_api, secret, "GET", "/version", None).ok()?;

@@ -337,6 +337,8 @@ fn audit_v1_controls_use_real_http_and_dns_and_persist_capacity() {
             assert_eq!(assembly.audit_capacity(), 2);
         }
 
+        exercise_atom_audit(api, &assembly).await;
+
         let clear = http_request(api, &raw("POST", "/api/v1/audit/clear")).await;
         assert_eq!(clear.status, 200);
         assert_eq!(clear.body, "In-memory audit logs cleared.");
@@ -356,6 +358,32 @@ fn audit_v1_controls_use_real_http_and_dns_and_persist_capacity() {
     )
     .expect("restart assembly");
     assert_eq!(restarted.audit_capacity(), 2);
+}
+
+/// atom fork: the audit handlers under the management API's prefix answer
+/// in its conventions (JSON errors and confirmations).
+async fn exercise_atom_audit(api: SocketAddr, assembly: &HostAssembly) {
+    let state = http_request(api, &get("/api/v1/atom/audit/status")).await;
+    assert_eq!(state.status, 200);
+    assert_eq!(state.body, "{\"capturing\":true}\n");
+    let totals = http_request(api, &get("/api/v1/atom/audit/stats")).await;
+    assert_eq!(totals.status, 200, "{totals:?}");
+    assert!(totals.body.contains("\"total_queries\""), "{totals:?}");
+    let invalid = http_request(api, &post("/api/v1/atom/audit/capacity", "{}")).await;
+    assert_eq!(invalid.status, 400);
+    assert_eq!(invalid.header("content-type"), Some("application/json"));
+    assert_eq!(invalid.body, "{\"error\":\"invalid audit capacity request\"}\n");
+    assert_eq!(assembly.audit_capacity(), 2);
+    let wrong = http_request(api, &raw("POST", "/api/v1/atom/audit/status")).await;
+    assert_eq!(wrong.status, 405);
+    assert_eq!(wrong.body, "{\"error\":\"method not allowed\"}\n");
+    let unknown = http_request(api, &get("/api/v1/atom/audit/nope")).await;
+    assert_eq!(unknown.status, 404);
+    assert_eq!(unknown.body, "{\"error\":\"404 page not found\"}\n");
+    let cleared = http_request(api, &raw("POST", "/api/v1/atom/audit/clear")).await;
+    assert_eq!(cleared.status, 200);
+    assert_eq!(cleared.header("content-type"), Some("application/json"));
+    assert_eq!(cleared.body, "{\"message\":\"In-memory audit logs cleared.\"}\n");
 }
 
 #[test]

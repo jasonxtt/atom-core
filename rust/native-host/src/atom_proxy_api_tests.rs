@@ -918,6 +918,134 @@ fn fallback(status: u16, value: &Value) -> bool {
 /// handler, every error is `{"error": string}`, a success status is one the
 /// document gives, and a method a path does not list is 405.
 #[test]
+fn groups_and_final_move_in_the_display_order_without_a_reload() {
+    let api = Api::new("group-move");
+    let (_, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
+    let mut ids = Vec::new();
+    for name in ["流媒体", "AI"] {
+        let (status, created) = api.call(
+            "POST",
+            "/api/v1/atom/groups",
+            &format!(r#"{{"name": "{name}", "type": "selector", "members": ["{hk}"]}}"#),
+        );
+        assert_eq!(status, 201, "{created}");
+        ids.push(created["group"]["id"].as_str().unwrap().to_owned());
+    }
+    let (media, ai) = (ids[0].clone(), ids[1].clone());
+    let (status, groups) = api.call("GET", "/api/v1/atom/groups", "");
+    assert_eq!(status, 200);
+    assert_eq!(groups["order"], serde_json::json!(["g-default", "final", media, ai]));
+
+    let (file, reloads) = (api.fake.live(), api.fake.reload_count());
+    let version = groups["version"].as_u64().unwrap();
+    let (status, moved) = api.call(
+        "POST",
+        "/api/v1/atom/groups/move",
+        &format!(r#"{{"id": "final", "after_id": "{ai}", "version": {version}}}"#),
+    );
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(moved["order"], serde_json::json!(["g-default", media, ai, "final"]));
+    assert_eq!(moved["version"], version + 1);
+    let names: Vec<&str> = moved["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|group| group["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["默认代理", "流媒体", "AI"]);
+    assert_eq!(api.fake.live(), file, "the order is not in the sing-box file");
+    assert_eq!(api.fake.reload_count(), reloads);
+
+    let (status, moved) = api.call(
+        "POST",
+        "/api/v1/atom/groups/move",
+        &format!(r#"{{"id": "{ai}", "before_id": "g-default"}}"#),
+    );
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(moved["order"], serde_json::json!([ai, "g-default", media, "final"]));
+    api.reloads_from_disk().expect("the saved order loads");
+
+    // A deleted group leaves the order; a new one goes last.
+    let (status, _) = api.call("DELETE", &format!("/api/v1/atom/groups/{media}"), "");
+    assert_eq!(status, 200);
+    let (_, created) = api.call(
+        "POST",
+        "/api/v1/atom/groups",
+        &format!(r#"{{"name": "新组", "type": "selector", "members": ["{hk}"]}}"#),
+    );
+    let new = created["group"]["id"].as_str().unwrap().to_owned();
+    let (_, groups) = api.call("GET", "/api/v1/atom/groups", "");
+    assert_eq!(groups["order"], serde_json::json!([ai, "g-default", "final", new]));
+
+    for (body, want) in [
+        (r#"{"id": "final"}"#.to_owned(), 400),
+        (r#"{"id": "final", "before_id": "g-default", "after_id": "g-default"}"#.to_owned(), 400),
+        (r#"{"id": "final", "before_id": "final"}"#.to_owned(), 400),
+        (r#"{"id": "g-nope", "before_id": "final"}"#.to_owned(), 404),
+        (r#"{"id": "final", "before_id": "g-default", "version": 1}"#.to_owned(), 409),
+        (r#"{"id": "final", "before_id": "g-default", "extra": 1}"#.to_owned(), 400),
+    ] {
+        let (status, value) = api.call("POST", "/api/v1/atom/groups/move", &body);
+        assert_eq!(status, want, "{body}: {value}");
+        assert!(value["error"].is_string(), "{body}: {value}");
+    }
+}
+
+#[test]
+fn runtime_and_connections_come_from_the_clash_api() {
+    let api = Api::new("runtime");
+    let (status, value) = api.call("GET", "/api/v1/atom/runtime", "");
+    assert_eq!(status, 409, "nothing applied yet: {value}");
+    let (_, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
+    let jp = imported["nodes"][1]["id"].as_str().unwrap().to_owned();
+    let (status, _) = api.call(
+        "PUT",
+        "/api/v1/atom/groups/g-default",
+        &format!(r#"{{"name": "默认代理", "type": "selector", "members": ["{jp}", "{hk}"]}}"#),
+    );
+    assert_eq!(status, 200);
+
+    let (status, runtime) = api.call("GET", "/api/v1/atom/runtime", "");
+    assert_eq!(status, 200, "{runtime}");
+    assert_eq!(runtime["groups"]["g-default"]["now"], jp.as_str());
+    assert_eq!(runtime["groups"]["final"]["now"], "g-default");
+    assert_eq!(runtime["nodes"][&hk]["delay"], 88);
+    assert_eq!(runtime["nodes"][&hk]["time"], "2026-11-10T00:00:00Z");
+
+    let (status, connections) = api.call("GET", "/api/v1/atom/connections", "");
+    assert_eq!(status, 200, "{connections}");
+    assert_eq!(connections["memory"], 30);
+    assert_eq!(connections["connections"][0]["id"], "c-1");
+    let (status, closed) = api.call("DELETE", "/api/v1/atom/connections/c-1", "");
+    assert_eq!((status, &closed["closed"]), (200, &serde_json::json!("c-1")));
+    let (status, closed) = api.call("DELETE", "/api/v1/atom/connections", "");
+    assert_eq!((status, &closed["closed"]), (200, &Value::Null));
+    let (status, _) = api.call("PUT", "/api/v1/atom/connections", "");
+    assert_eq!(status, 405);
+}
+
+#[test]
+fn system_reports_the_machine_and_both_programs() {
+    let api = Api::new("system");
+    let (status, system) = api.call("GET", "/api/v1/atom/system", "");
+    assert_eq!(status, 200, "{system}");
+    for key in ["cpu", "memory", "load", "uptime_seconds", "atomdns", "singbox"] {
+        assert!(system.get(key).is_some(), "{key}: {system}");
+    }
+    if cfg!(target_os = "linux") {
+        assert!(system["cpu"]["cores"].as_u64().unwrap() >= 1);
+        assert!(system["cpu"]["total_seconds"].as_f64().unwrap() >= system["cpu"]["busy_seconds"].as_f64().unwrap());
+        assert!(system["memory"]["total_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(system["atomdns"]["pid"], std::process::id());
+        assert!(system["atomdns"]["resident_bytes"].as_u64().unwrap() > 0);
+    }
+    let (status, _) = api.call("POST", "/api/v1/atom/system", "");
+    assert_eq!(status, 405);
+}
+
+#[test]
 fn the_openapi_document_matches_the_routes() {
     let spec: Value = yaml_serde::from_str(OPENAPI).expect("openapi.yaml parses");
     assert!(spec["openapi"].as_str().unwrap().starts_with("3."));
@@ -941,6 +1069,14 @@ fn the_openapi_document_matches_the_routes() {
     let api = Api::new("openapi");
     let concrete = |path: &str| path.replace("{id}", "x-none").replace("{tag}", "domestic");
     for (method, path) in &routes {
+        if path.starts_with("audit/") {
+            // AtomDNS's audit API: `api.rs` serves it (tested there).
+            assert!(
+                crate::api::routes_to_audit(&format!("/api/v1/atom/{path}")),
+                "{method} {path} reaches no audit handler"
+            );
+            continue;
+        }
         let (status, value) = api.call(method, &format!("/api/v1/atom/{}", concrete(path)), "{}");
         assert!(
             !fallback(status, &value),
@@ -961,6 +1097,9 @@ fn the_openapi_document_matches_the_routes() {
     }
     for path in paths.keys() {
         let path = path.strip_prefix('/').unwrap();
+        if path.starts_with("audit/") {
+            continue;
+        }
         let (status, value) = api.call("PATCH", &format!("/api/v1/atom/{}", concrete(path)), "{}");
         assert_eq!(
             (status, value["error"].as_str()),

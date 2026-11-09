@@ -12,6 +12,11 @@
 //! | `groups/{id}` | GET, PUT, DELETE (`?confirm=true`) |
 //! | `groups/{id}/select` | POST `{name}` (Clash API, no reload) |
 //! | `groups/{id}/delay` | POST `{url?, timeout?}` (Clash API) |
+//! | `groups/move` | POST `{id, before_id \| after_id}` (the display order, Final included) |
+//! | `runtime` | GET (Clash API: groups' current members, nodes' latest delay) |
+//! | `connections` | GET (Clash API snapshot), DELETE (close all) |
+//! | `connections/{id}` | DELETE |
+//! | `system` | GET (CPU and memory: the machine, atomdns, sing-box) |
 //! | `final` | GET, PUT `{members?, selected?}` |
 //! | `settings` | GET, PUT `{fakeip_range?, resolver?, mixed_port?}` |
 //! | `status` | GET |
@@ -412,6 +417,141 @@ async fn put_final(rules: &AtomRules, bytes: &[u8]) -> Answer {
     Ok(reply_json(200, &final_view(&state(rules))))
 }
 
+// ---- display order, runtime, connections -----------------------------------
+
+/// `GET groups`: the groups in display order, and that order with Final.
+fn groups_view(state: &ProxyState) -> Value {
+    let order = state.display_order();
+    let groups: Vec<Value> = order
+        .iter()
+        .filter_map(|id| state.group(id))
+        .map(|group| group_view(state, group))
+        .collect();
+    json!({ "version": state.version, "order": order, "groups": groups })
+}
+
+/// Moves a group (or Final) before or after another in the display order.
+/// Only atom's state changes; the sing-box configuration stays as it is.
+async fn move_group(rules: &AtomRules, bytes: &[u8]) -> Answer {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Move {
+        id: String,
+        before_id: Option<String>,
+        after_id: Option<String>,
+    }
+    let (version, map) = object(bytes)?;
+    let request: Move = from_map(map)?;
+    let (anchor, after) = match (request.before_id, request.after_id) {
+        (Some(anchor), None) => (anchor, false),
+        (None, Some(anchor)) => (anchor, true),
+        _ => return Err(error(400, "before_id 和 after_id 必须给且只给一个")),
+    };
+    rules.check_proxy_version(version).map_err(|e| fail(&e))?;
+    let current = state(rules);
+    let old = current.display_order();
+    for id in [&request.id, &anchor] {
+        if !old.contains(id) {
+            return Err(error(404, format!("节点组 `{id}` 不存在")));
+        }
+    }
+    if request.id == anchor {
+        return Err(error(400, "不能相对自己移动"));
+    }
+    let mut order = old.clone();
+    order.retain(|id| id != &request.id);
+    let at = order
+        .iter()
+        .position(|id| id == &anchor)
+        .map_or(order.len(), |index| index + usize::from(after));
+    order.insert(at, request.id);
+    if order == old {
+        return Ok(reply_json(200, &groups_view(&current)));
+    }
+    let mut next = current;
+    next.order = order;
+    next.version += 1;
+    rules
+        .transact(None, Some(next.clone()), "groups")
+        .await
+        .map_err(|e| fail(&e))?;
+    Ok(reply_json(200, &groups_view(&next)))
+}
+
+/// The sing-box host and the secret of the configuration it runs.
+fn live(rules: &AtomRules) -> Result<(crate::atom_singbox::Host, String), Reply> {
+    let host = rules
+        .proxy_host()
+        .cloned()
+        .ok_or_else(|| error(404, "没有配置 sing-box（atom_rules 的 singbox 段）"))?;
+    let secret = rules
+        .live_secret()
+        .ok_or_else(|| error(409, "sing-box 还没有应用过配置"))?;
+    Ok((host, secret))
+}
+
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, Reply> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|e| Err(format!("任务异常结束: {e}")))
+        .map_err(|message| error(502, message))
+}
+
+/// `GET runtime`: what sing-box chose and measured. `groups`: the current
+/// member of every group and Final (an automatic group's choice included);
+/// `nodes`: each node's latest delay test (`delay` null: none, or it
+/// failed).
+async fn runtime(rules: &AtomRules) -> Answer {
+    let (host, secret) = live(rules)?;
+    let value = blocking(move || crate::atom_singbox::proxies(&host, &secret)).await?;
+    let current = state(rules);
+    let proxies = value.get("proxies").and_then(Value::as_object);
+    let entry = |id: &str| proxies.and_then(|proxies| proxies.get(id));
+    let mut groups = Map::new();
+    for id in current
+        .groups
+        .iter()
+        .map(|group| group.id.as_str())
+        .chain([FINAL])
+    {
+        if let Some(now) = entry(id).and_then(|p| p.get("now")).and_then(Value::as_str) {
+            groups.insert(id.to_owned(), json!({ "now": now }));
+        }
+    }
+    let mut nodes = Map::new();
+    for node in &current.nodes {
+        let last = entry(&node.id)
+            .and_then(|p| p.get("history"))
+            .and_then(Value::as_array)
+            .and_then(|history| history.last())
+            .filter(|last| last.get("delay").and_then(Value::as_u64).unwrap_or(0) > 0);
+        nodes.insert(
+            node.id.clone(),
+            json!({
+                "delay": last.and_then(|last| last.get("delay")),
+                "time": last.and_then(|last| last.get("time")),
+            }),
+        );
+    }
+    Ok(reply_json(200, &json!({ "groups": groups, "nodes": nodes })))
+}
+
+/// `GET connections` (sing-box's snapshot, as it is) and `DELETE
+/// connections[/{id}]` (`closed`: the ID, null for all).
+async fn connections(rules: &AtomRules, method: &str, id: Option<&str>) -> Answer {
+    let (host, secret) = live(rules)?;
+    if method == "GET" {
+        let value = blocking(move || crate::atom_singbox::connections(&host, &secret)).await?;
+        return Ok(reply_json(200, &value));
+    }
+    let id = id.map(str::to_owned);
+    let closed = id.clone();
+    blocking(move || crate::atom_singbox::close_connections(&host, &secret, id.as_deref())).await?;
+    Ok(reply_json(200, &json!({ "closed": closed })))
+}
+
 // ---- settings -------------------------------------------------------------
 
 /// Moves AtomDNS's `main_proxy` with the mixed port, when it pointed at the
@@ -609,10 +749,22 @@ pub(crate) async fn handle(
 ) -> Reply {
     let known = matches!(
         segments.first(),
-        Some(&("nodes" | "groups" | "final" | "settings" | "status" | "apply"))
+        Some(
+            &("nodes" | "groups" | "final" | "settings" | "status" | "apply" | "runtime"
+                | "connections" | "system")
+        )
     );
     if !known {
         return error(404, "not found");
+    }
+    if segments == ["system"] {
+        return match method {
+            "GET" => reply_json(
+                200,
+                &crate::atom_system::snapshot(rules.proxy_host().map(|host| host.binary.as_path())),
+            ),
+            _ => error(405, "method not allowed"),
+        };
     }
     if rules.proxy_host().is_none() {
         return error(404, "没有配置 sing-box（atom_rules 的 singbox 段）");
@@ -642,19 +794,9 @@ pub(crate) async fn handle(
         ("PUT", ["nodes", id]) => update_node(rules, id, body).await,
         ("DELETE", ["nodes", id]) => delete_node(rules, id, query).await,
         ("POST", ["nodes", id, "delay"]) => delay(rules, id, true, body).await,
-        ("GET", ["groups"]) => {
-            let state = current();
-            let groups: Vec<Value> = state
-                .groups
-                .iter()
-                .map(|group| group_view(&state, group))
-                .collect();
-            Ok(reply_json(
-                200,
-                &json!({ "version": state.version, "groups": groups }),
-            ))
-        }
+        ("GET", ["groups"]) => Ok(reply_json(200, &groups_view(&current()))),
         ("POST", ["groups"]) => create_group(rules, body).await,
+        ("POST", ["groups", "move"]) => move_group(rules, body).await,
         ("GET", ["groups", id]) => {
             let state = current();
             match state.group(id) {
@@ -684,6 +826,9 @@ pub(crate) async fn handle(
         },
         ("POST", ["groups", id, "select"]) => select(rules, id, body).await,
         ("POST", ["groups", id, "delay"]) => delay(rules, id, false, body).await,
+        ("GET", ["runtime"]) => runtime(rules).await,
+        ("GET" | "DELETE", ["connections"]) => connections(rules, method, None).await,
+        ("DELETE", ["connections", id]) => connections(rules, method, Some(id)).await,
         ("GET", ["final"]) => Ok(reply_json(200, &final_view(&current()))),
         ("PUT", ["final"]) => put_final(rules, body).await,
         ("GET", ["settings"]) => Ok(reply_json(200, &settings_view(rules, &current()))),

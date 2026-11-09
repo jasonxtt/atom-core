@@ -129,6 +129,27 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("PUT", "ddns"),
     ("GET", "rewrite"),
     ("PUT", "rewrite"),
+    ("POST", "groups/move"),
+    ("GET", "runtime"),
+    ("GET", "connections"),
+    ("DELETE", "connections"),
+    ("DELETE", "connections/{id}"),
+    ("GET", "system"),
+    ("GET", "audit/status"),
+    ("POST", "audit/start"),
+    ("POST", "audit/stop"),
+    ("POST", "audit/clear"),
+    ("GET", "audit/capacity"),
+    ("POST", "audit/capacity"),
+    ("GET", "audit/stats"),
+    ("GET", "audit/stats/windows"),
+    ("GET", "audit/logs"),
+    ("GET", "audit/logs/domain"),
+    ("GET", "audit/rank/domain"),
+    ("GET", "audit/rank/client"),
+    ("GET", "audit/rank/domain_set"),
+    ("GET", "audit/rank/effective"),
+    ("GET", "audit/rank/slowest"),
 ];
 
 /// Display names of the builtin sets atom's configuration offers (an
@@ -215,6 +236,11 @@ pub(crate) async fn handle(
         .split_once('?')
         .map_or((target, None), |(path, query)| (path, Some(query)));
     let rest = path.strip_prefix(PREFIX)?.trim_end_matches('/');
+    // The query audit (DNS logs and statistics) is AtomDNS's own API, also
+    // served under this prefix; `api.rs` routes it.
+    if rest == "audit" || rest.starts_with("audit/") {
+        return None;
+    }
     let Some(rules) = config.local.atom_rules.as_deref() else {
         return Some(error(
             404,

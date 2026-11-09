@@ -11,6 +11,7 @@ mod atom_proxy_api;
 mod atom_rules;
 mod atom_rules_api;
 mod atom_singbox;
+mod atom_system;
 mod bind;
 pub mod build_identity;
 mod cache;
