@@ -433,12 +433,21 @@ impl Rewrite {
 
     /// Replaces every rule (atom `PUT /api/v1/atom/rewrite`): the lines are
     /// parsed, written to the first file, and only then published, so the
-    /// running rules always equal what a restart reads back. The error is
+    /// running rules always equal what a restart reads back. A plugin with
+    /// several files cannot be replaced whole (the others would come back
+    /// at the next load; codex review of step 6a, round 2). The error is
     /// `(HTTP status, reason)`.
     pub(crate) async fn replace(&self, values: &[String]) -> Result<(), (u16, String)> {
-        let Some(file) = self.files.first().cloned() else {
-            return Err((500, "没有配置重写规则文件".to_owned()));
+        let [file] = self.files.as_slice() else {
+            return Err((
+                409,
+                format!(
+                    "重写插件配置了 {} 个规则文件，只有一个文件时才能整份替换",
+                    self.files.len()
+                ),
+            ));
         };
+        let file = file.clone();
         let set = RuleSet::parse(&values.join("\n"))
             .map_err(|reason| (400, format!("重写规则无效: {reason}")))?;
         let _serialized = self.write_lock.lock().await;

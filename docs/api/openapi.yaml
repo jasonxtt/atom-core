@@ -1229,6 +1229,12 @@ paths:
                 $ref: "#/components/schemas/Entries"
         "400":
           $ref: "#/components/responses/Error"
+        "409":
+          description: The rewrite plugin reads several files; it can be replaced whole only with one.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/Error"
         default:

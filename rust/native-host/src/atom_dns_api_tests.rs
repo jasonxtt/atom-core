@@ -321,3 +321,39 @@ fn overlapping_ddns_replacements_answer_once_their_list_is_in_use() {
         second.await.unwrap();
     });
 }
+
+/// A rewrite plugin reading several files cannot be replaced whole: the
+/// other files would bring their rules back at the next load (codex review
+/// of step 6a, round 2).
+#[test]
+fn a_rewrite_with_several_files_is_not_replaced() {
+    let host = Host::new("rewrite-two");
+    let path = host.root.join("config.yaml");
+    let yaml = std::fs::read_to_string(&path).unwrap().replace(
+        "files: [rule/rewrite.txt]",
+        "files: [rule/rewrite.txt, rule/more.txt]",
+    );
+    std::fs::write(
+        host.root.join("rule/more.txt"),
+        "full:tv.example 192.0.2.8\n",
+    )
+    .unwrap();
+    std::fs::write(&path, yaml).unwrap();
+    let two = Host {
+        root: host.root.clone(),
+        host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
+    };
+    let (status, value) = two.call("PUT", "rewrite", &json!({"entries": []}));
+    assert_eq!(status, 409, "{value}");
+    assert_eq!(
+        two.call("GET", "rewrite", &Value::Null).1["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        std::fs::read_to_string(two.root.join("rule/rewrite.txt")).unwrap(),
+        "full:nas.example 192.0.2.9\n"
+    );
+}
