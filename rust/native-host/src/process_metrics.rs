@@ -116,9 +116,6 @@ pub(crate) fn sample() -> Option<ProcessSample> {
     None
 }
 
-/// Whether this platform can report process metrics.
-pub(crate) const AVAILABLE: bool = cfg!(target_os = "linux");
-
 /// The Prometheus text for one sample.
 pub(crate) fn render(sample: &ProcessSample) -> String {
     let mut text = String::new();

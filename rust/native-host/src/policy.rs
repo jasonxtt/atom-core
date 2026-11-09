@@ -152,7 +152,6 @@ pub struct ResponsePolicyConfig {
 pub struct IpSetConfig {
     pub tag: String,
     pub prefixes: Rc<IpListHandle>,
-    pub(crate) management: Option<crate::managed_ip::ManagedIpSet>,
 }
 
 /// A prefix list read whole at every lookup. Fixed lists are never replaced;

@@ -50,16 +50,7 @@ pub(crate) struct Settings {
     pub(crate) max_keys: usize,
 }
 
-impl Settings {
-    /// The files this plugin writes.
-    pub(crate) fn files(&self) -> Vec<PathBuf> {
-        [&self.file_stat, &self.file_rule, &self.gen_rule]
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect()
-    }
-}
+impl Settings {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {

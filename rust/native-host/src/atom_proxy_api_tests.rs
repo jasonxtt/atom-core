@@ -898,3 +898,76 @@ fn a_select_that_cannot_be_saved_is_switched_back() {
     let (_, groups) = api.call("GET", "/api/v1/atom/groups/g-default", "");
     assert_eq!(groups["now"], hk.as_str());
 }
+
+/// The OpenAPI document of the atom API (`docs/api/openapi.yaml`).
+const OPENAPI: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/api/openapi.yaml"
+));
+
+/// Whether a reply is a dispatcher's fallback (no handler owns the route)
+/// rather than a handler's own answer.
+fn fallback(status: u16, value: &Value) -> bool {
+    matches!(
+        (status, value["error"].as_str()),
+        (404, Some("not found")) | (405, Some("method not allowed"))
+    )
+}
+
+/// The document lists exactly the routes of `ROUTES`, each route reaches its
+/// handler, every error is `{"error": string}`, a success status is one the
+/// document gives, and a method a path does not list is 405.
+#[test]
+fn the_openapi_document_matches_the_routes() {
+    let spec: Value = yaml_serde::from_str(OPENAPI).expect("openapi.yaml parses");
+    assert!(spec["openapi"].as_str().unwrap().starts_with("3."));
+    assert_eq!(spec["servers"][0]["url"], "/api/v1/atom");
+    let paths = spec["paths"].as_object().expect("paths");
+    let mut documented = std::collections::BTreeSet::new();
+    for (path, item) in paths {
+        for method in ["get", "post", "put", "delete", "patch"] {
+            if item.get(method).is_some() {
+                let path = path.strip_prefix('/').expect("a path starts with /");
+                documented.insert((method.to_ascii_uppercase(), path.to_owned()));
+            }
+        }
+    }
+    let routes: std::collections::BTreeSet<(String, String)> = crate::atom_rules_api::ROUTES
+        .iter()
+        .map(|(method, path)| ((*method).to_owned(), (*path).to_owned()))
+        .collect();
+    assert_eq!(documented, routes, "openapi.yaml and ROUTES differ");
+
+    let api = Api::new("openapi");
+    let concrete = |path: &str| path.replace("{id}", "x-none").replace("{tag}", "domestic");
+    for (method, path) in &routes {
+        let (status, value) = api.call(method, &format!("/api/v1/atom/{}", concrete(path)), "{}");
+        assert!(
+            !fallback(status, &value),
+            "{method} {path} has no handler: {status} {value}"
+        );
+        if status >= 400 {
+            assert!(
+                value["error"].is_string(),
+                "{method} {path}: an error body is {{\"error\": string}}: {value}"
+            );
+        } else {
+            let responses = &paths[&format!("/{path}")][method.to_ascii_lowercase()]["responses"];
+            assert!(
+                responses.get(status.to_string()).is_some(),
+                "{method} {path}: {status} is not documented"
+            );
+        }
+    }
+    for path in paths.keys() {
+        let path = path.strip_prefix('/').unwrap();
+        let (status, value) = api.call("PATCH", &format!("/api/v1/atom/{}", concrete(path)), "{}");
+        assert_eq!(
+            (status, value["error"].as_str()),
+            (405, Some("method not allowed")),
+            "PATCH {path}"
+        );
+    }
+    let (status, value) = api.call("GET", "/api/v1/atom/nothing-here", "");
+    assert_eq!((status, value["error"].is_string()), (404, true));
+}

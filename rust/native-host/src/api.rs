@@ -1,10 +1,13 @@
-//! The scoped management HTTP surface for the local-rule editing workflow.
+//! The management HTTP listener.
 //!
 //! This listener is owned by the top-level host supervisor alongside the DNS
-//! listener. It serves only the bounded routes needed to show, save and post
-//! one eligible `domain_set`, plus the read-only special-group list. It is not
-//! a general API host, it never owns the upstream catalog, and it never closes
-//! shared upstream state.
+//! listener. atom fork: over HTTP it serves the atom API (`/api/v1/atom/`,
+//! `atom_rules_api`, `atom_proxy_api`), the UI packages, the health document,
+//! `/metrics`, the audit routes and the diagnostic capture; AtomDNS's other
+//! management routes were removed in atom step 6. The plugin routes
+//! (`/plugins/{tag}/...` of caches, `domain_output` and the learners) remain
+//! an in-process entrance for `requery` (`local_plugin_request`). It never owns
+//! the upstream catalog and never closes shared upstream state.
 
 use std::cell::Cell;
 use std::fmt;
@@ -28,7 +31,6 @@ use atomdns_upstream_core::TransportCancellation;
 
 use crate::cache::{CacheCatalog, NativeCacheAdapter};
 use crate::config::{CacheKind, CompiledConfig};
-use crate::managed::ManagedDomainSet;
 use crate::observer::{
     AnswerDetailsStatus, AuditClock, AuditReadSnapshot, AuditRecord, AuditStatsSnapshot,
     AuditTimingSnapshot, QueryObserver, ResponseState, RetainedAuditRecord, UpstreamAttemptOutcome,
@@ -310,9 +312,6 @@ impl ApiServer {
     }
 
     pub(crate) fn with_control(mut self, control: crate::runtime_snapshot::RuntimeControl) -> Self {
-        if let Ok(address) = self.listener.local_addr() {
-            control.set_api_listen(address);
-        }
         self.control = Some(control);
         self.fixed = None;
         self
@@ -594,12 +593,6 @@ async fn process_connection(
                 &serde_json::json!({
                     "ready": state == "ready", "state": state, "runtime": "rust",
                     "version": crate::build_identity::VERSION,
-                    // Deleted special-group files that could not be removed
-                    // yet (relative to the configuration root); retried on the
-                    // next save. Never makes the host unready.
-                    "pending_cleanup": control
-                        .as_ref()
-                        .map_or_else(Vec::new, |control| control.pending_cleanup()),
                     // Every directory under `<config root>/ui/` (`main` at `/`, others at `/<name>/`):
                     // whether it is mounted and, for a atomdns UI package, its version or the
                     // reason it is refused. Never affects `ready`.
@@ -681,7 +674,6 @@ async fn process_connection(
     let request_shutdown = shutdown.child_token();
     let dispatch = dispatch(
         control.as_ref(),
-        snapshot.as_deref(),
         &config,
         &cache,
         &observer,
@@ -881,18 +873,7 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         }
         (method.to_owned(), target.to_owned(), content_length)
     };
-    let body_limit = if matches!(
-        route(&target),
-        Route::Plugin {
-            action: "load_dump",
-            ..
-        }
-    ) {
-        crate::cache_dump::MAX_COMPRESSED
-    } else {
-        MAX_BODY_BYTES
-    };
-    if content_length > body_limit {
+    if content_length > MAX_BODY_BYTES {
         return Err(io::Error::other("request body too large"));
     }
     let body_start = head_end + 4;
@@ -977,26 +958,10 @@ enum Route<'a> {
     },
     Audit(AuditRoute),
     AuditV2(AuditV2Route),
-    Capabilities,
-    SpecialGroups {
-        slot: Option<&'a str>,
-    },
-    Upstream(UpstreamRoute<'a>),
-    DiversionCatalog {
-        slot: Option<u32>,
-    },
-    CacheInventory,
     Metrics,
     CaptureStart,
     CaptureLogs,
     Unknown,
-}
-
-enum UpstreamRoute<'a> {
-    Tags,
-    Groups,
-    Config,
-    Runtime(std::borrow::Cow<'a, str>),
 }
 
 #[derive(Clone, Copy)]
@@ -1045,9 +1010,6 @@ pub(crate) fn decode_plugin_tag(tag: &str) -> Option<std::borrow::Cow<'_, str>> 
 fn route(target: &str) -> Route<'_> {
     // Go's `/show` ignores the query string; the UI sends `?limit=10000`.
     let path = target.split_once('?').map_or(target, |(path, _query)| path);
-    if path == "/api/v1/cache/inventory" {
-        return Route::CacheInventory;
-    }
     if path == "/metrics" {
         return Route::Metrics;
     }
@@ -1056,54 +1018,6 @@ fn route(target: &str) -> Route<'_> {
     }
     if path == "/api/v1/capture/logs" {
         return Route::CaptureLogs;
-    }
-    if path == "/api/v1/capabilities" {
-        return Route::Capabilities;
-    }
-    if path == "/api/v1/special-groups" {
-        return Route::SpecialGroups { slot: None };
-    }
-    if let Some(slot) = path.strip_prefix("/api/v1/special-groups/") {
-        return Route::SpecialGroups { slot: Some(slot) };
-    }
-    if let Some(action) = path.strip_prefix("/api/v1/upstream/") {
-        return match action {
-            "tags" => Route::Upstream(UpstreamRoute::Tags),
-            "groups" => Route::Upstream(UpstreamRoute::Groups),
-            "config" => Route::Upstream(UpstreamRoute::Config),
-            runtime if runtime.starts_with("runtime/") => {
-                let raw_tag = runtime.strip_prefix("runtime/").unwrap_or_default();
-                if raw_tag.is_empty() || raw_tag.contains('/') {
-                    Route::Unknown
-                } else {
-                    match decode_plugin_tag(raw_tag) {
-                        Some(tag)
-                            if !tag.is_empty()
-                                && !tag.contains('/')
-                                && !tag.contains('\\')
-                                && !tag.as_bytes().contains(&0) =>
-                        {
-                            Route::Upstream(UpstreamRoute::Runtime(tag))
-                        }
-                        _ => Route::Unknown,
-                    }
-                }
-            }
-            _ => Route::Unknown,
-        };
-    }
-    if let Some(rest) = path.strip_prefix("/plugins/") {
-        if let Some((raw_tag, _action)) = rest.split_once('/') {
-            if let Some(decoded_tag) = decode_plugin_tag(raw_tag) {
-                if let Some(slot_text) = decoded_tag.strip_prefix("special_route_") {
-                    let slot = slot_text
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|slot| *slot >= 50 && slot.to_string() == slot_text);
-                    return Route::DiversionCatalog { slot };
-                }
-            }
-        }
     }
     if let Some(suffix) = path.strip_prefix("/api/v2/audit/") {
         return match suffix {
@@ -1169,103 +1083,18 @@ fn request_mutates_managed_state(request: &Request) -> bool {
             request.method == "POST"
         }
         Route::Audit(AuditRoute::Capacity) => request.method == "POST",
-        // The special-groups mutation is a transaction owner in its own
-        // right; it closes admission from inside the coordinator.
-        Route::SpecialGroups { .. } => false,
-        // Rule-source changes of `sd_set_light`/`si_set`/`adguard_rule`.
-        Route::Unknown => {
-            matches!(request.method.as_str(), "PUT" | "POST" | "DELETE")
-                && rule_source_path(&request.target).is_some_and(|(_, rest)| {
-                    matches!(rest.split('/').next(), Some("config" | "rules" | "update"))
-                })
-        }
         _ => false,
     }
 }
 
-/// The plugin routes a host serves from its own state: rule providers,
-/// `webinfo`/`rewrite`/`domain_output`, and named caches. `None` when no such
-/// plugin owns the path.
+/// The plugin routes a host serves in process (`local_plugin_request`):
+/// `domain_output`, the learners and named caches. `None` when no such plugin
+/// owns the path.
 async fn plugin_response(
     config: &CompiledConfig,
     cache: &CacheCatalog,
     request: &Request,
 ) -> Option<Response> {
-    if let Route::Plugin { tag, action } = route(&request.target) {
-        if let Some(set) = config
-            .ip_sets
-            .iter()
-            .find(|set| set.tag == tag.as_ref())
-            .and_then(|set| set.management.as_ref())
-        {
-            return Some(match (request.method.as_str(), action) {
-                ("GET", "show") => Response::text(set.show()),
-                ("POST", "post") => {
-                    if let Some(reason) = &set.reason {
-                        Response::error(400, &format!("ip_set `{tag}` is not manageable: {reason}"))
-                    } else {
-                        let _readers = config.rule_sources.lock_file_readers().await;
-                        if set
-                            .file
-                            .as_ref()
-                            .is_some_and(|file| config.rule_sources.reads_file(file))
-                        {
-                            return Some(Response::error(
-                                400,
-                                &format!(
-                                    "ip_set `{tag}` is not manageable: the file is shared with other configuration readers"
-                                ),
-                            ));
-                        }
-                        // Match Go's permissive JSON object (unknown fields ignored).
-                        #[derive(Deserialize)]
-                        struct IpPost {
-                            #[serde(default)]
-                            values: Option<Vec<String>>,
-                        }
-                        let payload = match serde_json::from_slice::<Option<IpPost>>(&request.body)
-                        {
-                            Ok(payload) => payload
-                                .and_then(|payload| payload.values)
-                                .unwrap_or_default(),
-                            Err(_) => return Some(Response::error(400, "invalid JSON")),
-                        };
-                        match set.replace(payload).await {
-                            Ok(count) => {
-                                Response::text(format!("ip_set replaced with {count} entries"))
-                            }
-                            Err(crate::managed_ip::ReplaceError::Limits) => {
-                                Response::error(400, "IP rule resource limit exceeded")
-                            }
-                            Err(crate::managed_ip::ReplaceError::Failed(error)) => {
-                                Response::error(500, &error)
-                            }
-                        }
-                    }
-                }
-                (_, "show" | "post") => Response::empty(405),
-                _ => Response::error(404, "404 page not found"),
-            });
-        }
-    }
-    if let Some((tag, rest)) = rule_source_path(&request.target) {
-        if let Some(provider) = config.rule_sources.provider(tag.as_ref()) {
-            let query = request
-                .target
-                .split_once('?')
-                .map_or("", |(_, query)| query);
-            let reply = config
-                .rule_sources
-                .handle(&provider, &request.method, rest, query, &request.body)
-                .await;
-            return Some(Response {
-                status: reply.status,
-                content_type: reply.content_type,
-                body: reply.body,
-                headers: reply.headers,
-            });
-        }
-    }
     if let Some(reply) = local_plugin_reply(config, request).await {
         return Some(Response {
             status: reply.status,
@@ -1287,12 +1116,6 @@ async fn plugin_response(
         }
     }
     None
-}
-
-/// Whether upstream edits go to the typed settings: a file-backed
-/// configuration that has `aliapi` groups.
-fn settings_upstreams(config: &CompiledConfig) -> bool {
-    config.reload.is_some() && !config.effective_upstreams.is_empty()
 }
 
 /// The reply of [`local_plugin_request`].
@@ -1334,10 +1157,8 @@ pub(crate) fn local_plugin_request<'a>(
     })
 }
 
-/// The HTTP surface of `webinfo` (`GET`/`PUT` on `/plugins/{tag}`),
-/// `rewrite` (`GET /show`, `POST /post`) and `domain_output` (`GET /show`,
-/// `/save`, `/flush`, `/restartall`); `None` when no such plugin owns the
-/// path.
+/// The in-process routes of `domain_output` (`GET /show`, `/save`, `/flush`,
+/// `/restartall`) and the learners; `None` when no such plugin owns the path.
 async fn local_plugin_reply(
     config: &CompiledConfig,
     request: &Request,
@@ -1349,18 +1170,6 @@ async fn local_plugin_reply(
     let rest = path.strip_prefix("/plugins/")?;
     let (raw_tag, action) = rest.split_once('/').unwrap_or((rest, ""));
     let tag = decode_plugin_tag(raw_tag)?;
-    let not_found = || crate::rule_sources::Reply {
-        status: 404,
-        content_type: Some("text/plain; charset=utf-8"),
-        body: b"404 page not found\n".to_vec(),
-        headers: Vec::new(),
-    };
-    let not_allowed = || crate::rule_sources::Reply {
-        status: 405,
-        content_type: None,
-        body: Vec::new(),
-        headers: Vec::new(),
-    };
     if let Some(output) = config
         .local
         .domain_outputs
@@ -1390,53 +1199,7 @@ async fn local_plugin_reply(
                 .await,
         );
     }
-    if let Some(requery) = config
-        .local
-        .requeries
-        .iter()
-        .find(|requery| requery.tag == tag.as_ref())
-    {
-        return Some(
-            requery
-                .runtime
-                .handle(&request.method, action, &request.body)
-                .await,
-        );
-    }
-    if let Some(webinfo) = config
-        .local
-        .webinfos
-        .iter()
-        .find(|webinfo| webinfo.tag == tag.as_ref())
-    {
-        return Some(if action.is_empty() {
-            webinfo.handle(&request.method, &request.body).await
-        } else {
-            not_found()
-        });
-    }
-    let rewrite = config
-        .local
-        .rewrites
-        .iter()
-        .find(|rewrite| rewrite.tag == tag.as_ref())?;
-    Some(match (action, request.method.as_str()) {
-        ("show", "GET") => rewrite.runtime.show(),
-        ("post", "POST") => rewrite.runtime.post(&request.body).await,
-        ("show" | "post", _) => not_allowed(),
-        _ => not_found(),
-    })
-}
-
-/// `/plugins/{tag}/{rest}` split into the decoded tag and the raw rest (no
-/// query string).
-fn rule_source_path(target: &str) -> Option<(std::borrow::Cow<'_, str>, &str)> {
-    let path = target.split_once('?').map_or(target, |(path, _)| path);
-    let (raw_tag, rest) = path.strip_prefix("/plugins/")?.split_once('/')?;
-    if raw_tag.is_empty() {
-        return None;
-    }
-    Some((decode_plugin_tag(raw_tag)?, rest))
+    None
 }
 
 #[derive(Serialize)]
@@ -2559,7 +2322,6 @@ async fn dispatch_audit_read(
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
     control: Option<&crate::runtime_snapshot::RuntimeControl>,
-    runtime_snapshot: Option<&crate::runtime_snapshot::RuntimeSnapshot>,
     config: &CompiledConfig,
     cache: &CacheCatalog,
     observer: &Arc<QueryObserver>,
@@ -2571,13 +2333,6 @@ async fn dispatch(
     shutdown: &TransportCancellation,
     request: &Request,
 ) -> Response {
-    if let Some(response) = plugin_response(config, cache, request).await {
-        return response;
-    }
-    let path = request
-        .target
-        .split_once('?')
-        .map_or(request.target.as_str(), |(path, _)| path);
     if let Some(reply) = crate::atom_rules_api::handle(
         control,
         config,
@@ -2596,73 +2351,7 @@ async fn dispatch(
             headers: reply.headers,
         };
     }
-    if let Some(reply) =
-        crate::standard_groups_api::handle(control, config, &request.method, path, &request.body)
-            .await
-    {
-        return Response {
-            status: reply.status,
-            content_type: reply.content_type,
-            body: reply.body,
-            headers: reply.headers,
-        };
-    }
-    if let Some(reply) =
-        crate::settings_api::handle(control, config, &request.method, path, &request.body).await
-    {
-        return Response {
-            status: reply.status,
-            content_type: reply.content_type,
-            body: reply.body,
-            headers: reply.headers,
-        };
-    }
-    // The `-d` root (where `webinfo/` lives), else the configuration file's directory.
-    let webinfo_root = config
-        .reload
-        .as_ref()
-        .map(|reload| reload.root_dir.as_path())
-        .or(state_root);
-    if let Some(reply) = crate::system_api::handle(
-        control,
-        config,
-        webinfo_root,
-        &request.method,
-        path,
-        &request.body,
-    ) {
-        return Response {
-            status: reply.status,
-            content_type: reply.content_type,
-            body: reply.body,
-            headers: reply.headers,
-        };
-    }
     match route(&request.target) {
-        Route::Capabilities => {
-            if request.method != "GET" {
-                return Response::method_not_allowed();
-            }
-            Response::json(&capabilities(config))
-        }
-        Route::CacheInventory => {
-            if request.method != "GET" {
-                return Response::method_not_allowed();
-            }
-            let caches: Vec<_> = config
-                .caches
-                .iter()
-                .filter(|item| item.kind == CacheKind::Named)
-                .map(|item| {
-                    if item.label.is_empty() {
-                        serde_json::json!({"tag":item.tag})
-                    } else {
-                        serde_json::json!({"tag":item.tag,"label":item.label})
-                    }
-                })
-                .collect();
-            Response::json(&serde_json::json!({"schema_version":1,"caches":caches}))
-        }
         Route::Metrics => {
             if request.method != "GET" {
                 return Response::method_not_allowed();
@@ -2726,10 +2415,6 @@ async fn dispatch(
             },
             _ => Response::method_not_allowed(),
         },
-        Route::Plugin {
-            action: "flush" | "dump" | "load_dump",
-            ..
-        } => Response::error(404, "404 page not found"),
         Route::AuditV2(AuditV2Route::Stats) => match request.method.as_str() {
             "GET" => {
                 let snapshot = observer.audit_stats_snapshot();
@@ -2861,470 +2546,13 @@ async fn dispatch(
             }
             _ => Response::method_not_allowed(),
         },
-        // Go mounts handlers per existing plugin tag, so a tag that is not
-        // mounted has no route: 404 before any method or eligibility decision.
-        Route::Plugin { tag, .. } if config.domain_set(tag.as_ref()).is_none() => {
-            Response::error(404, "404 page not found")
-        }
-        Route::Plugin { tag, action } => match (request.method.as_str(), action) {
-            ("GET", "show") => match eligible(config, tag.as_ref()) {
-                Err(response) => response,
-                Ok(provider) => {
-                    let mut body = String::new();
-                    for rule in provider.rules() {
-                        body.push_str(&rule);
-                        body.push('\n');
-                    }
-                    Response::text(body)
-                }
-            },
-            ("GET", "save") => match eligible(config, tag.as_ref()) {
-                Err(response) => response,
-                Ok(provider) => match provider.save().await {
-                    Ok(()) => Response::empty(200),
-                    Err(error) => Response::error(500, &error.to_string()),
-                },
-            },
-            ("POST", "post") => match eligible(config, tag.as_ref()) {
-                Err(response) => response,
-                Ok(provider) => {
-                    let payload: PostPayload = match serde_json::from_slice(&request.body) {
-                        Ok(payload) => payload,
-                        Err(_) => return Response::error(400, "invalid JSON"),
-                    };
-                    match provider.replace(&payload.values).await {
-                        Ok(count) => {
-                            Response::text(format!("domain_set replaced with {count} entries"))
-                        }
-                        Err(error) => Response::error(500, &error.to_string()),
-                    }
-                }
-            },
-            // Any other method on a registered, mounted path, as chi replies.
-            _ => Response::empty(405),
-        },
-        // The managed special-groups profile was removed; without the standard profile (served
-        // before this point) there are no groups.
-        Route::SpecialGroups { slot: None } => match request.method.as_str() {
-            "GET" => Response::json(&Vec::<serde_json::Value>::new()),
-            "POST" => {
-                if serde_json::from_slice::<GroupMutation>(&request.body).is_err() {
-                    return Response::error(400, "invalid special group JSON");
-                }
-                if control.is_none() {
-                    return Response::error(503, "runtime control is unavailable");
-                }
-                Response::error(400, "native special_groups profile is disabled")
-            }
-            _ => Response::method_not_allowed(),
-        },
-        Route::SpecialGroups { slot: Some(slot) } => match request.method.as_str() {
-            "DELETE" => {
-                if slot.parse::<u32>().is_err() {
-                    return Response::error(400, "invalid special group slot");
-                }
-                if control.is_none() {
-                    return Response::error(503, "runtime control is unavailable");
-                }
-                Response::error(400, "native special_groups profile is disabled")
-            }
-            _ => Response::method_not_allowed(),
-        },
-        Route::Upstream(route) => match route {
-            UpstreamRoute::Tags if request.method == "GET" => {
-                // The settable groups are the `aliapi` ones.
-                let tags = if settings_upstreams(config) {
-                    config
-                        .effective_upstreams
-                        .keys()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                } else {
-                    config
-                        .forward_definitions
-                        .iter()
-                        .map(|definition| definition.tag.as_str())
-                        .collect::<Vec<_>>()
-                };
-                Response::json(&tags)
-            }
-            UpstreamRoute::Config if request.method == "GET" => {
-                Response::json(&crate::settings_api::upstream_config(config))
-            }
-            UpstreamRoute::Groups if request.method == "GET" => {
-                Response::json(&crate::settings_api::upstream_groups(config))
-            }
-            UpstreamRoute::Runtime(tag) if request.method == "GET" => {
-                let Some(definition_index) = config
-                    .forward_definitions
-                    .iter()
-                    .position(|definition| definition.tag == tag)
-                else {
-                    return Response::error(404, "upstream tag not found");
-                };
-                let override_config = if settings_upstreams(config) {
-                    crate::settings_api::override_config(config, tag.as_ref())
-                } else {
-                    Vec::new()
-                };
-                let mut runtime_targets = Vec::new();
-                if let Some(snapshot) = runtime_snapshot {
-                    for invocation in config
-                        .forward_invocations
-                        .iter()
-                        .filter(|invocation| invocation.definition == definition_index)
-                    {
-                        for target in snapshot.forwards.runtime_targets(invocation.executable) {
-                            if !runtime_targets.contains(&target) {
-                                runtime_targets.push(target);
-                            }
-                        }
-                    }
-                }
-                Response::json(&serde_json::json!({
-                    "tag": tag,
-                    "override_config": override_config,
-                    "runtime_targets": runtime_targets,
-                }))
-            }
-            UpstreamRoute::Config if request.method == "POST" && settings_upstreams(config) => {
-                let Some(control) = control else {
-                    return Response::error(503, "runtime control is unavailable");
-                };
-                let reply = crate::settings_api::post_upstream(control, &request.body).await;
-                Response {
-                    status: reply.status,
-                    content_type: reply.content_type,
-                    body: reply.body,
-                    headers: reply.headers,
-                }
-            }
-            UpstreamRoute::Config if request.method == "POST" => {
-                let mutation: UpstreamConfigMutation = match serde_json::from_slice(&request.body) {
-                    Ok(mutation) => mutation,
-                    Err(_) => return Response::error(400, "invalid upstream configuration JSON"),
-                };
-                if mutation.plugin_tag.trim().is_empty() {
-                    return Response::error(400, "plugin_tag is required");
-                }
-                let Some(control) = control else {
-                    return Response::error(503, "runtime control is unavailable");
-                };
-                if !control
-                    .view()
-                    .config
-                    .forward_definitions
-                    .iter()
-                    .any(|definition| definition.tag == mutation.plugin_tag)
-                {
-                    return Response::error(404, "upstream tag not found");
-                }
-                Response::error(400, "native special_groups profile is disabled")
-            }
-            UpstreamRoute::Tags
-            | UpstreamRoute::Groups
-            | UpstreamRoute::Config
-            | UpstreamRoute::Runtime(_) => Response::method_not_allowed(),
-        },
-        Route::DiversionCatalog { slot } => {
-            if slot.is_none() {
-                return Response::error(404, "diversion group not found");
-            }
-            if control.is_none() {
-                return Response::error(503, "runtime control is unavailable");
-            }
-            Response::error(400, "native special_groups profile is disabled")
-        }
+        // atom: the plugin routes (`/plugins/{tag}/...`) are served only in
+        // process (`local_plugin_request`, used by `requery`); over HTTP they
+        // do not exist.
+        Route::Plugin { .. } => Response::error(404, "404 page not found"),
         // Mirrors Go's `http.NotFound` for an unmatched route.
         Route::Unknown => Response::error(404, "404 page not found"),
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-#[allow(dead_code)] // validated for shape only: the managed profile that consumed it was removed
-struct UpstreamConfigMutation {
-    plugin_tag: String,
-    upstreams: Vec<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-#[allow(dead_code)] // validated for shape only: the managed profile that consumed it was removed
-struct GroupMutation {
-    #[serde(default)]
-    slot: u32,
-    name: String,
-    #[serde(default)]
-    listen_port: u16,
-    #[serde(default)]
-    custom_port_only: bool,
-}
-
-fn ui_operations(config: &CompiledConfig) -> serde_json::Value {
-    use crate::rule_sources::Kind;
-    // Upstream edits go to the typed settings of the `aliapi` groups.
-    let settings_upstreams = config.reload.is_some() && !config.effective_upstreams.is_empty();
-    let local = config.domain_sets.iter().any(|set| set.managed.is_some())
-        || config.rule_sources.has_postable_light()
-        || config.ip_sets.iter().any(|set| {
-            set.management.as_ref().is_some_and(|set| {
-                set.reason.is_none()
-                    && set
-                        .file
-                        .as_ref()
-                        .is_some_and(|file| !config.rule_sources.reads_file(file))
-            })
-        });
-    let diversion = config.rule_sources.has_kind(&[Kind::Sd, Kind::Si]);
-    // The UI addresses AdGuard through the fixed `/plugins/adguard/...` path.
-    let adguard = config
-        .rule_sources
-        .provider("adguard")
-        .is_some_and(|provider| provider.kind == Kind::Adguard);
-    let mut operations = serde_json::Map::new();
-    for id in [
-        "system.health",
-        "system.version",
-        "audit.read",
-        "audit.control",
-        "audit.capacity",
-        "query.rank",
-        "cache.inventory",
-        "cache.manage",
-        "metrics.cache",
-        "rules.local.read",
-        "groups.read",
-        "upstreams.read",
-    ] {
-        operations.insert(
-            id.to_owned(),
-            serde_json::json!({"supported": true, "reason": null}),
-        );
-    }
-    for (id, supported, reason) in [
-        (
-            "rules.local.manage",
-            local,
-            "当前配置没有可管理的本地规则 provider",
-        ),
-        (
-            "groups.manage",
-            config.standard_groups.is_some(),
-            "专用组编辑需要包含生成配置的文件配置",
-        ),
-        (
-            "groups.upstreams",
-            config.standard_groups.is_some(),
-            "专用组引用上游与组私有上游尚未在原生运行时实现",
-        ),
-        (
-            "upstreams.manage",
-            settings_upstreams,
-            "上游编辑需要带 aliapi 的文件配置",
-        ),
-        (
-            "rules.diversion",
-            diversion,
-            "当前配置没有在线分流规则 provider",
-        ),
-        (
-            "rules.adguard",
-            adguard,
-            "当前配置没有标签为 adguard 的 adguard_rule",
-        ),
-    ] {
-        operations.insert(id.to_owned(), serde_json::json!({"supported": supported, "reason": if supported { None } else { Some(reason) }}));
-    }
-    let flags = crate::settings_api::flags_available(config);
-    operations.insert(
-        "flags.manage".to_owned(),
-        serde_json::json!({
-            "supported": flags,
-            "reason": if flags { None::<&str> } else { Some("当前配置没有从文件加载的 feature_flag") }
-        }),
-    );
-    for (id, supported, reason) in [
-        (
-            "cache.settings",
-            crate::settings_api::cache_settings_available(config),
-            "当前配置没有从文件加载的 cache 插件",
-        ),
-        (
-            "learning.settings",
-            crate::settings_api::learning_settings_available(config),
-            "当前配置没有从文件加载的 route_learner 插件",
-        ),
-    ] {
-        operations.insert(
-            id.to_owned(),
-            serde_json::json!({"supported": supported, "reason": if supported { None } else { Some(reason) }}),
-        );
-    }
-    let aliases = config
-        .local
-        .webinfos
-        .iter()
-        .any(|webinfo| webinfo.tag == "clientname");
-    operations.insert(
-        "client.aliases".to_owned(),
-        serde_json::json!({
-            "supported": aliases,
-            "reason": if aliases { None } else { Some("当前配置没有标签为 clientname 的 webinfo 插件") }
-        }),
-    );
-    let requery = !config.local.requeries.is_empty();
-    operations.insert(
-        "cache.requery".to_owned(),
-        serde_json::json!({
-            "supported": requery,
-            "reason": if requery { None } else { Some("当前配置没有 requery 插件") }
-        }),
-    );
-    // The WebUI's overrides page edits the one `socks5_proxy` / `ecs_address`
-    // object; its domain-generation switches edit the `domain_output` ones.
-    let overrides = crate::settings_api::overrides_available(config);
-    let generation = crate::settings_api::generation_available(config);
-    for (id, supported, reason) in [
-        (
-            "system.global_overrides",
-            overrides,
-            "当前配置没有 socks5_proxy 或 ecs_address 对象",
-        ),
-        (
-            "system.domain_generation",
-            generation,
-            "当前配置没有 route_learner 或 domain_output 插件",
-        ),
-    ] {
-        operations.insert(
-            id.to_owned(),
-            serde_json::json!({"supported": supported, "reason": if supported { None } else { Some(reason) }}),
-        );
-    }
-    let remembered = !config.local.learners.is_empty()
-        || config
-            .local
-            .domain_outputs
-            .iter()
-            .any(|output| output.tag.starts_with("my_") || output.tag == "top_domains");
-    operations.insert(
-        "lists.remembered".to_owned(),
-        serde_json::json!({
-            "supported": remembered,
-            "reason": if remembered { None } else { Some("当前配置没有 route_learner 或 top_domains 的 domain_output 插件") }
-        }),
-    );
-    let restart = crate::restart::target().is_some();
-    for (id, supported, reason) in [
-        ("system.webui_port", true, ""),
-        (
-            "system.restart",
-            restart,
-            "此进程没有记录可执行文件路径，无法原地重启",
-        ),
-        (
-            "metrics.process",
-            crate::process_metrics::AVAILABLE,
-            "当前平台无法读取进程指标",
-        ),
-    ] {
-        operations.insert(
-            id.to_owned(),
-            serde_json::json!({"supported": supported, "reason": if supported { None } else { Some(reason) }}),
-        );
-    }
-    operations.insert(
-        "capture.logs".to_owned(),
-        serde_json::json!({"supported": true, "reason": null}),
-    );
-    serde_json::Value::Object(operations)
-}
-
-fn capabilities(config: &CompiledConfig) -> serde_json::Value {
-    let enabled = config.standard_groups.is_some();
-    // Upstream edits are available on a file-backed configuration that has `aliapi` groups.
-    let upstream_edit = enabled || settings_upstreams(config);
-    let protocols = if upstream_edit {
-        vec!["udp", "tcp", "dot", "doh"]
-    } else {
-        Vec::new()
-    };
-    let rule_formats = if enabled {
-        vec!["local_text"]
-    } else {
-        Vec::new()
-    };
-    // The settings-backed upstream page carries the proxy switch (`use_proxy`)
-    // when every `aliapi` group names a plugin-level `proxy`; the managed
-    // upstream overrides do not.
-    let defaults = &config.yaml_defaults;
-    let mut unsupported_features = vec!["signed_aliapi", "quic", "http3"];
-    if !settings_upstreams(config)
-        || defaults
-            .upstreams
-            .keys()
-            .any(|group| !defaults.proxy_groups.contains(group))
-    {
-        unsupported_features.push("socks_proxy");
-    }
-    unsupported_features.extend([
-        "socket_marks",
-        "bind_to_device",
-        "positive_idle_timeout",
-        "enable_pipeline",
-    ]);
-    serde_json::json!({
-        "schema_version": 1,
-        "runtime": "rust",
-        "ui_operations": ui_operations(config),
-        "special_groups": {
-            "enabled": enabled,
-            "profile": if config.standard_groups.is_some() { Some("schema4_standard") } else if enabled { Some("local_text_dns_v1") } else { None::<&str> }
-        },
-        "upstream_protocols": protocols,
-        "rule_formats": rule_formats,
-        "unsupported_features": unsupported_features,
-        "endpoints": {
-            "capabilities_get": true,
-            "special_groups": {"get": true, "post": enabled, "delete": enabled},
-            "upstream": {"tags_get": true, "groups_get": true, "config_get": true, "runtime_get": true, "config_post": upstream_edit},
-            "diversion_sources": {"list_get": enabled, "put": enabled, "delete": enabled},
-            "manual_rules": {"show_get": true, "save_get": true, "post": enabled},
-            "cache_inventory_get": true,
-            "metrics_get": true,
-            "audit_v1": true,
-            "audit_v2": true
-        }
-    })
-}
-
-/// Looks up one management-eligible provider, or the explicit failure.
-fn eligible<'a>(config: &'a CompiledConfig, tag: &str) -> Result<&'a ManagedDomainSet, Response> {
-    let Some(set) = config.domain_set(tag) else {
-        return Err(Response::error(404, "404 page not found"));
-    };
-    match set.managed.as_deref() {
-        Some(provider) => Ok(provider),
-        None => {
-            let reason = set
-                .ineligible_reason
-                .clone()
-                .unwrap_or_else(|| "not a single-file .txt managed profile".to_owned());
-            Err(Response::error(
-                400,
-                &format!("domain_set `{tag}` is not manageable: {reason}"),
-            ))
-        }
-    }
-}
-
-/// The UI payload: `{ "values": ["...", ...] }`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PostPayload {
-    #[serde(default)]
-    values: Vec<String>,
 }
 
 async fn dispatch_cache(store: &NativeCacheAdapter, action: &str, request: &Request) -> Response {

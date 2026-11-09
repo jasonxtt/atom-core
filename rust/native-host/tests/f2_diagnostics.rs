@@ -304,12 +304,9 @@ fn captured(host: &Host) -> Vec<serde_json::Value> {
 #[test]
 fn log_capture_follows_the_reference_contract() {
     let host = Host::start("capture");
-    // Capability and the absent Go profiler.
-    let capabilities = host.api("GET", "/api/v1/capabilities", b"").json();
-    assert_eq!(
-        capabilities["ui_operations"]["capture.logs"]["supported"],
-        true
-    );
+    // The absent Go profiler (and the capability document, removed in atom
+    // step 6 with the old WebUI).
+    assert_eq!(host.api("GET", "/api/v1/capabilities", b"").status, 404);
     for path in [
         "/debug/pprof",
         "/debug/pprof/",

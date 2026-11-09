@@ -1,0 +1,1965 @@
+openapi: 3.0.3
+info:
+  title: atom management API
+  version: "1"
+  license:
+    name: GPL-3.0
+    url: https://www.gnu.org/licenses/gpl-3.0.html
+  description: |
+    The management API of atom (an AtomDNS fork that drives sing-box), served by
+    atomdns on its management listener (`api.http`, `0.0.0.0:9099` by default).
+    atom's design document (`atom/docs/design.md`, section 8) is the reference;
+    this file is the contract the bundled WebUI and third-party UIs implement.
+    The code keeps one table of the routes (`ROUTES` in
+    `rust/native-host/src/atom_rules_api.rs`); a test checks that this file
+    lists exactly those routes and that each one reaches its handler.
+
+    Conventions:
+
+    * No authentication (design 7.1): the API listens on the LAN.
+    * Bodies are JSON. Unknown fields are refused with 400 where a schema says
+      `additionalProperties: false`.
+    * Every error is `{"error": "..."}` (`Error`). A stale `version` (409) adds
+      the current `version`; a refusal caused by rules that reference the
+      target (a ruleset, a node group) adds their IDs as `rules`.
+    * Versions. The rule table (`rules`, rulesets) has one version and the
+      proxy state (`nodes`, `groups`, `final`, `settings`) has another. A
+      write may carry `version` (in the body; `?version=` for DELETE); when it
+      does and it is not the current one the write is refused with 409.
+      `rules/move` requires it. `dns`, `upstreams`, `ddns` and `rewrite` carry
+      no version: the last write wins.
+    * A write that changes the generated sing-box configuration is applied to
+      sing-box as one transaction (check, write, reload, confirm). The check
+      failing is 400; reload or confirmation failing is 502 (sing-box was put
+      back on the old configuration); saving atom's state failing is 500. While
+      one application runs, other writes are refused with 409 (they are not
+      queued).
+    * Every successful change of rules, rulesets, `ddns` and `rewrite` empties
+      every DNS cache; rule and ruleset changes also bring sing-box's bindings
+      of names clients already hold up to date before the answer. A change that
+      was saved but whose caches could not be emptied answers 500.
+    * Paths outside a resource's methods: a known resource with a method it
+      does not serve answers 405; an unknown path under `/api/v1/atom/` answers
+      404. Without the `atom_rules` plugin every path answers 404; without its
+      `singbox` section the proxy paths (`nodes`, `groups`, `final`,
+      `settings`, `status`, `apply`) answer 404.
+    * While the host publishes a new configuration generation (a `dns` or
+      `upstreams` change, a mixed-port change), any request may be answered
+      503 (`host is applying configuration`); retry it.
+servers:
+  - url: /api/v1/atom
+# No authentication (design 7.1).
+security: []
+tags:
+  - name: rules
+    description: The ordered rule table (first match wins).
+  - name: rulesets
+    description: Builtin sets and custom (remote or local) rulesets rules reference.
+  - name: nodes
+    description: Proxy nodes (sing-box outbounds).
+  - name: groups
+    description: Node groups (selector, urltest).
+  - name: final
+    description: Final, the selector route.final points at.
+  - name: settings
+    description: The sing-box side settings and the answer TTL caps.
+  - name: dns
+    description: AtomDNS's open settings and upstream DNS groups.
+  - name: fixed
+    description: The fixed items ahead of the rule table (DDNS list, rewrite rules).
+  - name: status
+    description: Status of both processes and of the latest application.
+
+paths:
+  /rules:
+    get:
+      tags: [rules]
+      summary: The rule table
+      operationId: listRules
+      responses:
+        "200":
+          description: The table, in order; the first enabled rule that matches decides.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleTable"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [rules]
+      summary: Create a rule
+      operationId: createRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/RuleInput"
+                - type: object
+                  properties:
+                    version:
+                      $ref: "#/components/schemas/Version"
+                    before_id:
+                      type: string
+                      description: "Insert before this rule (default: at the end)."
+                    after_id:
+                      type: string
+                      description: Insert after this rule.
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleChange"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /rules/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    put:
+      tags: [rules]
+      summary: Replace a rule (its ID and position stay)
+      operationId: updateRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/RuleInput"
+                - type: object
+                  properties:
+                    version:
+                      $ref: "#/components/schemas/Version"
+      responses:
+        "200":
+          description: Replaced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleChange"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [rules]
+      summary: Delete a rule
+      operationId: deleteRule
+      parameters:
+        - $ref: "#/components/parameters/VersionQuery"
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version]
+                properties:
+                  version:
+                    $ref: "#/components/schemas/Version"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+  /rules/move:
+    post:
+      tags: [rules]
+      summary: Move a rule (drag and drop)
+      operationId: moveRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [id, version]
+              description: Exactly one of `before_id` and `after_id`.
+              properties:
+                id:
+                  type: string
+                before_id:
+                  type: string
+                after_id:
+                  type: string
+                version:
+                  $ref: "#/components/schemas/Version"
+      responses:
+        "200":
+          description: Moved; the whole table in its new order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleTable"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+  /rules/test:
+    post:
+      tags: [rules]
+      summary: Which rule a name meets
+      description: |
+        Only the rule table is consulted: the fixed items ahead of it
+        (rewrite, type blocking, DDNS) and the original judgement after it are
+        not simulated. IP rules never match a name.
+      operationId: testRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [domain]
+              properties:
+                domain:
+                  type: string
+                client:
+                  type: string
+                  description: The client address the query would come from.
+      responses:
+        "200":
+          description: "The first matching rule, or `matched: false` (the original judgement decides)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleTest"
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /rulesets:
+    get:
+      tags: [rulesets]
+      summary: Builtin sets and custom rulesets
+      operationId: listRulesets
+      responses:
+        "200":
+          description: The builtin sets first, then the custom rulesets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  oneOf:
+                    - $ref: "#/components/schemas/BuiltinRuleset"
+                    - $ref: "#/components/schemas/Ruleset"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [rulesets]
+      summary: Create a custom ruleset
+      description: |
+        A remote ruleset is downloaded at once (through `main_proxy`). It is
+        created even when that first download fails: the answer is then 502
+        with the ruleset (`last_error` set, empty list) and `error`.
+      operationId: createRuleset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RulesetInput"
+      responses:
+        "201":
+          description: Created (a remote one downloaded).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ruleset"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          description: Created, but the first download failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RulesetDownloadFailure"
+        default:
+          $ref: "#/components/responses/Error"
+  /rulesets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [rulesets]
+      summary: One ruleset with its list
+      operationId: getRuleset
+      responses:
+        "200":
+          description: A custom ruleset with `rules`, or a builtin set.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RulesetWithRules"
+                  - $ref: "#/components/schemas/BuiltinRuleset"
+        "404":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [rulesets]
+      summary: Rename, change the source, or replace a local list
+      description: Any of `name`, the source (`type` with its fields) and `rules` (local rulesets only).
+      operationId: updateRuleset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                type:
+                  type: string
+                  enum: [remote, local]
+                url:
+                  type: string
+                format:
+                  type: string
+                category:
+                  type: string
+                rules:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ruleset"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [rulesets]
+      summary: Delete a custom ruleset
+      description: Refused with 409 (and the referencing rules' IDs as `rules`) while a rule references it.
+      operationId: deleteRuleset
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted:
+                    type: string
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+  /rulesets/{id}/refresh:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [rulesets]
+      summary: Download a remote or builtin ruleset again
+      description: |
+        A remote ruleset: 200 with the ruleset; when the download fails, 502
+        with the ruleset (`last_error`) and `error`, and the old list stays.
+        Two overlapping downloads of one ruleset: only the later one is kept;
+        the earlier answers 409. A local ruleset answers 400.
+
+        A builtin set (`refreshable: true`): every enabled source of it is
+        downloaded again and the new lists are in use before the answer
+        (`RefreshResult`). When no source could be downloaded, 502 and the
+        old lists stay.
+      operationId: refreshRuleset
+      responses:
+        "200":
+          description: Downloaded.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Ruleset"
+                  - $ref: "#/components/schemas/RefreshResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          description: The download failed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RulesetDownloadFailure"
+                  - $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /nodes:
+    get:
+      tags: [nodes]
+      summary: Every node
+      operationId: listNodes
+      responses:
+        "200":
+          description: The nodes (credentials left out).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, nodes]
+                properties:
+                  version:
+                    $ref: "#/components/schemas/Version"
+                  nodes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Node"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [nodes]
+      summary: Import nodes
+      description: |
+        `format`: `link` (share links, one per line: vless, vmess, trojan, ss,
+        hysteria2/hy2, tuic, anytls, socks), `yaml` (Clash/mihomo `proxies`) or
+        `json` (sing-box outbounds; `content` may then be a JSON value). All or
+        nothing: one item that does not convert refuses the whole import (400,
+        "第 N 项"), and the resulting configuration must pass `sing-box check`.
+      operationId: importNodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [format, content]
+              properties:
+                format:
+                  type: string
+                  enum: [link, yaml, json]
+                content:
+                  description: A string; for `json` also a JSON value.
+                version:
+                  $ref: "#/components/schemas/Version"
+      responses:
+        "201":
+          description: Imported.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, nodes]
+                properties:
+                  version:
+                    $ref: "#/components/schemas/Version"
+                  nodes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /nodes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [nodes]
+      summary: One node
+      operationId: getNode
+      responses:
+        "200":
+          description: The node.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "404":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [nodes]
+      summary: Rename a node, or replace its connection
+      description: "`format` and `content` go together and give exactly one node; without them the connection is kept."
+      operationId: updateNode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                format:
+                  type: string
+                  enum: [link, yaml, json]
+                content: {}
+                version:
+                  $ref: "#/components/schemas/Version"
+      responses:
+        "200":
+          description: Changed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, node]
+                properties:
+                  version:
+                    $ref: "#/components/schemas/Version"
+                  node:
+                    $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [nodes]
+      summary: Delete a node (it leaves every group and Final)
+      operationId: deleteNode
+      parameters:
+        - $ref: "#/components/parameters/VersionQuery"
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deleted"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /nodes/{id}/delay:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [nodes]
+      summary: Test one node's delay (Clash API)
+      operationId: nodeDelay
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelayRequest"
+      responses:
+        "200":
+          description: The delay in milliseconds.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id:
+                    type: string
+                  delay:
+                    type: integer
+                    nullable: true
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /groups:
+    get:
+      tags: [groups]
+      summary: Every node group
+      operationId: listGroups
+      responses:
+        "200":
+          description: The groups.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, groups]
+                properties:
+                  version:
+                    $ref: "#/components/schemas/Version"
+                  groups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Group"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [groups]
+      summary: Create a node group (it joins Final)
+      operationId: createGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/GroupInput"
+                - type: object
+                  properties:
+                    version:
+                      $ref: "#/components/schemas/Version"
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupChange"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /groups/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [groups]
+      summary: One node group
+      operationId: getGroup
+      responses:
+        "200":
+          description: The group.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "404":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [groups]
+      summary: Replace a node group
+      operationId: updateGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/GroupInput"
+                - type: object
+                  properties:
+                    version:
+                      $ref: "#/components/schemas/Version"
+      responses:
+        "200":
+          description: Replaced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupChange"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [groups]
+      summary: Delete a node group
+      description: |
+        `g-default` cannot be deleted (400). A group that rules proxy to is
+        refused with 409 and their IDs as `rules`; with `confirm=true` those
+        rules are changed to proxy to Final (`final`) and the rule table's
+        version moves on (`rules_version`, `rules`).
+      operationId: deleteGroup
+      parameters:
+        - $ref: "#/components/parameters/VersionQuery"
+        - name: confirm
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, deleted, rules_version]
+                properties:
+                  version:
+                    $ref: "#/components/schemas/Version"
+                  deleted:
+                    type: string
+                  rules_version:
+                    $ref: "#/components/schemas/Version"
+                  rules:
+                    description: The new rule table when rules were changed, else null.
+                    type: array
+                    nullable: true
+                    items:
+                      $ref: "#/components/schemas/Rule"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /groups/{id}/select:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: A selector group's ID, or `final`.
+        schema:
+          type: string
+    post:
+      tags: [groups]
+      summary: Choose a selector's member (Clash API, no reload)
+      operationId: selectMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: The member's ID.
+                version:
+                  $ref: "#/components/schemas/Version"
+      responses:
+        "200":
+          description: Chosen.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, id, selected]
+                properties:
+                  version:
+                    $ref: "#/components/schemas/Version"
+                  id:
+                    type: string
+                  selected:
+                    type: string
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /groups/{id}/delay:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [groups]
+      summary: Test the delay of every member (Clash API)
+      operationId: groupDelay
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelayRequest"
+      responses:
+        "200":
+          description: Milliseconds per member that answered.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, delays]
+                properties:
+                  id:
+                    type: string
+                  delays:
+                    type: object
+                    additionalProperties:
+                      type: integer
+        "404":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /final:
+    get:
+      tags: [final]
+      summary: Final (route.final)
+      operationId: getFinal
+      responses:
+        "200":
+          description: Final's members and selection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Final"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [final]
+      summary: Change Final's members or selection
+      description: |
+        Changed members are applied to sing-box; a selection alone is switched
+        through the Clash API without a reload. `direct` is never a member.
+      operationId: putFinal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                members:
+                  type: array
+                  items:
+                    type: string
+                selected:
+                  type: string
+                version:
+                  $ref: "#/components/schemas/Version"
+      responses:
+        "200":
+          description: Final after the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Final"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /settings:
+    get:
+      tags: [settings]
+      summary: The sing-box side settings and the TTL caps
+      operationId: getSettings
+      responses:
+        "200":
+          description: The settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [settings]
+      summary: Change any of the settings
+      description: |
+        A new FakeIP range makes sing-box drop every FakeIP mapping and binding;
+        the caches and the binding ledger are emptied. A new mixed port also
+        moves AtomDNS's `main_proxy` when it pointed at `127.0.0.1:<old port>`
+        (that reloads AtomDNS's configuration). The TTL caps (1 to 86400
+        seconds) do not touch sing-box.
+      operationId: putSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                fakeip_range:
+                  type: string
+                resolver:
+                  type: string
+                  description: "\"\" (follow the domestic upstreams), an IP, udp://IP[:port] or tcp://IP[:port]."
+                mixed_port:
+                  type: integer
+                direct_ttl_max:
+                  type: integer
+                  minimum: 1
+                  maximum: 86400
+                fakeip_ttl_max:
+                  type: integer
+                  minimum: 1
+                  maximum: 86400
+                version:
+                  $ref: "#/components/schemas/Version"
+      responses:
+        "200":
+          description: The settings after the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /dns:
+    get:
+      tags: [dns]
+      summary: AtomDNS's open settings (design 7.2)
+      operationId: getDns
+      responses:
+        "200":
+          description: The settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dns"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [dns]
+      summary: Change any of AtomDNS's open settings
+      description: |
+        Stored in `webinfo/settings.json` and published as a new generation of
+        AtomDNS's configuration (no version: the last write wins). Turning a
+        learning switch off empties that learned list. A `core_mode` change
+        starts one re-query run (`requery`).
+      operationId: putDns
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DnsPatch"
+      responses:
+        "200":
+          description: The settings after the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dns"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/ApplyConflict"
+        "500":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /upstreams:
+    get:
+      tags: [dns]
+      summary: The upstream DNS groups
+      description: Every upstream group of the configuration except the FakeIP one (fixed to sing-box).
+      operationId: listUpstreams
+      responses:
+        "200":
+          description: The groups.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups]
+                properties:
+                  groups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UpstreamGroup"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /upstreams/{tag}:
+    parameters:
+      - name: tag
+        in: path
+        required: true
+        description: "`domestic`, `foreign` or `foreignecs` in atom's configuration."
+        schema:
+          type: string
+    put:
+      tags: [dns]
+      summary: Replace one group's upstreams
+      description: |
+        At least one entry must be enabled; an empty list restores the
+        configuration's default list. Published like `PUT dns`. The default
+        node resolver follows the domestic group.
+      operationId: putUpstreams
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [upstreams]
+              properties:
+                upstreams:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Upstream"
+      responses:
+        "200":
+          description: Every group after the change.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups]
+                properties:
+                  groups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UpstreamGroup"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/ApplyConflict"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /ddns:
+    get:
+      tags: [fixed]
+      summary: The DDNS list
+      description: Names answered by the domestic DNS without any cache, ahead of the rule table.
+      operationId: getDdns
+      responses:
+        "200":
+          description: The entries (`domain:`, `full:`, `keyword:`, `regexp:`; no prefix is `domain:`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Entries"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [fixed]
+      summary: Replace the DDNS list
+      description: Blank lines and `#` comments are dropped.
+      operationId: putDdns
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Entries"
+      responses:
+        "200":
+          description: The list as stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Entries"
+        "400":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /rewrite:
+    get:
+      tags: [fixed]
+      summary: The rewrite (hosts) rules
+      description: "`<name rule> <IP or domain>`, ahead of the rule table; the first matching line answers."
+      operationId: getRewrite
+      responses:
+        "200":
+          description: The rules.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Entries"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [fixed]
+      summary: Replace the rewrite rules
+      operationId: putRewrite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Entries"
+      responses:
+        "200":
+          description: The rules as stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Entries"
+        "400":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /status:
+    get:
+      tags: [status]
+      summary: Both processes, the latest application, the binding ledger and nft
+      operationId: getStatus
+      responses:
+        "200":
+          description: The status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /apply:
+    get:
+      tags: [status]
+      summary: The latest application to sing-box
+      operationId: getApply
+      responses:
+        "200":
+          description: The latest application and whether the running file is the current one.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [in_sync]
+                properties:
+                  last_apply:
+                    $ref: "#/components/schemas/ApplyRecord"
+                  in_sync:
+                    type: boolean
+        "404":
+          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [status]
+      summary: Apply the current state to sing-box again (with a new Clash API secret)
+      operationId: reapply
+      responses:
+        "200":
+          description: Applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  last_apply:
+                    $ref: "#/components/schemas/ApplyRecord"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        "502":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    VersionQuery:
+      name: version
+      in: query
+      description: The version the deletion is based on (409 when stale).
+      schema:
+        type: integer
+        minimum: 0
+  responses:
+    Error:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: |
+        A stale `version` (the body carries the current one), a ruleset or
+        group still referenced by rules (`rules`), another change being
+        applied to sing-box, or a superseded download.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ApplyConflict:
+      description: |
+        The new configuration generation was not published: another one is
+        being applied, or a file the configuration reads changed between
+        compiling and publishing it (for example a rule download finished,
+        `managed input changed externally`). Nothing changed; retry.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        version:
+          $ref: "#/components/schemas/Version"
+        rules:
+          type: array
+          items:
+            type: string
+    Version:
+      type: integer
+      minimum: 0
+    Match:
+      type: object
+      additionalProperties: false
+      description: |
+        Conditions of one kind are or-ed; different kinds are and-ed. `domain`,
+        `suffix`, `keyword`, `regex` and `ruleset` are one kind (names);
+        `client` is the second. A rule needs one condition. `ip_cidr` stands
+        alone (no other condition) and is matched by sing-box. A rule with
+        `client` cannot proxy (400).
+      properties:
+        domain:
+          type: array
+          items:
+            type: string
+        suffix:
+          type: array
+          items:
+            type: string
+        keyword:
+          type: array
+          items:
+            type: string
+        regex:
+          type: array
+          items:
+            type: string
+        ruleset:
+          type: array
+          description: Builtin set names or custom ruleset IDs.
+          items:
+            type: string
+        client:
+          type: array
+          description: Client addresses or prefixes.
+          items:
+            type: string
+        ip_cidr:
+          type: array
+          items:
+            type: string
+    Action:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, group_id]
+          properties:
+            type:
+              type: string
+              enum: [proxy]
+            group_id:
+              type: string
+              description: A node group's ID or `final`.
+        - type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type:
+              type: string
+              enum: [direct, block]
+      discriminator:
+        propertyName: type
+    RuleInput:
+      type: object
+      required: [match, action]
+      properties:
+        enabled:
+          type: boolean
+          default: true
+        remark:
+          type: string
+          default: ""
+        match:
+          $ref: "#/components/schemas/Match"
+        action:
+          $ref: "#/components/schemas/Action"
+    Rule:
+      type: object
+      required: [id, enabled, remark, match, action]
+      properties:
+        id:
+          type: string
+        enabled:
+          type: boolean
+        remark:
+          type: string
+        match:
+          $ref: "#/components/schemas/Match"
+        action:
+          $ref: "#/components/schemas/Action"
+    RuleTable:
+      type: object
+      required: [version, rules]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/Rule"
+    RuleChange:
+      type: object
+      required: [version, rule]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+        rule:
+          $ref: "#/components/schemas/Rule"
+    RuleTest:
+      type: object
+      required: [domain, matched]
+      properties:
+        domain:
+          type: string
+        matched:
+          type: boolean
+        index:
+          type: integer
+          description: The rule's position (0-based).
+        action:
+          type: string
+          enum: [proxy, direct, block]
+        group_id:
+          type: string
+        rule:
+          $ref: "#/components/schemas/Rule"
+        fallthrough:
+          type: string
+          enum: [original]
+          description: No rule matched; the original judgement decides.
+    BuiltinRuleset:
+      type: object
+      required: [id, name, type, refreshable]
+      properties:
+        id:
+          type: string
+          description: "`adguard`, `geosite_cn`, `geosite_no_cn`, `cuscn`, `cusnocn` in atom's configuration."
+        name:
+          type: string
+        type:
+          type: string
+          enum: [builtin]
+        refreshable:
+          type: boolean
+    RulesetInput:
+      oneOf:
+        - type: object
+          required: [type, url]
+          properties:
+            name:
+              type: string
+            type:
+              type: string
+              enum: [remote]
+            url:
+              type: string
+            format:
+              type: string
+              description: "`auto` (default), text, yaml, json, srs, dat (needs `category`), mrs."
+            category:
+              type: string
+        - type: object
+          required: [type]
+          properties:
+            name:
+              type: string
+            type:
+              type: string
+              enum: [local]
+            rules:
+              type: array
+              description: "`domain:`, `full:`, `keyword:`, `regexp:`; no prefix is `domain:`."
+              items:
+                type: string
+    Ruleset:
+      type: object
+      required: [id, name, type, rule_count, updated_at, revision]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum: [remote, local]
+        url:
+          type: string
+        format:
+          type: string
+        category:
+          type: string
+        rule_count:
+          type: integer
+        updated_at:
+          type: integer
+          description: Unix seconds of the last successful download or edit; 0 never.
+        last_error:
+          type: string
+        revision:
+          type: integer
+    RulesetWithRules:
+      allOf:
+        - $ref: "#/components/schemas/Ruleset"
+        - type: object
+          required: [rules]
+          properties:
+            rules:
+              type: array
+              items:
+                type: string
+    RulesetDownloadFailure:
+      allOf:
+        - $ref: "#/components/schemas/Ruleset"
+        - type: object
+          required: [error]
+          properties:
+            error:
+              type: string
+    RefreshResult:
+      type: object
+      required: [id, sources, updated]
+      properties:
+        id:
+          type: string
+        sources:
+          type: integer
+          description: Enabled sources downloaded.
+        updated:
+          type: integer
+          description: Of those, the ones that replaced their list (a failed one is logged).
+    Node:
+      type: object
+      required: [id, name, outbound, groups]
+      properties:
+        id:
+          type: string
+          description: "`n-` and 8 hex digits; the sing-box tag."
+        name:
+          type: string
+        type:
+          type: string
+        server:
+          type: string
+        server_port:
+          type: integer
+        outbound:
+          type: object
+          description: The sing-box outbound without any credential.
+        groups:
+          type: array
+          description: The groups that contain it.
+          items:
+            type: string
+    Deleted:
+      type: object
+      required: [version, deleted]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+        deleted:
+          type: string
+    DelayRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+        timeout:
+          type: integer
+          description: Milliseconds, 100 to 30000 (default 5000).
+        version:
+          $ref: "#/components/schemas/Version"
+    GroupInput:
+      type: object
+      required: [name, type]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [selector, urltest]
+        members:
+          type: array
+          description: Node and group IDs, in order.
+          items:
+            type: string
+        selected:
+          type: string
+          description: selector only; "" is the first member.
+        url:
+          type: string
+          description: urltest only (default https://www.gstatic.com/generate_204).
+        interval:
+          type: string
+          description: urltest only, like 30s, 3m, 1h30m (default 3m).
+        tolerance:
+          type: integer
+          description: urltest only, milliseconds (default 50).
+    Group:
+      type: object
+      required: [id, name, type, members, empty, builtin]
+      properties:
+        id:
+          type: string
+          description: "`g-` and 8 hex digits; `g-default` is the builtin one."
+        name:
+          type: string
+        type:
+          type: string
+          enum: [selector, urltest]
+        members:
+          type: array
+          items:
+            type: string
+        selected:
+          type: string
+        url:
+          type: string
+        interval:
+          type: string
+        tolerance:
+          type: integer
+        empty:
+          type: boolean
+          description: No members (all its traffic is refused).
+        builtin:
+          type: boolean
+        now:
+          type: string
+          description: selector only; the member in use.
+    GroupChange:
+      type: object
+      required: [version, group]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+        group:
+          $ref: "#/components/schemas/Group"
+    Final:
+      type: object
+      required: [version, members, selected, empty]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+        members:
+          type: array
+          items:
+            type: string
+        selected:
+          type: string
+        empty:
+          type: boolean
+    Settings:
+      type: object
+      required: [version, fakeip_range, resolver, resolver_effective, mixed_port, direct_ttl_max, fakeip_ttl_max]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+        fakeip_range:
+          type: string
+          description: IPv4 prefix, length 8 to 24 (default 28.0.0.0/8).
+        resolver:
+          type: string
+        resolver_effective:
+          type: string
+        mixed_port:
+          type: integer
+        direct_ttl_max:
+          type: integer
+        fakeip_ttl_max:
+          type: integer
+    Learning:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        remember_direct:
+          type: boolean
+        remember_proxy:
+          type: boolean
+        no_v4:
+          type: boolean
+        no_v6:
+          type: boolean
+    DnsPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        core_mode:
+          type: string
+          enum: [compat, safe]
+          description: compat asks the domestic DNS first for names outside the lists; safe only the foreign one (with ECS).
+        block_qtypes:
+          type: boolean
+          description: Refuse SOA, PTR and HTTPS queries.
+        block_aaaa:
+          type: boolean
+        prefer_v4:
+          type: boolean
+          description: No AAAA answer for a name that has A records.
+        ddns_foreign:
+          type: boolean
+          description: Resolve the DDNS list with the foreign DNS first.
+        full_cache:
+          type: boolean
+          description: The global cache facing the clients.
+        lazy_cache:
+          type: boolean
+          description: The per-upstream-group caches.
+        ecs:
+          type: string
+          description: The ECS address of foreign queries ("" restores the default).
+        learning:
+          $ref: "#/components/schemas/Learning"
+    Dns:
+      allOf:
+        - $ref: "#/components/schemas/DnsPatch"
+        - type: object
+          required: [core_mode, block_qtypes, block_aaaa, prefer_v4, ddns_foreign, full_cache, lazy_cache, ecs, learning]
+    Upstream:
+      type: object
+      required: [tag, addr]
+      description: One upstream (more fields of AtomDNS's upstream entry are accepted and returned).
+      properties:
+        tag:
+          type: string
+          description: A name, unique among all upstreams.
+        enabled:
+          type: boolean
+        protocol:
+          type: string
+          enum: [udp, tcp, tls, dot, https, doh]
+        addr:
+          type: string
+        dial_addr:
+          type: string
+        use_proxy:
+          type: boolean
+          description: Through `main_proxy` (sing-box's mixed inbound); not for UDP.
+        bootstrap:
+          type: string
+        idle_timeout:
+          type: integer
+        upstream_query_timeout:
+          type: integer
+        enable_pipeline:
+          type: boolean
+        enable_http3:
+          type: boolean
+        insecure_skip_verify:
+          type: boolean
+        so_mark:
+          type: integer
+        bind_to_device:
+          type: string
+        bootstrap_version:
+          type: integer
+    UpstreamGroup:
+      type: object
+      required: [tag, customized, upstreams]
+      properties:
+        tag:
+          type: string
+        customized:
+          type: boolean
+          description: Set through the API (false is the configuration's default list).
+        upstreams:
+          type: array
+          items:
+            $ref: "#/components/schemas/Upstream"
+    Entries:
+      type: object
+      additionalProperties: false
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            type: string
+    ApplyRecord:
+      type: object
+      nullable: true
+      required: [at, trigger, ok, changed]
+      properties:
+        at:
+          type: integer
+        trigger:
+          type: string
+          enum: [nodes, groups, final, settings, rules, apply, startup]
+        ok:
+          type: boolean
+        changed:
+          type: boolean
+        error:
+          type: string
+    Status:
+      type: object
+      required: [atomdns, singbox, bindings, warnings, nft]
+      properties:
+        atomdns:
+          type: object
+          properties:
+            version:
+              type: string
+        singbox:
+          type: object
+          properties:
+            running:
+              type: boolean
+            version:
+              type: object
+              nullable: true
+              description: Clash API `/version`.
+            in_sync:
+              type: boolean
+              description: The running file is the one the current state generates.
+            host:
+              type: object
+              nullable: true
+              properties:
+                config:
+                  type: string
+                clash_api:
+                  type: string
+                dns_in:
+                  type: string
+                redirect_port:
+                  type: integer
+                tproxy_port:
+                  type: integer
+        last_apply:
+          $ref: "#/components/schemas/ApplyRecord"
+        bindings:
+          type: object
+          description: The binding ledger (design 4.5.1).
+          properties:
+            size:
+              type: integer
+            capacity:
+              type: integer
+            last:
+              type: object
+              nullable: true
+              properties:
+                at:
+                  type: integer
+                trigger:
+                  type: string
+                changed:
+                  type: integer
+                failed:
+                  type: integer
+                error:
+                  type: string
+        warnings:
+          type: object
+          properties:
+            empty_groups:
+              type: array
+              items:
+                type: string
+        nft:
+          type: object
+          properties:
+            fakeip_range:
+              type: string
+            ip_cidr:
+              type: object
+              properties:
+                inet4:
+                  type: array
+                  items:
+                    type: string
+                inet6:
+                  type: array
+                  items:
+                    type: string
+            table:
+              type: string
+              nullable: true
+            sync:
+              type: object
+              nullable: true
+              properties:
+                at:
+                  type: integer
+                ok:
+                  type: boolean
+                error:
+                  type: string
+                sets:
+                  type: object
+                  properties:
+                    fakeip4:
+                      type: array
+                      items:
+                        type: string
+                    iprule4:
+                      type: array
+                      items:
+                        type: string

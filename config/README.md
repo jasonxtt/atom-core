@@ -37,3 +37,16 @@ atom 删除了在线更新和配置包，这份配置随程序一起发布，用
   Clash API `127.0.0.1:9090`、FakeIP DNS 入站 `127.0.0.1:6666`（和 `nocnfake` 一致）、本机 AtomDNS `127.0.0.1:53`、
   redirect 7892 / tproxy 7893、默认 resolver 取自 `domestic` 组。节点、组、Final 和 sing-box 设置存在
   `webinfo/atom_proxy.json`，由 `/api/v1/atom/` 管理，这份配置里不放。
+
+第 6 步（自带名单并入规则表，atom 设计文档第 4.4 节）：
+
+- 删除黑名单（`blocklist`，mark 1）、白名单（`whitelist`，mark 8）、灰名单（`greylist`，mark 7）：名单插件、
+  `unified_matcher1` 条目、`rule/` 下的三个文件、主流程和刷新流程里的黑名单屏蔽、`process_listed.yaml` /
+  `process_ot.yaml` 里的分支，以及 `block_blocklist` 开关。这三份是原作者个人的名单，分享版不带；
+  要屏蔽、代理、直连某些域名，在规则表里写规则。不写迁移：atom 还没发布过。
+- `cusnocn`（代理修正，mark 15）、`cuscn`（直连修正，mark 13）成为规则表的内置规则集（`atom_rules.yaml` 的 `builtin`），
+  默认规则表多两条：代理修正 → 代理到 Final，直连修正 → 直连，排在广告之后、和原来在原判断里的顺序一致。
+  `process_listed.yaml` / `process_ot.yaml` 里 13、15 的分支删除（命中的查询已经被规则表处理）。
+  插件和 srs 文件保留，`unified_matcher1` 照旧打标；内置规则集可以用 `POST /api/v1/atom/rulesets/{id}/refresh` 重新下载。
+- `client_routing` 开关和 `rule/client_ip.txt` 暂不改动（待定）。规则表排在它前面，所以
+  "名单内客户端不走代理"的客户端查代理修正里的域名，也会被规则表判成代理。

@@ -203,7 +203,6 @@ fn retained_audit_api_response_bytes_equal_base_fixture() {
         ] {
             let mut response = dispatch(
                 None,
-                None,
                 host.config(),
                 host.cache(),
                 &observer,

@@ -24,9 +24,6 @@ use atomdns_upstream_core::{
 };
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{Name, RecordType};
-use serde::Deserialize;
-
-use crate::rule_sources::Reply;
 
 /// The audit `domain_set` label a rewritten query carries.
 pub(crate) const LABEL: &str = "重定向";
@@ -38,8 +35,6 @@ const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LINE: usize = 64 * 1024;
 /// EDNS payload size of the query sent for a domain target.
 const EDNS_PAYLOAD: u16 = 1232;
-
-const TEXT: &str = "text/plain; charset=utf-8";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Target {
@@ -137,10 +132,6 @@ impl RuleSet {
         self.matcher
             .r#match(domain)
             .map(|index| &self.targets[*index])
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.lines.len()
     }
 }
 
@@ -419,56 +410,31 @@ impl Rewrite {
         }
     }
 
-    /// `GET /show`: the accepted rule lines.
-    pub(crate) fn show(&self) -> Reply {
-        Reply {
-            status: 200,
-            content_type: Some(TEXT),
-            body: self.current().lines.join("\n").into_bytes(),
-            headers: Vec::new(),
-        }
+    /// The accepted rule lines (atom `GET /api/v1/atom/rewrite`).
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.current().lines.clone()
     }
 
-    /// `POST /post`: replaces every rule with the posted ones, then writes
-    /// the first file. The in-memory rules change even when the write fails,
-    /// as the reference does, and the reply says so.
-    pub(crate) async fn post(&self, body: &[u8]) -> Reply {
-        #[derive(Deserialize)]
-        struct Payload {
-            #[serde(default)]
-            values: Option<Vec<String>>,
-        }
-        let Ok(payload) = serde_json::from_slice::<Payload>(body) else {
-            return error(400, "invalid JSON payload");
-        };
+    /// Replaces every rule (atom `PUT /api/v1/atom/rewrite`): the lines are
+    /// parsed, written to the first file, and only then published, so the
+    /// running rules always equal what a restart reads back. The error is
+    /// `(HTTP status, reason)`.
+    pub(crate) async fn replace(&self, values: &[String]) -> Result<(), (u16, String)> {
         let Some(file) = self.files.first().cloned() else {
-            return error(400, "no rule file configured, cannot post rules");
+            return Err((500, "没有配置重写规则文件".to_owned()));
         };
-        let text = payload.values.unwrap_or_default().join("\n");
-        let set = match RuleSet::parse(&text) {
-            Ok(set) => set,
-            Err(reason) => return error(400, &format!("failed to parse new rules: {reason}")),
-        };
+        let set = RuleSet::parse(&values.join("\n"))
+            .map_err(|reason| (400, format!("重写规则无效: {reason}")))?;
         let _serialized = self.write_lock.lock().await;
         let mut content = set.lines.join("\n");
         content.push('\n');
-        let count = set.len();
-        *self.rules.borrow_mut() = Rc::new(set);
-        let written = crate::transaction::blocking_io(move || {
+        crate::transaction::blocking_io(move || {
             crate::rule_sources::write_atomically(&file, content.as_bytes())
-        });
-        match written {
-            Ok(Ok(())) => Reply {
-                status: 200,
-                content_type: Some(TEXT),
-                body: format!("rewrite rules replaced with {count} entries").into_bytes(),
-                headers: Vec::new(),
-            },
-            Ok(Err(reason)) | Err(reason) => error(
-                500,
-                &format!("In-memory rules updated, but failed to write to file: {reason}"),
-            ),
-        }
+        })
+        .map_err(|reason| (500, reason.to_string()))?
+        .map_err(|reason| (500, reason.to_string()))?;
+        *self.rules.borrow_mut() = Rc::new(set);
+        Ok(())
     }
 }
 
@@ -476,15 +442,6 @@ enum Resolved {
     Answers(Vec<hickory_proto::rr::Record>),
     Failed,
     Cancelled,
-}
-
-fn error(status: u16, message: &str) -> Reply {
-    Reply {
-        status,
-        content_type: Some(TEXT),
-        body: format!("{message}\n").into_bytes(),
-        headers: Vec::new(),
-    }
 }
 
 /// A response skeleton for the query: QR, RA, the query's RD, one question.
@@ -574,7 +531,7 @@ mod tests {
             "# comment\n\n  domain:Example.COM   1.2.3.4  \nfull:a.test ::ffff:5.6.7.8\nkeyword:cdn target.test\n",
         )
         .unwrap();
-        assert_eq!(set.len(), 3);
+        assert_eq!(set.lines.len(), 3);
         assert_eq!(
             set.lookup("www.example.com"),
             Some(&Target::Ip("1.2.3.4".parse().unwrap()))
@@ -610,6 +567,6 @@ mod tests {
             set.lookup("a.test"),
             Some(&Target::Ip("2.2.2.2".parse().unwrap()))
         );
-        assert_eq!(set.len(), 2);
+        assert_eq!(set.lines.len(), 2);
     }
 }

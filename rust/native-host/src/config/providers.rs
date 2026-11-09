@@ -532,6 +532,7 @@ fn has_repairable_string(bytes: &[u8]) -> bool {
 /// Decodes one source object the way the reference API handlers decode a
 /// request body (`json.NewDecoder(body).Decode(&source)`): the first JSON value
 /// only, the same per-field rules as the manifest. `null` is the zero source.
+#[cfg(test)]
 pub(crate) fn parse_source_object(bytes: &[u8], schema: Schema) -> Result<SourceEntry, String> {
     use serde::de::DeserializeSeed;
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
@@ -549,6 +550,7 @@ pub(crate) fn parse_source_object(bytes: &[u8], schema: Schema) -> Result<Source
 }
 
 /// The API error for a `dat` source without a category.
+#[cfg(test)]
 pub(crate) const CATEGORY_REQUIRED: &str = "category is required for format dat";
 
 /// Where one manifest-backed provider keeps its state.

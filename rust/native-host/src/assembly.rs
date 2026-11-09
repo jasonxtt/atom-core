@@ -334,6 +334,20 @@ impl HostAssembly {
         self.control.clone()
     }
 
+    /// Serves an in-process plugin route (`/plugins/{tag}/...` of the named
+    /// caches, `domain_output` and the learners) the way `requery` does:
+    /// `(status, body)`, `None` for a route nothing owns. atom step 6 removed
+    /// these routes from HTTP; integration tests reach them here.
+    #[doc(hidden)]
+    pub async fn plugin_request(
+        &self,
+        method: &str,
+        target: &str,
+        body: &[u8],
+    ) -> Option<(u16, Vec<u8>)> {
+        crate::api::local_plugin_request(&self.control, method, target, body).await
+    }
+
     pub fn config(&self) -> &CompiledConfig {
         &self.config
     }
@@ -494,14 +508,6 @@ impl HostAssembly {
             Some((server, address)) => (Some(server), Some(address)),
             None => (None, None),
         };
-        if let Some(profile) = &self.config.standard_groups {
-            // Orphan artifacts that cannot be removed do not stop the host;
-            // they stay visible in health and the next save retries them.
-            let pending = profile
-                .recover()
-                .map_err(|error| HostRunError::Task(error.to_string()))?;
-            self.control().set_pending_cleanup(pending);
-        }
         Ok(BoundHost {
             control: self.control(),
             dns,
@@ -516,7 +522,7 @@ impl HostAssembly {
     /// failure on either side cancels and joins the other before returning.
     pub async fn serve_host(&self) -> Result<(), HostRunError> {
         let bound = self.bind_host().await?;
-        serve_until(bound, self.control(), shutdown_signal()).await
+        serve_until(bound, shutdown_signal()).await
     }
 
     /// Binds and serves the configured UDP listener without opening any
@@ -549,9 +555,8 @@ impl HostAssembly {
         let runtime = Rc::clone(&self.runtime);
         runtime.block_on(async move {
             let bound = self.bind_host().await?;
-            let control = self.control();
             drop(self);
-            serve_until(bound, control, stop).await
+            serve_until(bound, stop).await
         })
     }
 }
@@ -560,7 +565,6 @@ impl HostAssembly {
 /// completes, which cancels it and waits for it to drain.
 async fn serve_until(
     bound: BoundHost,
-    control: crate::runtime_snapshot::RuntimeControl,
     stop: impl Future<Output = std::io::Result<()>>,
 ) -> Result<(), HostRunError> {
     let shutdown = TransportCancellation::new();
@@ -569,7 +573,6 @@ async fn serve_until(
     tokio::select! {
         result = &mut serving => result,
         signal = stop => {
-            control.note_signal_stop();
             shutdown.cancel();
             let drained = serving.await;
             drained?;
@@ -1236,18 +1239,6 @@ impl ForwardCatalog {
             .and_then(|owners| (owners.len() == 1).then(|| owners[0].as_ref()))
     }
 
-    pub(crate) fn runtime_targets(
-        &self,
-        executable: atomdns_sequence_core::ExecutableId,
-    ) -> Vec<String> {
-        self.owners
-            .get(&executable)
-            .into_iter()
-            .flatten()
-            .filter_map(|owner| owner.runtime_target())
-            .collect()
-    }
-
     pub(crate) async fn close_exclusive_to(&self, live: &ForwardCatalog) {
         let preserved = live
             .owners
@@ -1748,10 +1739,6 @@ impl ForwardAdapter {
     #[must_use]
     pub const fn entry_index(&self) -> usize {
         self.entry_index
-    }
-
-    pub(crate) fn runtime_target(&self) -> Option<String> {
-        self.active_peer.borrow().map(|address| address.to_string())
     }
 
     #[must_use]

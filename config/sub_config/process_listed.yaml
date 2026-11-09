@@ -14,17 +14,15 @@
 #
 #   mark  名单                       去向
 #   ----  -------------------------  ---------------------------------------------------
-#    7    greylist 灰名单            代理：向 sing-box 要 FakeIP
-#    8    whitelist 白名单           直连：国内 DNS
-#   15    cusnocn 代理域名           代理（同 7）
-#   13    cuscn 直连域名             直连（同 8）
-#   14    geosite_no_cn 非中国域名   代理（同 7）
-#   16    geosite_cn 中国域名        直连（同 8）
+#   14    geosite_no_cn 非中国域名   代理：向 sing-box 要 FakeIP
+#   16    geosite_cn 中国域名        直连：国内 DNS
 #   12    记忆代理（学习得到）       代理
 #   11    记忆直连（学习得到）       直连（安全模式向国外 DNS 要真实 IP）
 #
-#   一个域名可以同时命中多个名单，所以顺序就是优先级：灰名单 > 白名单 > 代理域名 > 直连域名 > 非中国域名 > 中国域名 > 学习结果。
+#   一个域名可以同时命中多个名单，所以顺序就是优先级：非中国域名 > 中国域名 > 学习结果。
 #   静态名单永远高于学习结果。
+#   atom：灰名单（7）、白名单（8）在第 6 步删除；代理域名 cusnocn（15）、直连域名 cuscn（13）由规则表判断
+#   （默认规则表的两条规则，atom_rules.yaml 的 builtin），命中的查询到不了这里。
 #
 # 关于每个结果序列后面的 exit：
 #   带缓存的结果序列在命中缓存时会立即把缓存结果交还给调用者（它自己的 exit 来不及执行），
@@ -34,22 +32,6 @@ plugins:
   - tag: sequence_listed
     type: sequence
     args:
-      - matches: fast_mark 7                        # 灰名单：代理
-        exec: $sequence_fakeip_exit                 #定义: sub_config/forward_1.yaml
-
-      - matches: fast_mark 8                        # 白名单：直连
-        exec: $sequence_local_exit                  #定义: sub_config/forward_1.yaml
-      - matches: fast_mark 8
-        exec: exit
-
-      - matches: fast_mark 15                       # 代理域名：代理
-        exec: $sequence_fakeip_exit                 #定义: sub_config/forward_1.yaml
-
-      - matches: fast_mark 13                       # 直连域名：直连
-        exec: $sequence_local_exit                  #定义: sub_config/forward_1.yaml
-      - matches: fast_mark 13
-        exec: exit
-
       - matches: fast_mark 14                       # 非中国域名（geosite-geolocation-!cn）：代理
         exec: $sequence_fakeip_exit                 #定义: sub_config/forward_1.yaml
 
@@ -77,22 +59,6 @@ plugins:
   - tag: sequence_listed_requery
     type: sequence
     args:
-      - matches: fast_mark 7
-        exec: $sequence_fakeip_exit                 #定义: sub_config/forward_1.yaml
-
-      - matches: fast_mark 8
-        exec: $sequence_local_sv4_exit_requery      #定义: sub_config/forward_1.yaml
-      - matches: fast_mark 8
-        exec: exit
-
-      - matches: fast_mark 15
-        exec: $sequence_fakeip_exit                 #定义: sub_config/forward_1.yaml
-
-      - matches: fast_mark 13
-        exec: $sequence_local_sv4_exit_requery      #定义: sub_config/forward_1.yaml
-      - matches: fast_mark 13
-        exec: exit
-
       - matches: fast_mark 14
         exec: $sequence_fakeip_exit                 #定义: sub_config/forward_1.yaml
 

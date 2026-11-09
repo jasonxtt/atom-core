@@ -185,33 +185,6 @@ impl Provider {
         *self.filtered.borrow_mut() = Some(live);
     }
 
-    /// True when `/post` and `/save` can write this `domain_set_light`.
-    pub(crate) fn postable(&self) -> bool {
-        self.light
-            .as_ref()
-            .is_some_and(|spec| spec.writable_file().is_some())
-    }
-
-    /// Also reserve disabled sources: a later enable/download may read them.
-    pub(crate) fn source_files(&self) -> Vec<PathBuf> {
-        if let Some(spec) = &self.light {
-            return spec.files.iter().map(|(_, file)| file.clone()).collect();
-        }
-        let owner = self.owner();
-        std::iter::once(owner.spec.manifest.clone())
-            .chain(
-                owner
-                    .sources
-                    .borrow()
-                    .iter()
-                    .filter(|source| {
-                        owner.spec.schema == Schema::Adguard || !source.files.is_empty()
-                    })
-                    .map(|source| owner.spec.source_file(source)),
-            )
-            .collect()
-    }
-
     fn owner(&self) -> &ManifestOwner {
         self.manifest.as_ref().expect("manifest provider")
     }
@@ -329,7 +302,6 @@ pub(crate) struct Reply {
 }
 
 const JSON_UTF8: &str = "application/json; charset=utf-8";
-const TEXT: &str = "text/plain; charset=utf-8";
 
 impl Reply {
     fn json<T: Serialize>(status: u16, content_type: &'static str, value: &T) -> Self {
@@ -345,33 +317,6 @@ impl Reply {
 
     fn json_error(status: u16, message: &str) -> Self {
         Self::json(status, JSON_UTF8, &serde_json::json!({ "error": message }))
-    }
-
-    fn text(status: u16, body: String) -> Self {
-        Self {
-            status,
-            content_type: Some(TEXT),
-            body: body.into_bytes(),
-            headers: Vec::new(),
-        }
-    }
-
-    /// Go's `http.Error`.
-    fn error(status: u16, message: &str) -> Self {
-        Self::text(status, format!("{message}\n"))
-    }
-
-    fn empty(status: u16) -> Self {
-        Self {
-            status,
-            content_type: None,
-            body: Vec::new(),
-            headers: Vec::new(),
-        }
-    }
-
-    fn not_found() -> Self {
-        Self::error(404, "404 page not found")
     }
 }
 
@@ -410,64 +355,6 @@ impl RuleSources {
             .iter()
             .find(|provider| provider.tag == tag)
             .cloned()
-    }
-
-    /// Hold manifest/list writers while an IP POST checks current source
-    /// ownership and persists. Source paths may have changed through PUT
-    /// since startup; a second check under these locks closes that race.
-    pub(crate) async fn lock_file_readers(&self) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
-        let mut locks = Vec::<Arc<tokio::sync::Mutex<()>>>::new();
-        for provider in &self.inner.providers {
-            if !locks.iter().any(|lock| Arc::ptr_eq(lock, &provider.mutate)) {
-                locks.push(Arc::clone(&provider.mutate));
-            }
-        }
-        let mut guards = Vec::new();
-        for lock in locks {
-            guards.push(lock.lock_owned().await);
-        }
-        guards
-    }
-
-    pub(crate) fn reads_file(&self, file: &Path) -> bool {
-        self.inner.providers.iter().any(|provider| {
-            provider.source_files().iter().any(|source| {
-                crate::managed_ip::actual_path(source) == file
-                    || crate::config::paths_collide(source, file)
-            })
-        })
-    }
-
-    pub(crate) fn has_kind(&self, kinds: &[Kind]) -> bool {
-        self.inner
-            .providers
-            .iter()
-            .any(|provider| kinds.contains(&provider.kind))
-    }
-
-    /// Every rule file a provider of this configuration still reads.
-    fn files_in_use(&self) -> Vec<PathBuf> {
-        let mut files = Vec::new();
-        for provider in &self.inner.providers {
-            if let Some(spec) = &provider.light {
-                files.extend(spec.files.iter().map(|(_, path)| path.clone()));
-                continue;
-            }
-            let owner = provider.owner();
-            files.extend(
-                owner
-                    .sources
-                    .borrow()
-                    .iter()
-                    .filter(|entry| provider.kind == Kind::Adguard || !entry.files.is_empty())
-                    .map(|entry| owner.spec.source_file(entry)),
-            );
-        }
-        files
-    }
-
-    pub(crate) fn has_postable_light(&self) -> bool {
-        self.inner.providers.iter().any(|p| p.postable())
     }
 
     fn ctx(&self) -> Ctx {
@@ -605,164 +492,38 @@ impl RuleSources {
         }
     }
 
-    /// Serves `/plugins/{tag}/{rest}` for a rule provider. `rest` is the raw
-    /// path after the tag (no query); `query` is the raw query string.
-    pub(crate) async fn handle(
+    // ----- domain_set_light (atom `ddns`) -----------------------------------
+
+    /// Every rule of a `domain_set_light` provider, as its files give them.
+    pub(crate) async fn light_rules(&self, provider: &Provider) -> Result<Vec<String>, String> {
+        let spec = provider.light.clone().ok_or("not a domain_set_light")?;
+        match on_build_thread(move || providers::load_light(&spec, None)).await {
+            Ok(Ok(rules)) => Ok(rules.into_iter().map(|entry| entry.rule).collect()),
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Replaces the rules of a `domain_set_light` provider: the values are
+    /// normalized like file lines, written to its file, and the matchers are
+    /// rebuilt before this returns. The error is `(HTTP status, reason)`.
+    pub(crate) async fn light_replace(
         &self,
         provider: &Rc<Provider>,
-        method: &str,
-        rest: &str,
-        query: &str,
-        body: &[u8],
-    ) -> Reply {
-        // A view retired by a managed apply no longer changes anything.
-        if self.closed.get() && method != "GET" {
-            return Reply::error(503, "host is applying configuration");
+        values: Vec<String>,
+    ) -> Result<Vec<String>, (u16, String)> {
+        if self.closed.get() {
+            return Err((503, "host is applying configuration".to_owned()));
         }
-        let (action, item) = match rest.split_once('/') {
-            Some((action, item)) => (action, Some(item)),
-            None => (rest, None),
-        };
-        let item = match item {
-            None => None,
-            Some(raw) if raw.is_empty() || raw.contains('/') => return Reply::not_found(),
-            Some(raw) => match crate::api::decode_plugin_tag(raw) {
-                Some(decoded) => Some(decoded.into_owned()),
-                None => return Reply::not_found(),
-            },
-        };
-        match (provider.kind, action, item) {
-            (Kind::Light, "show", None) => match method {
-                "GET" => self.light_show(provider, query).await,
-                _ => Reply::empty(405),
-            },
-            (Kind::Light, "save", None) => match method {
-                "GET" => self.light_save(provider).await,
-                _ => Reply::empty(405),
-            },
-            (Kind::Light, "post", None) => match method {
-                "POST" => self.light_post(provider, body).await,
-                _ => Reply::empty(405),
-            },
-            (Kind::Sd | Kind::Si, "config", None) => match method {
-                "GET" => self.list(provider),
-                _ => Reply::empty(405),
-            },
-            (Kind::Sd | Kind::Si, "config", Some(name)) => match method {
-                "PUT" => self.put_source(provider, name, body).await,
-                "DELETE" => self.delete_source(provider, &name).await,
-                _ => Reply::empty(405),
-            },
-            (Kind::Sd | Kind::Si, "update", Some(name)) => match method {
-                "POST" => self.update_source(provider, name),
-                _ => Reply::empty(405),
-            },
-            (Kind::Adguard, "rules", None) => match method {
-                "GET" => self.list(provider),
-                "POST" => self.create_rule(provider, body).await,
-                _ => Reply::empty(405),
-            },
-            (Kind::Adguard, "rules", Some(id)) => match method {
-                "PUT" => self.put_rule(provider, &id, body).await,
-                "DELETE" => self.delete_source(provider, &id).await,
-                _ => Reply::empty(405),
-            },
-            (Kind::Adguard, "update", None) => match method {
-                "POST" => self.update_all_rules(provider),
-                _ => Reply::empty(405),
-            },
-            (Kind::Adguard, "update", Some(id)) => match method {
-                "POST" => self.update_rule(provider, id),
-                _ => Reply::empty(405),
-            },
-            _ => Reply::not_found(),
-        }
-    }
-
-    // ----- domain_set_light -------------------------------------------------
-
-    async fn light_show(&self, provider: &Provider, query: &str) -> Reply {
-        let spec = provider.light.clone().expect("light provider");
-        let rules = match on_build_thread(move || providers::load_light(&spec, None)).await {
-            Ok(Ok(rules)) => rules,
-            Ok(Err(error)) => return Reply::error(500, &error.to_string()),
-            Err(error) => return Reply::error(500, &error.to_string()),
-        };
-        let mut search = String::new();
-        let (mut limit, mut offset) = (0_i64, 0_i64);
-        for pair in query.split('&') {
-            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            let value = decode_query(value);
-            match key {
-                "q" if search.is_empty() => search = value.to_lowercase(),
-                "limit" if limit == 0 => limit = value.parse().unwrap_or(0),
-                "offset" if offset == 0 => offset = value.parse().unwrap_or(0),
-                _ => {}
-            }
-        }
-        let limit = if limit <= 0 { 100 } else { limit };
-        let offset = offset.max(0);
-        let mut body = String::new();
-        let (mut matched, mut sent) = (0_i64, 0_i64);
-        for entry in &rules {
-            if !search.is_empty() && !entry.rule.to_lowercase().contains(&search) {
-                continue;
-            }
-            matched += 1;
-            if matched <= offset {
-                continue;
-            }
-            body.push_str(&entry.rule);
-            body.push('\n');
-            sent += 1;
-            if sent >= limit {
-                break;
-            }
-        }
-        Reply::text(200, body)
-    }
-
-    async fn light_save(&self, provider: &Provider) -> Reply {
-        let spec = provider.light.clone().expect("light provider");
-        if spec.files.is_empty() || spec.files[0].0 != 0 {
-            return Reply::error(500, "no file configured");
-        }
-        if spec.writable_file().is_none() {
-            return Reply::error(400, "no txt file configured, cannot post");
-        }
-        let _guard = provider.mutate.lock().await;
-        let result = on_build_thread(move || {
-            let rules = providers::load_light(&spec, None).map_err(|e| e.to_string())?;
-            let file = spec.writable_file().expect("checked").to_path_buf();
-            write_atomically(&file, &rule_lines(rules.iter().map(|e| e.rule.as_str())))
-                .map_err(|e| e.to_string())
-        })
-        .await;
-        match result {
-            Ok(Ok(())) => Reply::empty(200),
-            Ok(Err(error)) => Reply::error(500, &error),
-            Err(error) => Reply::error(500, &error.to_string()),
-        }
-    }
-
-    async fn light_post(&self, provider: &Rc<Provider>, body: &[u8]) -> Reply {
-        #[derive(serde::Deserialize)]
-        struct Payload {
-            #[serde(default)]
-            values: Option<Vec<String>>,
-        }
-        let Ok(payload) = serde_json::from_slice::<Payload>(body) else {
-            return Reply::error(400, "invalid JSON");
-        };
-        let spec = provider.light.clone().expect("light provider");
-        let Some(file) = spec.writable_file().map(Path::to_path_buf) else {
-            return Reply::error(400, "no txt file configured, cannot post");
-        };
-        // Values are normalized like file lines (the approved `domain_set` A1
-        // rule), so the published list equals what a restart reads back.
-        let values: Vec<String> = payload
-            .values
-            .unwrap_or_default()
+        let spec = provider
+            .light
+            .clone()
+            .ok_or((500, "not a domain_set_light".to_owned()))?;
+        let file = spec
+            .writable_file()
+            .map(Path::to_path_buf)
+            .ok_or((500, "no txt file configured".to_owned()))?;
+        let values: Vec<String> = values
             .into_iter()
             .filter(|value| !value.contains('\n') && !value.contains('\r'))
             .map(|value| value.trim().to_owned())
@@ -772,310 +533,53 @@ impl RuleSources {
             .iter()
             .find_map(|rule| providers::rule_refusal(&provider.tag, rule))
         {
-            return Reply::error(400, &reason);
+            return Err((400, reason));
         }
-        let count = values.len();
         let guard = provider.mutate.lock().await;
         let bytes = rule_lines(values.iter().map(String::as_str));
         match tokio::task::spawn_blocking(move || write_atomically(&file, &bytes)).await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => return Reply::error(500, &error.to_string()),
-            Err(error) => return Reply::error(500, &error.to_string()),
+            Ok(Err(error)) => return Err((500, error.to_string())),
+            Err(error) => return Err((500, error.to_string())),
         }
         drop(guard);
-        let ctx = self.ctx();
-        let provider = Rc::clone(provider);
-        self.spawn(async move { changed(&ctx, &provider).await });
-        Reply::text(
-            200,
-            format!("domain_set_light replaced with {count} entries"),
-        )
+        changed(&self.ctx(), provider).await;
+        Ok(values)
     }
 
-    // ----- sd_set_light / si_set / adguard_rule -----------------------------
+    // ----- sd_set_light / si_set / adguard_rule (atom builtin `refresh`) ----
 
-    fn list(&self, provider: &Provider) -> Reply {
-        let mut sources = provider.owner().sources.borrow().clone();
-        sources.sort_by(|a, b| a.name.cmp(&b.name));
-        if provider.kind == Kind::Adguard {
-            let views: Vec<_> = sources.iter().map(|e| rule_view(e, false)).collect();
-            Reply::json(200, "application/json", &views)
-        } else {
-            let views: Vec<_> = sources
+    /// Downloads every enabled source of a rule provider again and rebuilds
+    /// its matchers before this returns. `(sources, updated)`: how many
+    /// sources were downloaded and how many of them replaced their file (a
+    /// failed download keeps the old file and is logged).
+    pub(crate) async fn refresh(&self, provider: &Rc<Provider>) -> Result<(usize, usize), String> {
+        if self.closed.get() {
+            return Err("host is applying configuration".to_owned());
+        }
+        if provider.manifest.is_none() {
+            return Err("this set has no downloadable sources".to_owned());
+        }
+        let keys: Vec<String> = {
+            let sources = provider.owner().sources.borrow();
+            sources
                 .iter()
-                .map(|e| source_view(e, provider.kind))
-                .collect();
-            Reply::json(200, JSON_UTF8, &views)
-        }
-    }
-
-    async fn put_source(&self, provider: &Rc<Provider>, name: String, body: &[u8]) -> Reply {
-        let schema = provider.owner().spec.schema;
-        let request = match providers::parse_source_object(body, schema) {
-            Ok(request) => request,
-            Err(error) if is_format_error(&error) => {
-                return Reply::json_error(400, &error);
-            }
-            Err(_) => return Reply::json_error(400, "invalid request body"),
+                .filter(|entry| entry.enabled)
+                .map(|entry| provider.key(entry))
+                .collect()
         };
-        if provider.kind == Kind::Sd
-            && (request.files.trim().is_empty() || request.url.trim().is_empty())
-        {
-            return Reply::json_error(400, "'files' and 'url' fields are required");
-        }
-        if provider.kind == Kind::Sd && request.enable_regexp {
-            // Turning regexps on must not load a rule this host refuses at
-            // start (the download check only covered what was enabled then).
-            let spec = provider.owner().spec.clone();
-            let source = SourceEntry {
-                enabled: true,
-                ..request.clone()
-            };
-            let tag = provider.tag.clone();
-            let refusal = on_build_thread(move || {
-                providers::load_sd(&spec, std::slice::from_ref(&source), None)
-                    .0
-                    .iter()
-                    .find_map(|entry| providers::rule_refusal(&tag, &entry.rule))
-            })
-            .await;
-            if let Ok(Some(reason)) = refusal {
-                return Reply::json_error(400, &reason);
-            }
-        }
-        let guard = provider.mutate.lock().await;
-        let mut sources = provider.owner().sources.borrow().clone();
-        let (stored, status) = match sources.iter_mut().find(|e| e.name == name) {
-            Some(existing) => {
-                existing.kind = request.kind;
-                existing.files = request.files;
-                existing.url = request.url;
-                existing.format = request.format;
-                existing.category = request.category;
-                existing.enabled = request.enabled;
-                if provider.kind == Kind::Sd {
-                    existing.enable_regexp = request.enable_regexp;
-                }
-                existing.auto_update = request.auto_update;
-                existing.update_interval_hours = request.update_interval_hours;
-                (existing.clone(), 200)
-            }
-            None => {
-                let created = SourceEntry {
-                    name: name.clone(),
-                    rule_count: 0,
-                    last_updated: None,
-                    enable_regexp: provider.kind == Kind::Sd && request.enable_regexp,
-                    ..request
-                };
-                sources.push(created.clone());
-                (created, 201)
-            }
-        };
-        if let Err(reply) = save_manifest(provider, sources, "failed to save config").await {
-            return reply;
-        }
-        drop(guard);
-        let fetch = !stored.files.trim().is_empty() && !stored.url.trim().is_empty();
         let ctx = self.ctx();
-        let job_provider = Rc::clone(provider);
-        self.spawn(async move {
-            if fetch {
-                download_many(&ctx, &job_provider, vec![name]).await;
+        let mut updated = 0;
+        for key in &keys {
+            if download_source(&ctx, provider, key.clone()).await {
+                updated += 1;
             }
-            changed(&ctx, &job_provider).await;
-        });
-        Reply::json(status, JSON_UTF8, &source_view(&stored, provider.kind))
+        }
+        if updated > 0 {
+            changed(&ctx, provider).await;
+        }
+        Ok((keys.len(), updated))
     }
-
-    async fn delete_source(&self, provider: &Rc<Provider>, key: &str) -> Reply {
-        let adguard = provider.kind == Kind::Adguard;
-        let guard = provider.mutate.lock().await;
-        let mut sources = provider.owner().sources.borrow().clone();
-        let Some(index) = sources.iter().position(|e| provider.key(e) == key) else {
-            return if adguard {
-                Reply::json_error(404, "Rule not found")
-            } else {
-                Reply::json_error(404, "source not found")
-            };
-        };
-        let removed = sources.remove(index);
-        let message = if adguard {
-            "Failed to save config"
-        } else {
-            "failed to save config"
-        };
-        if let Err(reply) = save_manifest(provider, sources, message).await {
-            return reply;
-        }
-        // The manifest no longer names the file, so removing it last can
-        // never leave a manifest entry without its rules. A file another
-        // source still reads is kept (the reference would delete it).
-        let file = provider.owner().spec.source_file(&removed);
-        if adguard || !removed.files.is_empty() {
-            let tag = provider.tag.clone();
-            let in_use = self.files_in_use();
-            let _ = tokio::task::spawn_blocking(move || {
-                if in_use.iter().any(|other| same_file(other, &file)) {
-                    return;
-                }
-                if let Err(error) = std::fs::remove_file(&file)
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    crate::diag::warn_line!(
-                        "{tag}: failed to delete rule file {}: {error}",
-                        file.display()
-                    );
-                }
-            })
-            .await;
-        }
-        drop(guard);
-        let ctx = self.ctx();
-        let provider = Rc::clone(provider);
-        self.spawn(async move { changed(&ctx, &provider).await });
-        Reply::empty(204)
-    }
-
-    fn update_source(&self, provider: &Rc<Provider>, name: String) -> Reply {
-        if provider.find(&name).is_none() {
-            return Reply::json_error(404, &format!("source '{name}' not found"));
-        }
-        let message = format!("update process for '{name}' started in the background");
-        let ctx = self.ctx();
-        let provider = Rc::clone(provider);
-        self.spawn(async move {
-            if download_many(&ctx, &provider, vec![name]).await {
-                changed(&ctx, &provider).await;
-            }
-        });
-        Reply::json(202, JSON_UTF8, &serde_json::json!({ "message": message }))
-    }
-
-    fn adguard_request(body: &[u8]) -> Result<SourceEntry, Reply> {
-        let mut request = match providers::parse_source_object(body, Schema::Adguard) {
-            Ok(request) => request,
-            Err(error) if is_format_error(&error) => {
-                return Err(Reply::json_error(400, &error));
-            }
-            Err(_) => return Err(Reply::json_error(400, "Invalid request body")),
-        };
-        request.name = request.name.trim().to_owned();
-        request.url = request.url.trim().to_owned();
-        if request.name.is_empty() || request.url.is_empty() {
-            return Err(Reply::json_error(400, "Name and URL are required"));
-        }
-        if request.update_interval_hours < 0 {
-            return Err(Reply::json_error(
-                400,
-                "UpdateIntervalHours cannot be negative",
-            ));
-        }
-        Ok(request)
-    }
-
-    async fn create_rule(&self, provider: &Rc<Provider>, body: &[u8]) -> Reply {
-        let mut rule = match Self::adguard_request(body) {
-            Ok(rule) => rule,
-            Err(reply) => return reply,
-        };
-        rule.id = match new_uuid() {
-            Ok(id) => id,
-            Err(error) => return Reply::json_error(500, &error),
-        };
-        rule.last_updated = None;
-        let guard = provider.mutate.lock().await;
-        let mut sources = provider.owner().sources.borrow().clone();
-        sources.push(rule.clone());
-        if let Err(reply) = save_manifest(provider, sources, "Failed to save config").await {
-            return reply;
-        }
-        drop(guard);
-        if rule.enabled {
-            let ctx = self.ctx();
-            let job_provider = Rc::clone(provider);
-            let id = rule.id.clone();
-            self.spawn(async move {
-                download_many(&ctx, &job_provider, vec![id]).await;
-                changed(&ctx, &job_provider).await;
-            });
-        }
-        // The reference encodes the new rule by value, so the zero time is
-        // printed here (unlike the list and the manifest).
-        Reply::json(201, "application/json", &rule_view(&rule, true))
-    }
-
-    async fn put_rule(&self, provider: &Rc<Provider>, id: &str, body: &[u8]) -> Reply {
-        let request = match Self::adguard_request(body) {
-            Ok(rule) => rule,
-            Err(reply) => return reply,
-        };
-        let guard = provider.mutate.lock().await;
-        let mut sources = provider.owner().sources.borrow().clone();
-        let Some(rule) = sources.iter_mut().find(|e| e.id == id) else {
-            return Reply::json_error(404, "Rule not found");
-        };
-        rule.name = request.name;
-        rule.url = request.url;
-        rule.format = request.format;
-        rule.category = request.category;
-        rule.enabled = request.enabled;
-        rule.auto_update = request.auto_update;
-        rule.update_interval_hours = request.update_interval_hours;
-        let stored = rule.clone();
-        if let Err(reply) = save_manifest(provider, sources, "Failed to save config").await {
-            return reply;
-        }
-        drop(guard);
-        let ctx = self.ctx();
-        let job_provider = Rc::clone(provider);
-        self.spawn(async move { changed(&ctx, &job_provider).await });
-        Reply::json(200, "application/json", &rule_view(&stored, false))
-    }
-
-    fn update_all_rules(&self, provider: &Rc<Provider>) -> Reply {
-        let ids: Vec<String> = provider
-            .owner()
-            .sources
-            .borrow()
-            .iter()
-            .filter(|e| e.enabled)
-            .map(|e| e.id.clone())
-            .collect();
-        let ctx = self.ctx();
-        let provider = Rc::clone(provider);
-        self.spawn(async move {
-            download_many(&ctx, &provider, ids).await;
-            changed(&ctx, &provider).await;
-        });
-        Reply::text(
-            202,
-            "Update process for enabled rules has been started in the background.\n".to_owned(),
-        )
-    }
-
-    fn update_rule(&self, provider: &Rc<Provider>, id: String) -> Reply {
-        if provider.find(&id).is_none() {
-            return Reply::json_error(404, "Rule not found");
-        }
-        let ctx = self.ctx();
-        let provider = Rc::clone(provider);
-        self.spawn(async move {
-            if download_many(&ctx, &provider, vec![id]).await {
-                changed(&ctx, &provider).await;
-            }
-        });
-        Reply::text(
-            202,
-            "Update process for rule has been started in the background.\n".to_owned(),
-        )
-    }
-}
-
-/// Whether a request body error is about `format` / `category` (reported as it
-/// is, other body errors get the reference wording).
-fn is_format_error(error: &str) -> bool {
-    error.contains("unknown format") || error == providers::CATEGORY_REQUIRED
 }
 
 // ----- JSON views ------------------------------------------------------------
@@ -1881,34 +1385,6 @@ pub(crate) async fn on_build_thread<T: Send + 'static>(
         .map_err(|_| "rule build thread stopped".to_owned())?
 }
 
-/// Whether two paths name the same file: the same inode when both exist
-/// (any spelling, symlink or hard link), otherwise the same normalized path.
-fn same_file(a: &Path, b: &Path) -> bool {
-    #[cfg(unix)]
-    if let (Ok(left), Ok(right)) = (std::fs::metadata(a), std::fs::metadata(b)) {
-        use std::os::unix::fs::MetadataExt;
-        return left.dev() == right.dev() && left.ino() == right.ino();
-    }
-    normalized(a) == normalized(b)
-}
-
-/// `.` and `..` removed lexically.
-fn normalized(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
-                }
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 fn rule_lines<'a>(rules: impl Iterator<Item = &'a str>) -> Vec<u8> {
     let mut bytes = Vec::new();
     for rule in rules {
@@ -1947,32 +1423,10 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
     outcome
 }
 
-fn decode_query(value: &str) -> String {
-    let value = value.replace('+', " ");
-    crate::api::decode_plugin_tag(&value).map_or(value.clone(), std::borrow::Cow::into_owned)
-}
-
 fn now_text() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| ZERO_TIME.to_owned())
-}
-
-/// A random (version 4) UUID, as the reference `uuid.New()`.
-fn new_uuid() -> Result<String, String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|error| error.to_string())?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok(format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    ))
 }
 
 /// Seconds since the Unix epoch of a manifest time (the RFC 3339 forms the
@@ -2130,36 +1584,6 @@ mod tests {
         let c = write_lock(PathBuf::from("/x/srs/c.json"));
         assert!(Arc::ptr_eq(&a, &b));
         assert!(!Arc::ptr_eq(&a, &c));
-    }
-
-    #[test]
-    fn same_file_sees_through_spellings_and_links() {
-        let root = std::env::temp_dir().join(format!("rule-sources-same-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("srs")).unwrap();
-        let file = root.join("srs/cn.srs");
-        std::fs::write(&file, b"x").unwrap();
-        assert!(same_file(&file, &root.join("srs/../srs/./cn.srs")));
-        std::fs::hard_link(&file, root.join("srs/link.srs")).unwrap();
-        assert!(same_file(&file, &root.join("srs/link.srs")));
-        std::fs::write(root.join("srs/other.srs"), b"x").unwrap();
-        assert!(!same_file(&file, &root.join("srs/other.srs")));
-        // Missing files compare by normalized spelling.
-        assert!(same_file(
-            &root.join("a/../gone.srs"),
-            &root.join("gone.srs")
-        ));
-        assert!(!same_file(&root.join("gone.srs"), &root.join("gone2.srs")));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn uuids_are_version_4() {
-        let id = new_uuid().unwrap();
-        assert_eq!(id.len(), 36);
-        assert_eq!(&id[14..15], "4");
-        assert!(matches!(&id[19..20], "8" | "9" | "a" | "b"));
-        assert_ne!(id, new_uuid().unwrap());
     }
 
     #[test]

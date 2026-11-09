@@ -3,6 +3,7 @@
 
 mod api;
 mod assembly;
+mod atom_dns_api;
 mod atom_ledger;
 mod atom_links;
 mod atom_proxy;
@@ -28,7 +29,6 @@ mod external_ui;
 mod local_time;
 mod local_url;
 mod managed;
-mod managed_ip;
 mod matchers;
 mod memory;
 mod observer;
@@ -36,7 +36,6 @@ mod plugins;
 mod policy;
 mod process_metrics;
 mod requery;
-mod restart;
 mod rewrite;
 mod route_learner;
 mod rule_binary;
@@ -44,13 +43,10 @@ mod rule_download;
 mod rule_formats;
 mod rule_sources;
 mod runtime_snapshot;
-mod settings_api;
 #[doc(hidden)]
 pub mod settings_migrate;
 mod special_groups;
-mod standard_groups_api;
 mod static_ui;
-mod system_api;
 mod tcp;
 mod transaction;
 mod udp;
@@ -79,7 +75,7 @@ pub use config::{
     compile_yaml_with_base, compile_yaml_with_roots, load_and_compile, load_yaml,
 };
 pub use diag::record_fatal;
-pub use managed::{ManagedDomainSet, ManagedSetError, PersistFault, PersistGate};
+pub use managed::{ManagedDomainSet, PersistFault, PersistGate};
 pub use memory::configure_process_memory;
 pub use observer::{
     AdmissionError, AnswerDetailsStatus, AuditAnswer, AuditClock, AuditRecord, AuditSnapshot,
@@ -90,7 +86,6 @@ pub use observer::{
     UpstreamDiagnosticSelected, UpstreamDiagnostics, UpstreamTransport,
 };
 pub use process_metrics::mark_image_start;
-pub use restart::{RestartTarget, capture as capture_restart_target, captured as restart_target};
 
 pub use tcp::{TcpServer, TcpServerError};
 pub use udp::{UdpServer, UdpServerError};

@@ -84,19 +84,9 @@ struct Control {
     management_drained: Notify,
     recovery_required: Cell<bool>,
     closed: Cell<bool>,
-    /// Deleted special-group artifacts that could not be removed yet, relative
-    /// to the configuration root. Non-fatal; the next sweep retries them.
-    pending_cleanup: RefCell<Vec<String>>,
     /// The receive buffer the kernel granted each live UDP listener (`None`
     /// when it could not be read); shown by the health endpoint.
     udp_receive_buffers: RefCell<BTreeMap<BindingKey, Option<usize>>>,
-    /// The management listener's actual address (set when it is bound).
-    api_listen: Cell<Option<std::net::SocketAddr>>,
-    /// An in-place restart was scheduled / has been requested of the supervisor.
-    restart_scheduled: Cell<bool>,
-    restart_requested: Cell<bool>,
-    /// The stop came from a termination signal, which overrides a pending restart.
-    signal_stop: Cell<bool>,
     observer: Arc<QueryObserver>,
     shutdown: RefCell<Option<atomdns_upstream_core::TransportCancellation>>,
 }
@@ -150,37 +140,15 @@ pub struct PreparedSnapshot {
     retiring_bindings: Option<BTreeSet<BindingKey>>,
 }
 
-/// Invalidated cache dumps are emptied first, followed by optional derived
-/// group YAML and the authoritative settings/group state rename.
+/// Invalidated cache dumps are emptied first, followed by the authoritative
+/// settings rename.
 pub(crate) struct FileCommit {
     path: std::path::PathBuf,
     /// Authority bytes when the candidate was built (`None`: absent).
     expected: Option<Vec<u8>>,
     bytes: Vec<u8>,
     cache_dumps: Vec<std::path::PathBuf>,
-    derived: Option<DerivedFile>,
     inputs: crate::special_groups::CandidateInputSet,
-}
-
-struct DerivedFile {
-    path: std::path::PathBuf,
-    expected: Option<Vec<u8>>,
-    bytes: Vec<u8>,
-}
-
-impl DerivedFile {
-    fn of(config: &CompiledConfig) -> Result<Option<Self>, ApplyFailure> {
-        let Some(profile) = &config.standard_groups else {
-            return Ok(None);
-        };
-        let path = profile.base.join(crate::config::standard_groups::GENERATED);
-        let expected = read_optional(&path)?;
-        Ok(Some(Self {
-            path,
-            expected,
-            bytes: profile.generated.clone(),
-        }))
-    }
 }
 
 fn read_optional(path: &std::path::Path) -> Result<Option<Vec<u8>>, ApplyFailure> {
@@ -197,11 +165,6 @@ impl FileCommit {
             if read_optional(path)?.map(|bytes| crate::special_groups::sha256(&bytes)) != *expected
             {
                 return Err(ApplyFailure::Conflict(path.clone()));
-            }
-        }
-        if let Some(derived) = &self.derived {
-            if read_optional(&derived.path)? != derived.expected {
-                return Err(ApplyFailure::Conflict(derived.path.clone()));
             }
         }
         let current = match std::fs::read(&self.path) {
@@ -221,22 +184,7 @@ impl FileCommit {
                 })?;
             }
         }
-        if let Some(derived) = &self.derived {
-            write_durably(&derived.path, &derived.bytes)
-                .map_err(|error| ApplyFailure::Failed(error.to_string()))?;
-        }
         if let Err(error) = write_durably(&self.path, &self.bytes) {
-            if let Some(derived) = &self.derived {
-                let rollback = match &derived.expected {
-                    Some(bytes) => write_durably(&derived.path, bytes),
-                    None => std::fs::remove_file(&derived.path),
-                };
-                if let Err(rollback) = rollback {
-                    return Err(ApplyFailure::RecoveryRequired(format!(
-                        "state commit failed: {error}; derived rollback failed: {rollback}"
-                    )));
-                }
-            }
             return Err(ApplyFailure::Failed(format!(
                 "{}: {error}",
                 self.path.display()
@@ -413,12 +361,7 @@ impl RuntimeControl {
             management_drained: Notify::new(),
             recovery_required: Cell::new(false),
             closed: Cell::new(false),
-            pending_cleanup: RefCell::new(Vec::new()),
             udp_receive_buffers: RefCell::new(BTreeMap::new()),
-            api_listen: Cell::new(None),
-            restart_scheduled: Cell::new(false),
-            restart_requested: Cell::new(false),
-            signal_stop: Cell::new(false),
             observer,
             shutdown: RefCell::new(None),
         }));
@@ -527,55 +470,9 @@ impl RuntimeControl {
         self.0.recovery_required.get()
     }
 
-    /// Replaces the list of deleted-group artifacts still waiting to be removed
-    /// (relative to the configuration root; empty when nothing is pending).
-    pub(crate) fn set_pending_cleanup(&self, pending: Vec<String>) {
-        *self.0.pending_cleanup.borrow_mut() = pending;
-    }
-
-    pub(crate) fn pending_cleanup(&self) -> Vec<String> {
-        self.0.pending_cleanup.borrow().clone()
-    }
-
     /// Records the receive buffer a freshly bound UDP listener was granted.
     pub(crate) fn set_udp_receive_buffer(&self, key: BindingKey, bytes: Option<usize>) {
         self.0.udp_receive_buffers.borrow_mut().insert(key, bytes);
-    }
-
-    pub(crate) fn set_api_listen(&self, address: std::net::SocketAddr) {
-        self.0.api_listen.set(Some(address));
-    }
-
-    /// The management listener's actual address, once bound.
-    pub(crate) fn api_listen(&self) -> Option<std::net::SocketAddr> {
-        self.0.api_listen.get()
-    }
-
-    /// Schedules one in-place restart after `delay`; false when one is already scheduled.
-    /// The restart itself is the supervisor's ordinary graceful stop, after which `main`
-    /// replaces the process image (see `restart.rs`).
-    pub(crate) fn schedule_restart(&self, delay: std::time::Duration) -> bool {
-        if self.0.restart_scheduled.replace(true) {
-            return false;
-        }
-        let control = self.clone();
-        tokio::task::spawn_local(async move {
-            tokio::time::sleep(delay).await;
-            control.0.restart_requested.set(true);
-            control.stop_host();
-        });
-        true
-    }
-
-    /// Records that a termination signal started the shutdown.
-    pub(crate) fn note_signal_stop(&self) {
-        self.0.signal_stop.set(true);
-    }
-
-    /// Whether the host stopped to be restarted in place (a signal always wins).
-    #[must_use]
-    pub fn restart_requested(&self) -> bool {
-        self.0.restart_requested.get() && !self.0.signal_stop.get()
     }
 
     /// Forgets a UDP listener that is gone (served to the end, or staged and dropped unused).
@@ -611,15 +508,6 @@ impl RuntimeControl {
             ));
         }
         let current = self.0.current.borrow().clone();
-        match (&current.config.standard_groups, &config.standard_groups) {
-            (Some(old), Some(next)) if old.base == next.base => {}
-            (None, None) => {}
-            _ => {
-                return Err(AssemblyError::Runtime(
-                    "standard special-group root must remain frozen".into(),
-                ));
-            }
-        }
         if config.api != current.config.api {
             return Err(AssemblyError::Runtime("API bind must remain stable".into()));
         }
@@ -914,60 +802,8 @@ impl RuntimeControl {
             expected,
             bytes: settings.to_bytes(),
             cache_dumps: Vec::new(),
-            derived: DerivedFile::of(&config)?,
             inputs: config.compile_inputs.clone(),
         };
-        self.apply_config(config, Some(commit)).await
-    }
-
-    pub(crate) async fn apply_groups(
-        &self,
-        groups: Vec<crate::config::standard_groups::Group>,
-    ) -> Result<u64, ApplyFailure> {
-        let current = self.view();
-        let profile = current.config.standard_groups.as_ref().ok_or_else(|| {
-            ApplyFailure::Invalid("standard special groups are unavailable".into())
-        })?;
-        let reload = current
-            .config
-            .reload
-            .clone()
-            .ok_or_else(|| ApplyFailure::Invalid("file configuration is required".into()))?;
-        let state = profile.base.join(crate::config::standard_groups::STATE);
-        let expected = read_optional(&state)?;
-        if expected != profile.expected_state {
-            return Err(ApplyFailure::Conflict(state));
-        }
-        let settings = current.config.settings.clone();
-        let base = current.config.generation;
-        // The compile does not need the running view; holding it would keep a
-        // generation that another save retires meanwhile alive.
-        drop(current);
-        let mut config = self
-            .compile_candidate(base, move || {
-                crate::config::recompile_groups(&reload, &settings, &groups)
-            })
-            .await?;
-        let bytes = crate::config::standard_groups::state_bytes(
-            &config
-                .standard_groups
-                .as_ref()
-                .expect("candidate groups")
-                .groups,
-        );
-        let commit = FileCommit {
-            path: state,
-            expected,
-            bytes: bytes.clone(),
-            cache_dumps: Vec::new(),
-            derived: DerivedFile::of(&config)?,
-            inputs: config.compile_inputs.clone(),
-        };
-        config
-            .standard_groups
-            .as_mut()
-            .expect("candidate groups")
-            .expected_state = Some(bytes);
         self.apply_config(config, Some(commit)).await
     }
 
@@ -1144,18 +980,6 @@ impl RuntimeControl {
                 generation,
                 reason: error.to_string(),
             });
-        }
-        // Artifacts of deleted groups are removed after publication. The
-        // committed generation is correct without that, so a failure is only
-        // reported (log and health) and retried by the next sweep.
-        let pending = self
-            .view()
-            .config
-            .standard_groups
-            .as_ref()
-            .map(crate::config::standard_groups::Profile::sweep_orphans);
-        if let Some(pending) = pending {
-            self.set_pending_cleanup(pending);
         }
         // The retired generation is freed once the last query admitted to it has
         // finished; hand its pages back right away and again after those queries
@@ -1502,101 +1326,6 @@ mod admission_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn an_ip_post_drains_before_a_stale_settings_candidate_returns_409() {
-        let (root, path) = proxy_config("native-ip-post-apply");
-        std::fs::write(root.join("ips.txt"), "192.0.2.7\n").unwrap();
-        let yaml = std::fs::read_to_string(&path).unwrap().replace(
-            "plugins:\n",
-            "plugins:\n  - tag: networks\n    type: ip_set\n    args: {files: [ips.txt]}\n",
-        );
-        std::fs::write(&path, yaml).unwrap();
-        let host = crate::HostAssembly::from_config_file_in(&path, None).unwrap();
-        host.block_on(async {
-            let control = host.control();
-            let view = control.view();
-            let gate = crate::managed::PersistGate::new();
-            view.config.ip_sets[0]
-                .management
-                .as_ref()
-                .unwrap()
-                .inject_gate(gate.clone());
-            let writing = tokio::task::spawn_local({
-                let control = control.clone();
-                async move {
-                    crate::api::local_plugin_request(
-                        &control,
-                        "POST",
-                        "/plugins/networks/post",
-                        br#"{"values":["198.51.100.7"]}"#,
-                    )
-                    .await
-                    .unwrap()
-                }
-            });
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                while !gate.arrived() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(control.0.active_management.get(), 1);
-            let applying = tokio::task::spawn_local({
-                let control = control.clone();
-                async move {
-                    let view = control.view();
-                    crate::settings_api::handle(
-                        Some(&control),
-                        &view.config,
-                        "POST",
-                        "/api/v1/overrides",
-                        br#"{"socks5":"192.0.2.2:1080"}"#,
-                    )
-                    .await
-                    .unwrap()
-                }
-            });
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                while !control.0.management_only.get() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            assert!(
-                !applying.is_finished(),
-                "apply waits for the admitted IP write"
-            );
-            gate.release();
-            assert_eq!(writing.await.unwrap().0, 200);
-            let refused = applying.await.unwrap();
-            assert_eq!(
-                refused.status,
-                409,
-                "{}",
-                String::from_utf8_lossy(&refused.body)
-            );
-            assert!(String::from_utf8_lossy(&refused.body).contains("ips.txt"));
-            assert_eq!(control.generation(), 0);
-            assert_eq!(
-                control.view().config.ip_sets[0]
-                    .management
-                    .as_ref()
-                    .unwrap()
-                    .show(),
-                "198.51.100.7/32\n"
-            );
-            assert_eq!(
-                std::fs::read_to_string(root.join("ips.txt")).unwrap(),
-                "198.51.100.7/32\n"
-            );
-            assert!(!root.join("webinfo/settings.json").exists());
-            control.close().await.unwrap();
-        });
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     /// A candidate built from an older view is refused when another change was
     /// published while it compiled (a group save queued behind a settings save
     /// would otherwise publish the old settings with the new file's fingerprint).
@@ -1810,7 +1539,6 @@ mod file_commit_tests {
             expected: expected.map(<[u8]>::to_vec),
             bytes: b"new".to_vec(),
             cache_dumps: vec![dir.join("cache/a.gz")],
-            derived: None,
             inputs: crate::special_groups::CandidateInputSet::default(),
         }
     }

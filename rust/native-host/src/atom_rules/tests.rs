@@ -89,6 +89,61 @@ fn default_table_sends_lan_direct_and_blocks_ads() {
     assert_eq!(bare.rules().1.len(), 1);
 }
 
+/// The corrections of the geosite lists follow the ads rule (atom step 6):
+/// a name in `cusnocn` goes to Final, one in `cuscn` direct; ahead of them
+/// the LAN and ads rules still win.
+#[test]
+fn default_table_carries_the_geosite_corrections_when_configured() {
+    const CUSNOCN: u64 = 1 << 15;
+    const CUSCN: u64 = 1 << 13;
+    let rules = AtomRules::load(
+        Path::new(""),
+        MARKS,
+        None,
+        String::new(),
+        vec![
+            ("adguard".to_owned(), BuiltinSet::Mark(ADS)),
+            ("cuscn".to_owned(), BuiltinSet::Mark(CUSCN)),
+            ("cusnocn".to_owned(), BuiltinSet::Mark(CUSNOCN)),
+        ],
+        None,
+    )
+    .unwrap();
+    let list = rules.rules().1;
+    assert_eq!(
+        list.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+        ["r-lan", "r-ads", "r-cusnocn", "r-cuscn"]
+    );
+    let action = |flags: u64| rules.test("x.example", None, flags).map(|(_, r)| r.action);
+    assert_eq!(action(CUSNOCN), Some(proxy("final")));
+    assert_eq!(action(CUSCN), Some(Action::Direct));
+    assert_eq!(action(CUSNOCN | ADS), Some(Action::Block), "ads first");
+    assert_eq!(
+        action(CUSNOCN | CUSCN),
+        Some(proxy("final")),
+        "the proxy correction first"
+    );
+    assert_eq!(action(0), None);
+    // Only the configured ones are installed.
+    let only = AtomRules::load(
+        Path::new(""),
+        MARKS,
+        None,
+        String::new(),
+        vec![("cuscn".to_owned(), BuiltinSet::Mark(CUSCN))],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        only.rules()
+            .1
+            .iter()
+            .map(|rule| rule.id.as_str())
+            .collect::<Vec<_>>(),
+        ["r-lan", "r-cuscn"]
+    );
+}
+
 #[test]
 fn first_enabled_match_wins_and_move_changes_it() {
     let rules = owner(Path::new(""));

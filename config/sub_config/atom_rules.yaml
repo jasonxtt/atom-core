@@ -3,7 +3,8 @@
 # ==============================================================================
 # 规则本身不写在这里：存在 webinfo/atom_rules.json，由管理 API /api/v1/atom/rules 增删改查、拖动排序；
 # 自定义规则集（远程 URL / 本地列表）存在 webinfo/atom_rulesets.json 和 webinfo/atom_rulesets/<id>-<revision>.txt，
-# 由 /api/v1/atom/rulesets 管理。没有 atom_rules.json 时使用默认规则表：局域网和私有域名 → 直连，广告 → 屏蔽。
+# 由 /api/v1/atom/rulesets 管理。没有 atom_rules.json 时使用默认规则表：局域网和私有域名 → 直连，广告 → 屏蔽，
+# 代理修正（cusnocn）→ 代理到 Final，直连修正（cuscn）→ 直连。
 #
 # 主流程（config_custom.yaml）在系统固定项（重写、类型屏蔽、DDNS）之后执行 $atom_rules：
 # 第一条命中的规则给查询打上动作标记，主流程按标记分派：
@@ -14,7 +15,8 @@
 #
 # builtin：规则的 ruleset 条件可以直接引用的内置集合。
 #   adguard 是 adguard_rule（sub_config/adguard.yaml），按它自己的屏蔽/放行规则匹配；
-#   geosite_cn、geosite_no_cn 是 unified_matcher1 打标的名单，按 mapper 给它们打的 fast_mark 判断（所以 $atom_rules 必须在 $unified_matcher1 之后）。
+#   geosite_cn、geosite_no_cn、cuscn、cusnocn 是 unified_matcher1 打标的名单，按 mapper 给它们打的 fast_mark 判断
+#   （所以 $atom_rules 必须在 $unified_matcher1 之后）。它们都可以用 POST /api/v1/atom/rulesets/{id}/refresh 重新下载。
 #
 # singbox：本机 sing-box 怎么运行（atom 设计文档第 5、6 节）。节点、节点组、Final 和 sing-box 设置存在
 # webinfo/atom_proxy.json，由 /api/v1/atom/nodes、groups、final、settings 管理；atom 完整生成 sing-box
@@ -36,7 +38,7 @@ plugins:
     args:
       marks: {proxy: 41, direct: 42, block: 40}
       mapper: unified_matcher1
-      builtin: [adguard, geosite_cn, geosite_no_cn]
+      builtin: [adguard, geosite_cn, geosite_no_cn, cuscn, cusnocn]
       proxy: $main_proxy                        #下载远程规则集用的代理；定义: sub_config/settings.yaml
       singbox:
         binary: /usr/local/bin/sing-box

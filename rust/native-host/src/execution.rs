@@ -6792,7 +6792,6 @@ plugins:
             effective_upstreams: Default::default(),
             yaml_defaults: Default::default(),
             reload: None,
-            standard_groups: None,
             compile_inputs: crate::special_groups::CandidateInputSet::default(),
             sequence: SequenceConfig {
                 tag: "root".to_owned(),
@@ -6908,7 +6907,6 @@ plugins:
                 effective_upstreams: Default::default(),
                 yaml_defaults: Default::default(),
                 reload: None,
-                standard_groups: None,
                 compile_inputs: crate::special_groups::CandidateInputSet::default(),
                 sequence: SequenceConfig {
                     tag: "root".to_owned(),
@@ -7454,7 +7452,6 @@ plugins:
             effective_upstreams: Default::default(),
             yaml_defaults: Default::default(),
             reload: None,
-            standard_groups: None,
             compile_inputs: crate::special_groups::CandidateInputSet::default(),
             sequence: SequenceConfig {
                 tag: "root".to_owned(),
@@ -7584,7 +7581,6 @@ plugins:
                 effective_upstreams: Default::default(),
                 yaml_defaults: Default::default(),
                 reload: None,
-                standard_groups: None,
                 compile_inputs: crate::special_groups::CandidateInputSet::default(),
                 sequence: SequenceConfig {
                     tag: "root".to_owned(),
@@ -7760,7 +7756,6 @@ plugins:
             effective_upstreams: Default::default(),
             yaml_defaults: Default::default(),
             reload: None,
-            standard_groups: None,
             compile_inputs: crate::special_groups::CandidateInputSet::default(),
             sequence: SequenceConfig {
                 tag: "root".to_owned(),

@@ -250,102 +250,6 @@ fn free_udp_port() -> u16 {
 }
 
 #[test]
-fn management_routes_match_the_go_visible_contract() {
-    let fixture = fixture("routes", free_udp_port(), free_tcp_port());
-    let assembly = assembly_for(&fixture);
-    let bound = assembly
-        .block_on(assembly.bind_host())
-        .expect("bound host listeners");
-    let api = bound.api_addr().expect("management listener address");
-    let shutdown = TransportCancellation::new();
-
-    let result = assembly.block_on(async {
-        let task = tokio::task::spawn_local(bound.serve(shutdown.clone()));
-
-        // `/show` returns accepted rules, one per line, with Go's content type.
-        let show = http_request(api, &get("/plugins/blocklist/show")).await;
-        assert_eq!(show.status, 200, "{show:?}");
-        assert_eq!(
-            show.header("content-type"),
-            Some("text/plain; charset=utf-8")
-        );
-        assert_eq!(show.body, "a.example\nb.example\n");
-
-        // The UI sends `?limit=10000`; Go ignores it and so must the native
-        // route.
-        let limited = http_request(api, &get("/plugins/blocklist/show?limit=10000")).await;
-        assert_eq!(limited.status, 200);
-        assert_eq!(limited.body, "a.example\nb.example\n");
-
-        // The strict fixture configures no special groups, so `[]` is the
-        // true state, not a stand-in for group management.
-        let groups = http_request(api, &get("/api/v1/special-groups")).await;
-        assert_eq!(groups.status, 200);
-        assert_eq!(groups.header("content-type"), Some("application/json"));
-        assert_eq!(groups.body, "[]\n");
-
-        // POST validates each value, skips the invalid one, persists, publishes
-        // and reports the accepted count.
-        let posted = http_request(
-            api,
-            &post(
-                "/plugins/blocklist/post",
-                r#"{"values":["c.example","regexp:["]}"#,
-            ),
-        )
-        .await;
-        assert_eq!(posted.status, 200, "{posted:?}");
-        assert_eq!(posted.body, "domain_set replaced with 1 entries");
-        let after = http_request(api, &get("/plugins/blocklist/show")).await;
-        assert_eq!(after.body, "c.example\n");
-        assert_eq!(fixture.read("rules/blocklist.txt"), "c.example\n");
-
-        // GET `/save` persists the current generation with an empty 200 body.
-        let saved = http_request(api, &get("/plugins/blocklist/save")).await;
-        assert_eq!(saved.status, 200);
-        assert_eq!(saved.body, "");
-
-        // Malformed JSON keeps the previous file and generation.
-        let invalid = http_request(api, &post("/plugins/blocklist/post", "{")).await;
-        assert_eq!(invalid.status, 400);
-        assert_eq!(invalid.body, "invalid JSON\n");
-        assert_eq!(
-            fixture.read("rules/blocklist.txt"),
-            "c.example\n",
-            "an invalid POST must not touch the file"
-        );
-
-        // Unknown tags and unknown paths fail explicitly.
-        let unknown = http_request(api, &get("/plugins/absent/show")).await;
-        assert_eq!(unknown.status, 404);
-        assert_eq!(unknown.body, "404 page not found\n");
-        let unknown_path = http_request(api, &get("/nope")).await;
-        assert_eq!(unknown_path.status, 404);
-
-        // A configured but ineligible profile is never a management target.
-        let ineligible = http_request(api, &get("/plugins/exps_only/show")).await;
-        assert_eq!(ineligible.status, 400, "{ineligible:?}");
-        assert!(
-            ineligible.body.contains("exps_only"),
-            "the ineligible tag must be named: {}",
-            ineligible.body
-        );
-        let ineligible_post =
-            http_request(api, &post("/plugins/exps_only/post", r#"{"values":[]}"#)).await;
-        assert_eq!(ineligible_post.status, 400);
-
-        // A registered path with a wrong method is 405.
-        let wrong_method = http_request(api, &post("/plugins/blocklist/show", "")).await;
-        assert_eq!(wrong_method.status, 405, "{wrong_method:?}");
-
-        shutdown.cancel();
-        task.await.expect("supervisor task")
-    });
-
-    result.expect("supervisor shutdown is clean");
-}
-
-#[test]
 fn audit_v1_controls_use_real_http_and_dns_and_persist_capacity() {
     let fixture = fixture("audit-v1", free_udp_port(), free_tcp_port());
     let assembly = audit_assembly_for(&fixture);
@@ -609,8 +513,8 @@ fn one_shutdown_scope_releases_both_listeners_for_rebind() {
         .expect("dns client task");
         assert_eq!(rcode(&response), 3);
 
-        let show = http_request(api, &get("/plugins/blocklist/show")).await;
-        assert_eq!(show.status, 200);
+        let metrics = http_request(api, &get("/metrics")).await;
+        assert_eq!(metrics.status, 200);
 
         shutdown.cancel();
         task.await.expect("supervisor task")
@@ -679,12 +583,10 @@ fn a_running_side_failure_cancels_and_joins_the_other_listener() {
         let task = tokio::task::spawn_local(bound.serve(shutdown.clone()));
         // The first request is served; the next accepted connection makes the
         // listener fail, so the supervisor must cancel and join the DNS side.
-        let first = http_request(api, &get("/plugins/blocklist/show")).await;
+        let first = http_request(api, &get("/metrics")).await;
         assert_eq!(first.status, 200);
         if let Ok(mut stream) = tokio::net::TcpStream::connect(api).await {
-            let _ = stream
-                .write_all(get("/plugins/blocklist/show").as_bytes())
-                .await;
+            let _ = stream.write_all(get("/metrics").as_bytes()).await;
             let _ = stream.shutdown().await;
         }
         task.await.expect("supervisor task")
@@ -697,142 +599,6 @@ fn a_running_side_failure_cancels_and_joins_the_other_listener() {
     // The supervisor must have joined the DNS side and released both sockets.
     StdUdpSocket::bind(dns).expect("the DNS socket must be released");
     StdTcpListener::bind(api).expect("the management socket must be released");
-}
-
-#[test]
-fn a_tag_that_is_not_mounted_is_404_before_any_method_decision() {
-    let fixture = fixture("unknown-tag-methods", free_udp_port(), free_tcp_port());
-    let assembly = assembly_for(&fixture);
-    let bound = assembly
-        .block_on(assembly.bind_host())
-        .expect("bound host listeners");
-    let api = bound.api_addr().expect("management listener address");
-    let shutdown = TransportCancellation::new();
-
-    let result = assembly.block_on(async {
-        let task = tokio::task::spawn_local(bound.serve(shutdown.clone()));
-
-        // Go mounts `/plugins/{tag}` only for a configured tag, so a tag with no
-        // mount is 404 whatever the method is.
-        for (method, path) in [
-            ("POST", "/plugins/absent/show"),
-            ("GET", "/plugins/absent/post"),
-            ("DELETE", "/plugins/absent/save"),
-            ("POST", "/plugins/absent/post"),
-        ] {
-            let response = http_request(api, &raw(method, path)).await;
-            assert_eq!(
-                response.status, 404,
-                "{method} {path} must be 404 because the tag is not mounted: {response:?}"
-            );
-            assert_eq!(response.body, "404 page not found\n");
-        }
-
-        // A mounted tag with a wrong method is 405, and so is a mounted but
-        // ineligible tag: the route exists, the method does not.
-        let wrong_on_managed = http_request(api, &post("/plugins/blocklist/show", "")).await;
-        assert_eq!(wrong_on_managed.status, 405, "{wrong_on_managed:?}");
-        let wrong_on_ineligible = http_request(api, &raw("GET", "/plugins/exps_only/post")).await;
-        assert_eq!(wrong_on_ineligible.status, 405, "{wrong_on_ineligible:?}");
-
-        // A mounted tag with an unknown action has no route either.
-        let unknown_action = http_request(api, &raw("GET", "/plugins/blocklist/nope")).await;
-        assert_eq!(unknown_action.status, 404);
-
-        // The collection route accepts GET and POST, so DELETE is the wrong method.
-        let group_wrong_method = http_request(api, &raw("DELETE", "/api/v1/special-groups")).await;
-        assert_eq!(group_wrong_method.status, 405);
-
-        shutdown.cancel();
-        task.await.expect("supervisor task")
-    });
-    result.expect("supervisor shutdown is clean");
-}
-
-#[test]
-fn a_writable_file_shared_by_two_tags_is_never_managed() {
-    let fixture = Fixture::new("shared-file-api");
-    fixture.write("rules/shared.txt", "shared.example\n");
-    let yaml = format!(
-        r#"log:
-  level: error
-api:
-  http: "127.0.0.1:{}"
-plugins:
-  - tag: sequence_main
-    type: sequence
-    args:
-      - matches: qname $first
-        exec: reject 3
-      - exec: reject 0
-  - tag: first
-    type: domain_set
-    args:
-      files:
-        - rules/shared.txt
-  - tag: second
-    type: domain_set
-    args:
-      files:
-        - rules/shared.txt
-  - tag: forward_main
-    type: forward
-    args:
-      upstreams:
-        - addr: "udp://127.0.0.1:25999"
-  - tag: listener
-    type: udp_server
-    args:
-      entry: sequence_main
-      listen: "127.0.0.1:{}"
-      enable_audit: false
-"#,
-        free_tcp_port(),
-        free_udp_port()
-    );
-    fixture.write("config.yaml", &yaml);
-    let assembly = assembly_for(&fixture);
-    let bound = assembly
-        .block_on(assembly.bind_host())
-        .expect("bound host listeners");
-    let api = bound.api_addr().expect("management listener address");
-    let shutdown = TransportCancellation::new();
-
-    let result = assembly.block_on(async {
-        let task = tokio::task::spawn_local(bound.serve(shutdown.clone()));
-
-        // Both conflicting tags are rejected explicitly on every management
-        // route, and the shared file is never written through the API.
-        for tag in ["first", "second"] {
-            let show = http_request(api, &get(&format!("/plugins/{tag}/show"))).await;
-            assert_eq!(show.status, 400, "{show:?}");
-            assert!(
-                show.body.contains("shared"),
-                "the rejection must name the shared file: {}",
-                show.body
-            );
-            let save = http_request(api, &get(&format!("/plugins/{tag}/save"))).await;
-            assert_eq!(save.status, 400, "{save:?}");
-            let post = http_request(
-                api,
-                &post(
-                    &format!("/plugins/{tag}/post"),
-                    r#"{"values":["x.example"]}"#,
-                ),
-            )
-            .await;
-            assert_eq!(post.status, 400, "{post:?}");
-        }
-        assert_eq!(
-            fixture.read("rules/shared.txt"),
-            "shared.example\n",
-            "no shared-file write may happen"
-        );
-
-        shutdown.cancel();
-        task.await.expect("supervisor task")
-    });
-    result.expect("supervisor shutdown is clean");
 }
 
 #[test]
@@ -1288,114 +1054,4 @@ async fn exercise_ui_swaps(api: SocketAddr, fixture: &Fixture) {
         }
     }
     drop(swap);
-}
-
-#[test]
-fn capability_matrix_is_complete_and_matches_host_eligibility() {
-    for local in [true, false] {
-        let fixture = capability_fixture(local);
-        let host = assembly_for(&fixture);
-        host.block_on(async {
-            let bound = host.bind_host().await.unwrap();
-            let api = bound.api_addr().unwrap();
-            let shutdown = TransportCancellation::new();
-            let task = tokio::task::spawn_local(bound.serve(shutdown.clone()));
-            let payload: serde_json::Value =
-                serde_json::from_str(&http_request(api, &get("/api/v1/capabilities")).await.body)
-                    .unwrap();
-            assert_eq!(payload["schema_version"], 1);
-            assert_eq!(payload["runtime"], "rust");
-            assert_eq!(payload["special_groups"]["enabled"], false);
-            assert_eq!(payload["endpoints"]["manual_rules"]["post"], false);
-            let ops = payload["ui_operations"]
-                .as_object()
-                .expect("complete operations");
-            assert_eq!(ops.len(), 30);
-            for id in [
-                "system.health",
-                "system.version",
-                "audit.read",
-                "audit.control",
-                "audit.capacity",
-                "query.rank",
-                "cache.inventory",
-                "cache.manage",
-                "metrics.cache",
-                "rules.local.read",
-                "groups.read",
-                "upstreams.read",
-            ] {
-                assert_eq!(ops[id]["supported"], true, "{id}");
-                assert!(ops[id]["reason"].is_null());
-            }
-            assert_eq!(ops["rules.local.manage"]["supported"], local);
-            if !local {
-                assert!(
-                    !ops["rules.local.manage"]["reason"]
-                        .as_str()
-                        .unwrap()
-                        .is_empty()
-                );
-            }
-            for id in ["groups.manage", "upstreams.manage", "rules.diversion"] {
-                assert_eq!(ops[id]["supported"], false, "{id}");
-            }
-            for id in [
-                "groups.upstreams",
-                "rules.adguard",
-                "client.aliases",
-                "flags.manage",
-                "cache.settings",
-                "learning.settings",
-                "cache.requery",
-                "lists.remembered",
-                // An in-process test host has no captured restart target (only `main` captures one).
-                "system.restart",
-                "system.domain_generation",
-                "system.global_overrides",
-            ] {
-                assert_eq!(ops[id]["supported"], false, "{id}");
-                assert!(
-                    !ops[id]["reason"].as_str().unwrap().trim().is_empty(),
-                    "{id}"
-                );
-            }
-            // System operations are real now (F-1), and so is log capture (F-2).
-            for id in ["system.webui_port", "metrics.process", "capture.logs"] {
-                assert_eq!(ops[id]["supported"], true, "{id}");
-                assert!(ops[id]["reason"].is_null());
-            }
-            for path in [
-                "/plugins/adguard/rules",
-                "/plugins/clientname",
-                "/api/v1/flags",
-                "/api/v1/cache/settings",
-                "/api/v1/learning/settings",
-                "/plugins/requery/status",
-                "/api/v1/domain-generation",
-                "/api/v1/overrides",
-            ] {
-                assert_eq!(http_request(api, &get(path)).await.status, 404, "{path}");
-            }
-            assert_eq!(
-                http_request(api, &post("/api/v1/system/restart", "{}"))
-                    .await
-                    .status,
-                501,
-                "no captured executable: refused, nothing scheduled"
-            );
-            shutdown.cancel();
-            task.await.unwrap().unwrap();
-        });
-    }
-}
-
-fn capability_fixture(local: bool) -> Fixture {
-    if local {
-        fixture("capabilities-unmanaged", free_udp_port(), free_tcp_port())
-    } else {
-        let fixture = Fixture::new("capabilities-no-local-rules");
-        fixture.write("config.yaml", &format!("log: {{level: error}}\napi: {{http: '127.0.0.1:{}'}}\nplugins:\n  - tag: default_forward\n    type: forward\n    args: {{upstreams: [{{addr: 'udp://127.0.0.1:9'}}]}}\n  - tag: main_entry\n    type: sequence\n    args: [{{exec: $default_forward}}]\n  - tag: main\n    type: udp_server\n    args: {{entry: main_entry, listen: '127.0.0.1:{}', enable_audit: true}}\n",free_tcp_port(),free_udp_port()));
-        fixture
-    }
 }

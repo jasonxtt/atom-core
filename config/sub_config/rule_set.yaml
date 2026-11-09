@@ -14,14 +14,14 @@ plugins:
         - "rule/rewrite.txt"
       dns: $sequence_local_in                    #在进程内用国内上游解析重写目标，不占用端口；定义: sub_config/forward_1.yaml
 
-#自定义国外域名列表
+#代理修正：geosite-cn 里的国外域名（atom 规则表的内置规则集 cusnocn，默认规则表把它代理到 Final）
   - tag: cusnocn
     type: sd_set_light    
     args:
       proxy: $main_proxy                         #定义: sub_config/settings.yaml
       local_config: "srs/cusnocn.json" 
 
-#自定义国内域名列表
+#直连修正：geolocation-!cn 里的国内域名（atom 规则表的内置规则集 cuscn，默认规则表把它直连）
   - tag: cuscn
     type: sd_set_light    
     args:
@@ -56,27 +56,6 @@ plugins:
       proxy: $main_proxy                         #定义: sub_config/settings.yaml
       local_config: "srs/geositenocn.json" 
 
-#自定义白名单域名列表
-  - tag: whitelist
-    type: domain_set_light
-    args:
-      files:
-        - "rule/whitelist.txt"
-
-#屏蔽域名列表
-  - tag: blocklist
-    type: domain_set_light
-    args:
-      files:
-        - "rule/blocklist.txt"
-
-#自定义强制代理域名列表
-  - tag: greylist
-    type: domain_set_light
-    args:
-      files:
-        - "rule/greylist.txt"
-
 #ddns域名列表
   - tag: ddnslist
     type: domain_set_light
@@ -84,7 +63,9 @@ plugins:
       files:
         - "rule/ddnslist.txt"
 
-#统一域名匹配,设置fast_mark和域名输出tag，屏蔽部分
+#统一域名匹配,设置fast_mark和域名输出tag
+#atom：黑名单（mark 1）、灰名单（7）、白名单（8）在第 6 步删除，用户在规则表里写屏蔽、代理、直连规则；
+#cuscn（13）、cusnocn（15）由规则表按 mark 判断（atom_rules.yaml 的 builtin），原判断里不再有它们的分支
 #学习结果（记忆直连/记忆代理/记忆无V4/记忆无V6/特殊域名）不在这里：由 route_learner（sub_config/route_learner.yaml）在求值时并入，
 #学习层的标签在前、mark 位或、命中后不设默认 mark 17
   - tag: unified_matcher1
@@ -93,21 +74,12 @@ plugins:
       default_mark: 17 
       default_tag: "未命中"
       rules:
-        - tag: blocklist
-          mark: 1 
-          output_tag: "黑名单"
         - tag: adguard
           mark: 5 
           output_tag: "广告屏蔽"
         - tag: ddnslist
           mark: 6 
           output_tag: "DDNS域名"
-        - tag: greylist
-          mark: 7
-          output_tag: "灰名单"
-        - tag: whitelist
-          mark: 8 
-          output_tag: "白名单"
         - tag: cuscn
           mark: 13
           output_tag: "直连域名"

@@ -366,10 +366,10 @@ pub(crate) struct AtomRules {
     busy: std::cell::Cell<bool>,
 }
 
-/// The default table of a new installation (design §4.4). The ads rule
-/// needs the `adguard` builtin set; a configuration without it gets the LAN
-/// rule alone.
-fn default_rules(adguard: bool) -> Vec<Rule> {
+/// The default table of a new installation (design §4.4). Each rule after
+/// the LAN rule needs its builtin set (`adguard`, `cusnocn`, `cuscn`) and is
+/// left out of a configuration without it.
+fn default_rules(builtin: &dyn Fn(&str) -> bool) -> Vec<Rule> {
     let mut rules = vec![Rule {
         id: "r-lan".to_owned(),
         enabled: true,
@@ -389,17 +389,37 @@ fn default_rules(adguard: bool) -> Vec<Rule> {
         },
         action: Action::Direct,
     }];
-    if adguard {
-        rules.push(Rule {
-            id: "r-ads".to_owned(),
-            enabled: true,
-            remark: "广告".to_owned(),
-            matches: Match {
-                ruleset: vec!["adguard".to_owned()],
-                ..Match::default()
+    // The corrections of the geosite lists the original judgement uses
+    // (design §4.4, atom step 6): they were ahead of geosite there.
+    for (id, remark, set, action) in [
+        ("r-ads", "广告", "adguard", Action::Block),
+        (
+            "r-cusnocn",
+            "代理修正（geosite-cn 里的国外域名）",
+            "cusnocn",
+            Action::Proxy {
+                group_id: "final".to_owned(),
             },
-            action: Action::Block,
-        });
+        ),
+        (
+            "r-cuscn",
+            "直连修正（geolocation-!cn 里的国内域名）",
+            "cuscn",
+            Action::Direct,
+        ),
+    ] {
+        if builtin(set) {
+            rules.push(Rule {
+                id: id.to_owned(),
+                enabled: true,
+                remark: remark.to_owned(),
+                matches: Match {
+                    ruleset: vec![set.to_owned()],
+                    ..Match::default()
+                },
+                action,
+            });
+        }
     }
     rules
 }
@@ -564,9 +584,10 @@ impl AtomRules {
         builtin: Vec<(String, BuiltinSet)>,
         singbox: Option<crate::atom_singbox::Host>,
     ) -> Result<Self, String> {
-        let adguard = builtin.iter().any(|(name, _)| name == "adguard");
+        let names: Vec<String> = builtin.iter().map(|(name, _)| name.clone()).collect();
+        let has = |name: &str| names.iter().any(|have| have == name);
         let (version, rules) = if root.as_os_str().is_empty() {
-            (0, default_rules(adguard))
+            (0, default_rules(&has))
         } else {
             let path = root.join(RULES_FILE);
             match std::fs::read(&path) {
@@ -576,7 +597,7 @@ impl AtomRules {
                     (file.version, file.rules)
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    (0, default_rules(adguard))
+                    (0, default_rules(&has))
                 }
                 Err(error) => return Err(format!("{}: {error}", path.display())),
             }

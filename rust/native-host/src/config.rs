@@ -38,7 +38,6 @@ mod check;
 pub(crate) mod flags;
 pub(crate) mod providers;
 pub(crate) mod settings;
-pub(crate) mod standard_groups;
 pub use check::{CheckFinding, CheckFindingKind, CheckReport, check_config, check_config_in};
 pub(crate) use providers::presentation_name;
 pub use providers::{DomainMapperConfig, MapperOutcome};
@@ -599,7 +598,6 @@ pub struct CompiledConfig {
     pub(crate) yaml_defaults: settings::YamlDefaults,
     /// How to compile the same configuration again (hot apply of settings).
     pub(crate) reload: Option<ReloadSource>,
-    pub(crate) standard_groups: Option<standard_groups::Profile>,
     pub(crate) compile_inputs: crate::special_groups::CandidateInputSet,
     /// Runtime generation qualifies snapshot-local executable/metric IDs.
     pub(crate) generation: u64,
@@ -845,7 +843,7 @@ fn compile_yaml_with_base_and_origin(
         Some(_) => settings::Settings::load(root_dir)?,
         None => settings::Settings::default(),
     };
-    compile_with_settings(yaml, base_dir, root_dir, origin, &settings, None)
+    compile_with_settings(yaml, base_dir, root_dir, origin, &settings)
 }
 
 /// Compiles with explicit typed settings (hot apply passes the candidate's).
@@ -855,7 +853,6 @@ fn compile_with_settings(
     root_dir: &Path,
     origin: Option<&Path>,
     settings: &settings::Settings,
-    groups: Option<&[standard_groups::Group]>,
 ) -> Result<CompiledConfig, ConfigError> {
     let raw = parse_yaml(yaml)?;
     let mut inputs = crate::special_groups::CandidateInputSet::default();
@@ -885,7 +882,6 @@ fn compile_with_settings(
         Some(&mut inputs),
         origin,
         settings,
-        groups,
     )?;
     compiled.compile_inputs = inputs;
     if !base_dir.as_os_str().is_empty() {
@@ -913,7 +909,6 @@ pub(crate) fn recompile(
         &reload.root_dir,
         Some(&reload.config_path),
         settings,
-        None,
     )?;
     compiled.ui_base = Some(absolute_base(&reload.base_dir)?);
     Ok(compiled)
@@ -940,27 +935,6 @@ fn absolute_base(base: &Path) -> Result<PathBuf, ConfigError> {
         .map_err(|error| ConfigError::new("$", format!("configuration base: {error}")))
 }
 
-fn is_standard_include(expression: &str, base: &Path) -> bool {
-    crate::special_groups::lexical_path(&resolve_relative(expression, base))
-        == crate::special_groups::lexical_path(&base.join(standard_groups::GENERATED))
-}
-
-pub(crate) fn recompile_groups(
-    reload: &ReloadSource,
-    settings: &settings::Settings,
-    groups: &[standard_groups::Group],
-) -> Result<CompiledConfig, ConfigError> {
-    let yaml = load_yaml(&reload.config_path)?;
-    compile_with_settings(
-        &yaml,
-        &reload.base_dir,
-        &reload.root_dir,
-        Some(&reload.config_path),
-        settings,
-        Some(groups),
-    )
-}
-
 fn parse_yaml(yaml: &str) -> Result<RawValue, ConfigError> {
     yaml_serde::from_str(yaml)
         .map_err(|error| ConfigError::new("$", format!("invalid YAML: {error}")))
@@ -973,7 +947,7 @@ fn reject_removed_management(raw: &RawValue) -> Result<(), ConfigError> {
     if root.get("native_management").is_some() {
         return Err(ConfigError::new(
             "$.native_management",
-            "native_management was removed; use the standard special_groups configuration",
+            "native_management was removed",
         ));
     }
     Ok(())
@@ -989,36 +963,21 @@ fn compile_raw(
     mut inputs: Option<&mut crate::special_groups::CandidateInputSet>,
     config_origin: Option<&Path>,
     settings: &settings::Settings,
-    groups: Option<&[standard_groups::Group]>,
 ) -> Result<CompiledConfig, ConfigError> {
     reject_removed_management(raw)?;
     let root = expect_map(raw, "$", "top level must be a mapping")?;
     root.reject_unknown(ROOT_FIELDS, "$")?;
     let log = compile_log(root.required("log", "$")?, root_dir)?.level;
-    let api = root
-        .get("api")
-        .map(compile_api)
-        .transpose()?
-        // The port saved from the WebUI wins over the YAML one (the reference's priority).
-        .map(|api| ApiConfig {
-            http: crate::system_api::with_saved_port(root_dir, api.http),
-        });
+    let api = root.get("api").map(compile_api).transpose()?;
     // Definition collection: included plugin-only files load in declaration
     // order, then this file's plugins. No definition is resolved until the
     // whole ordered catalog exists, so a reference may name a later
     // definition without changing the effective order.
     let mut definitions = Vec::new();
-    let mut include_paths = Vec::new();
-    let mut standard = false;
     if let Some(includes) = root.get("include") {
         let includes = expect_sequence(includes, "$.include")?;
         for (index, include) in includes.iter().enumerate() {
             let expression = expect_string(include, &format!("$.include[{index}]"))?;
-            include_paths.push(resolve_relative(&expression, base_dir));
-            if config_origin.is_some() && is_standard_include(&expression, base_dir) {
-                standard = true;
-                continue;
-            }
             collect_included(
                 &expression,
                 base_dir,
@@ -1038,11 +997,8 @@ fn compile_raw(
     }
 
     let sources = CompileSources {
-        config_origin,
-        include_paths: &include_paths,
         settings,
         flag_root: config_origin.map(|_| root_dir),
-        standard: standard.then_some((root_dir, groups)),
     };
     finish_compile(log, api, definitions, inputs, &sources)
 }
@@ -1052,31 +1008,13 @@ fn finish_compile(
     log: LogLevel,
     api: Option<ApiConfig>,
     definitions: Vec<RawPlugin>,
-    mut inputs: Option<&mut crate::special_groups::CandidateInputSet>,
+    inputs: Option<&mut crate::special_groups::CandidateInputSet>,
     sources: &CompileSources<'_>,
 ) -> Result<CompiledConfig, ConfigError> {
     let mut definitions = definitions;
     let mut applied = settings::apply(&mut definitions, sources.settings, sources.flag_root)?;
-    let standard = match sources.standard {
-        Some((base, groups)) => Some(standard_groups::apply(
-            base,
-            groups,
-            &mut definitions,
-            &mut applied,
-            sources.settings,
-        )?),
-        None => None,
-    };
-    if let (Some(profile), Some(inputs)) = (&standard, inputs.as_deref_mut()) {
-        let path = profile.base.join(standard_groups::STATE);
-        match &profile.expected_state {
-            Some(bytes) => inputs.record_bytes(&path, bytes),
-            None => inputs.record_missing(&path),
-        }
-        .map_err(|reason| ConfigError::new(standard_groups::STATE, reason))?;
-    }
     let dependency_definitions = definitions.clone();
-    let mut compiled = compile_definitions(log, api, definitions, inputs, sources, &applied.flags)?;
+    let mut compiled = compile_definitions(log, api, definitions, inputs, &applied.flags)?;
     compiled.cache_dependencies = cache_dependency_fingerprints(&compiled, &dependency_definitions);
     compiled.settings = sources.settings.clone();
     compiled.flags = std::mem::take(&mut applied.flags);
@@ -1087,7 +1025,6 @@ fn finish_compile(
         rules.set_default_resolver(&compiled.effective_upstreams);
     }
     compiled.yaml_defaults = applied.defaults;
-    compiled.standard_groups = standard;
     Ok(compiled)
 }
 
@@ -1855,54 +1792,6 @@ pub(crate) fn canonicalized_path(path: &Path) -> Option<PathBuf> {
         .ok()
 }
 
-/// The `FileKey` identity of an existing regular file, used to detect
-/// hard-link aliases between product artifacts.
-#[cfg(unix)]
-pub(crate) fn file_identity(path: &Path) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    let path = path.to_path_buf();
-    let metadata = crate::transaction::blocking_io(move || std::fs::metadata(path))
-        .ok()?
-        .ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    Some((metadata.dev(), metadata.ino()))
-}
-
-/// Lexically normalized artifact identity for collision comparison.
-pub(crate) fn normalized_artifact(path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    crate::special_groups::lexical_path(&absolute)
-}
-
-/// Reports whether two paths name the same underlying file: by lexical
-/// normalization always, and by canonical path or inode identity when both
-/// files currently exist. Non-existing paths only collide lexically.
-pub(crate) fn paths_collide(first: &Path, second: &Path) -> bool {
-    if normalized_artifact(first) == normalized_artifact(second) {
-        return true;
-    }
-    if let (Some(first), Some(second)) = (canonicalized_path(first), canonicalized_path(second)) {
-        if first == second {
-            return true;
-        }
-    }
-    #[cfg(unix)]
-    {
-        if let (Some(first), Some(second)) = (file_identity(first), file_identity(second)) {
-            return first == second;
-        }
-    }
-    false
-}
-
 /// The declared kind of one plugin definition. Domain sets and sequences are
 /// compiled into the program; forwards and caches become host-fulfilled
 /// external executables; listeners are collected separately.
@@ -2014,19 +1903,13 @@ impl PluginCatalog<'_> {
     }
 }
 
-/// File locations of the compilation inputs, used for switch state-file
-/// ownership checks.
+/// The settings inputs of a compilation.
 struct CompileSources<'a> {
-    /// The configuration file itself, when compiling from a file.
-    config_origin: Option<&'a Path>,
-    /// Every top-level `include` target resolved against the base.
-    include_paths: &'a [PathBuf],
     /// The typed settings to overlay on the definitions.
     settings: &'a settings::Settings,
     /// The configuration root whose `rule/switchN.txt` files give the flag
     /// values before the first migration (file-backed compiles and `check`).
     flag_root: Option<&'a Path>,
-    standard: Option<(&'a Path, Option<&'a [standard_groups::Group]>)>,
 }
 
 fn compile_definitions(
@@ -2034,7 +1917,6 @@ fn compile_definitions(
     api: Option<ApiConfig>,
     definitions: Vec<RawPlugin>,
     inputs: Option<&mut crate::special_groups::CandidateInputSet>,
-    sources: &CompileSources<'_>,
     flags: &[flags::Flag],
 ) -> Result<CompiledConfig, ConfigError> {
     let candidate_inputs = RefCell::new(inputs.as_deref().cloned());
@@ -2117,18 +1999,12 @@ fn compile_definitions(
     let mut file_owners: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
     // Every persistent file the compiled configuration reads or writes that
     // is visible to the compiler.
-    let mut known_artifacts: Vec<PathBuf> = Vec::new();
-    if let Some(origin) = sources.config_origin {
-        known_artifacts.push(origin.to_path_buf());
-    }
-    known_artifacts.extend(sources.include_paths.iter().cloned());
     for set in &compiled_domain_sets {
         for reference in &set.references {
             file_owners
                 .entry(reference.clone())
                 .or_default()
                 .insert(set.tag.clone());
-            known_artifacts.push(reference.clone());
         }
     }
     let mut domain_sets: Vec<(String, DomainSetHandle)> = Vec::new();
@@ -2219,7 +2095,6 @@ fn compile_definitions(
                     &["entries", "files"],
                     &["rules", "files"],
                 )?;
-                known_artifacts.extend(files.iter().cloned());
                 let path = format!("{}.args", plugin.source_path);
                 let policy = if kinds[index].1 == PluginKind::Hosts {
                     let mut candidate_inputs = candidate_inputs.borrow_mut();
@@ -2260,7 +2135,6 @@ fn compile_definitions(
                 }
                 let (inline, files) =
                     policy_sources(plugin, "ips", &["ips", "files", "sets"], &[])?;
-                known_artifacts.extend(files.iter().cloned());
                 let mut candidate_inputs = candidate_inputs.borrow_mut();
                 let prefixes = policy::ip_list_with_inputs(
                     &inline,
@@ -2270,11 +2144,6 @@ fn compile_definitions(
                 )?;
                 ip_sets.push(IpSetConfig {
                     tag: plugin.tag.clone(),
-                    management: Some(crate::managed_ip::ManagedIpSet::new(
-                        &inline,
-                        &files,
-                        Rc::clone(&prefixes),
-                    )),
                     prefixes,
                 });
             }
@@ -2325,7 +2194,6 @@ fn compile_definitions(
                 ip_sets.push(IpSetConfig {
                     tag: plugin.tag.clone(),
                     prefixes: Rc::clone(&handle),
-                    management: None,
                 });
                 rule_providers.push(Rc::new(crate::rule_sources::Provider::manifest(
                     spec,
@@ -2356,15 +2224,13 @@ fn compile_definitions(
                     .push((plugin.tag.clone(), compile_sleep(plugin)?));
             }
             PluginKind::Rewrite => {
-                let (rewrite, files) = compile_rewrite(plugin)?;
-                known_artifacts.extend(files);
+                let (rewrite, _files) = compile_rewrite(plugin)?;
                 rewrites.push((plugin.tag.clone(), Rc::new(rewrite)));
             }
             // Validated and resolved by the settings overlay before compiling.
             PluginKind::Socks5Proxy | PluginKind::EcsAddress => {}
             PluginKind::Requery => {
-                let (requery, file) = compile_requery(plugin)?;
-                known_artifacts.push(file);
+                let (requery, _file) = compile_requery(plugin)?;
                 requeries.push(RequeryConfig {
                     tag: plugin.tag.clone(),
                     runtime: Rc::new(requery),
@@ -2372,19 +2238,16 @@ fn compile_definitions(
             }
             PluginKind::DomainOutput => {
                 let pending = compile_domain_output(plugin)?;
-                known_artifacts.extend(pending.settings.files());
                 pending_outputs.push(pending);
             }
             PluginKind::RouteLearner => {
                 let pending = compile_route_learner(plugin)?;
-                known_artifacts.push(pending.settings.file.clone());
                 pending_learners.push(pending);
             }
             // Compiled with the sequences: its conditions need the catalog.
             PluginKind::RouteLearn => pending_rules.push(index),
             PluginKind::WebInfo => {
-                let (webinfo, file) = compile_webinfo(plugin)?;
-                known_artifacts.push(file);
+                let (webinfo, _file) = compile_webinfo(plugin)?;
                 webinfos.push(Rc::new(webinfo));
             }
             PluginKind::Fallback => {
@@ -2418,9 +2281,6 @@ fn compile_definitions(
             }
             PluginKind::Cache => {
                 let compiled = compile_cache(plugin)?;
-                if let Some(dump_file) = &compiled.dump_file {
-                    known_artifacts.push(dump_file.clone());
-                }
                 caches.push((plugin.tag.clone(), compiled, plugin.source_path.clone()));
             }
             PluginKind::Listener => {
@@ -2440,10 +2300,6 @@ fn compile_definitions(
             }
         }
     }
-    for provider in &rule_providers {
-        known_artifacts.extend(provider.source_files());
-    }
-    let declared_artifacts = known_artifacts;
 
     // Mappers compile after every provider is loaded, so a rule may name a
     // provider declared later without changing the result.
@@ -2977,27 +2833,6 @@ fn compile_definitions(
             provider.attach_filtered(Rc::clone(live));
         }
     }
-    // Decide eligibility only after every sequence (including anonymous &file
-    // IP sources) has compiled. A second read through any alias is a conflict.
-    for set in &mut ip_sets {
-        let Some(management) = &mut set.management else {
-            continue;
-        };
-        let Some(file) = &management.file else {
-            continue;
-        };
-        let aliases = |path: &&PathBuf| {
-            crate::managed_ip::actual_path(path) == *file || paths_collide(file, path)
-        };
-        let declared = declared_artifacts.iter().filter(aliases).count();
-        let reads = candidate_inputs
-            .borrow()
-            .as_ref()
-            .map_or(0, |inputs| inputs.reads.iter().filter(aliases).count());
-        if declared > 1 || reads > 1 {
-            management.reason = Some("the file is shared with other configuration readers".into());
-        }
-    }
     let compiled = CompiledConfig {
         ui_base: None,
         settings: settings::Settings::default(),
@@ -3005,7 +2840,6 @@ fn compile_definitions(
         effective_upstreams: BTreeMap::new(),
         yaml_defaults: settings::YamlDefaults::default(),
         reload: None,
-        standard_groups: None,
         compile_inputs: crate::special_groups::CandidateInputSet::default(),
         generation: 0,
         cache_dependencies: Vec::new(),

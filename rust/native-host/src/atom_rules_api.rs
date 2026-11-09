@@ -11,10 +11,12 @@
 //! | `rules/test` | POST `{domain, client?}` |
 //! | `rulesets` | GET, POST (remote or local) |
 //! | `rulesets/{id}` | GET (with `rules`), PUT, DELETE |
-//! | `rulesets/{id}/refresh` | POST (download a remote ruleset again) |
+//! | `rulesets/{id}/refresh` | POST (download a remote or builtin ruleset again) |
 //!
 //! Nodes, groups, Final, the sing-box settings, `status` and `apply` are in
-//! [`crate::atom_proxy_api`].
+//! [`crate::atom_proxy_api`]; the AtomDNS settings (`dns`, `upstreams`) and
+//! the fixed lists (`ddns`, `rewrite`) in [`crate::atom_dns_api`]. Every
+//! route is listed in [`ROUTES`], which `docs/api/openapi.yaml` must match.
 //!
 //! Every successful change empties all caches (design §4.5, v0: clear
 //! everything), so no cached answer outlives the rule that produced it.
@@ -68,12 +70,88 @@ pub(crate) fn body<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Reply> 
 /// the management lease). `rules/test` only reads.
 /// `PUT settings` takes the lease itself: a mixed port change reloads the
 /// AtomDNS configuration afterwards, which waits for every lease.
+/// `PUT dns` and `PUT upstreams/{tag}` publish settings themselves, for the
+/// same reason.
 pub(crate) fn mutates(method: &str, path: &str) -> bool {
     path.strip_prefix(PREFIX).is_some_and(|rest| {
         let rest = rest.trim_end_matches('/');
+        let segments: Vec<&str> = rest.split('/').collect();
         matches!(method, "POST" | "PUT" | "DELETE")
             && rest != "rules/test"
-            && !(method == "PUT" && rest == "settings")
+            && !(method == "PUT"
+                && (rest == "settings" || crate::atom_dns_api::applies_settings(&segments)))
+    })
+}
+
+/// Every route under [`PREFIX`]: `(method, path template)`. The OpenAPI
+/// document (`docs/api/openapi.yaml`) lists exactly these, and a test checks
+/// that each one reaches its handler (the dispatch itself is the `match` in
+/// each module's `handle`).
+#[cfg(test)]
+pub(crate) const ROUTES: &[(&str, &str)] = &[
+    ("GET", "rules"),
+    ("POST", "rules"),
+    ("PUT", "rules/{id}"),
+    ("DELETE", "rules/{id}"),
+    ("POST", "rules/move"),
+    ("POST", "rules/test"),
+    ("GET", "rulesets"),
+    ("POST", "rulesets"),
+    ("GET", "rulesets/{id}"),
+    ("PUT", "rulesets/{id}"),
+    ("DELETE", "rulesets/{id}"),
+    ("POST", "rulesets/{id}/refresh"),
+    ("GET", "nodes"),
+    ("POST", "nodes"),
+    ("GET", "nodes/{id}"),
+    ("PUT", "nodes/{id}"),
+    ("DELETE", "nodes/{id}"),
+    ("POST", "nodes/{id}/delay"),
+    ("GET", "groups"),
+    ("POST", "groups"),
+    ("GET", "groups/{id}"),
+    ("PUT", "groups/{id}"),
+    ("DELETE", "groups/{id}"),
+    ("POST", "groups/{id}/select"),
+    ("POST", "groups/{id}/delay"),
+    ("GET", "final"),
+    ("PUT", "final"),
+    ("GET", "settings"),
+    ("PUT", "settings"),
+    ("GET", "status"),
+    ("GET", "apply"),
+    ("POST", "apply"),
+    ("GET", "dns"),
+    ("PUT", "dns"),
+    ("GET", "upstreams"),
+    ("PUT", "upstreams/{tag}"),
+    ("GET", "ddns"),
+    ("PUT", "ddns"),
+    ("GET", "rewrite"),
+    ("PUT", "rewrite"),
+];
+
+/// Display names of the builtin sets atom's configuration offers (an
+/// unknown one is shown by its name).
+fn builtin_label(name: &str) -> &str {
+    match name {
+        "adguard" => "广告（AdGuard 规则）",
+        "geosite_cn" => "中国域名（geosite-cn）",
+        "geosite_no_cn" => "非中国域名（geolocation-!cn）",
+        "cuscn" => "国内修正（geolocation-!cn 里的国内域名）",
+        "cusnocn" => "国外修正（geosite-cn 里的国外域名）",
+        other => other,
+    }
+}
+
+fn builtin_view(config: &CompiledConfig, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": name,
+        "name": builtin_label(name),
+        "type": "builtin",
+        "refreshable": config.rule_sources.provider(name).is_some_and(|provider| {
+            !matches!(provider.kind, crate::rule_sources::Kind::Light)
+        }),
     })
 }
 
@@ -144,6 +222,11 @@ pub(crate) async fn handle(
         ));
     };
     let segments: Vec<&str> = rest.split('/').collect();
+    if let Some(reply) =
+        crate::atom_dns_api::handle(control, config, cache, method, &segments, request_body).await
+    {
+        return Some(reply);
+    }
     let reply = match (method, segments.as_slice()) {
         ("GET", ["rules"]) => return Some(list_rules(rules)),
         ("POST", ["rules"]) => create_rule(rules, request_body).await,
@@ -151,14 +234,17 @@ pub(crate) async fn handle(
         ("POST", ["rules", "test"]) => return Some(test_rule(config, rules, request_body)),
         ("PUT", ["rules", id]) => update_rule(rules, id, request_body).await,
         ("DELETE", ["rules", id]) => delete_rule(rules, id, query).await,
-        ("GET", ["rulesets"]) => return Some(list_rulesets(rules)),
-        ("GET", ["rulesets", id]) => return Some(show_ruleset(rules, id)),
+        ("GET", ["rulesets"]) => return Some(list_rulesets(config, rules)),
+        ("GET", ["rulesets", id]) => return Some(show_ruleset(config, rules, id)),
         ("POST", ["rulesets"]) => create_ruleset(rules, request_body, shutdown).await,
         ("PUT", ["rulesets", id]) => update_ruleset(rules, id, request_body),
         ("DELETE", ["rulesets", id]) => match rules.delete_ruleset(id) {
             Ok(()) => Ok(json(200, &serde_json::json!({ "deleted": id }))),
             Err(e) => Err(refusal(&e)),
         },
+        ("POST", ["rulesets", id, "refresh"]) if rules.builtin_names().iter().any(|n| n == id) => {
+            refresh_builtin(config, id).await
+        }
         ("POST", ["rulesets", id, "refresh"]) => refresh_ruleset(rules, id, shutdown).await,
         (_, ["rules" | "rulesets", ..]) => return Some(error(405, "method not allowed")),
         _ => {
@@ -371,23 +457,20 @@ fn ruleset_view(set: &Ruleset) -> serde_json::Value {
     serde_json::to_value(set).unwrap_or_default()
 }
 
-fn list_rulesets(rules: &AtomRules) -> Reply {
+fn list_rulesets(config: &CompiledConfig, rules: &AtomRules) -> Reply {
     let mut list: Vec<serde_json::Value> = rules
         .builtin_names()
-        .into_iter()
-        .map(|name| serde_json::json!({ "id": name, "name": name, "type": "builtin" }))
+        .iter()
+        .map(|name| builtin_view(config, name))
         .collect();
     list.extend(rules.rulesets().iter().map(ruleset_view));
     json(200, &serde_json::Value::Array(list))
 }
 
-fn show_ruleset(rules: &AtomRules, id: &str) -> Reply {
+fn show_ruleset(config: &CompiledConfig, rules: &AtomRules, id: &str) -> Reply {
     let Some(set) = rules.ruleset(id) else {
         return if rules.builtin_names().iter().any(|name| name == id) {
-            json(
-                200,
-                &serde_json::json!({ "id": id, "name": id, "type": "builtin" }),
-            )
+            json(200, &builtin_view(config, id))
         } else {
             error(404, format!("规则集 `{id}` 不存在"))
         };
@@ -543,6 +626,30 @@ async fn refresh_ruleset(
         Ok(reply)
     } else {
         Err(reply)
+    }
+}
+
+/// Downloads a builtin set's sources again (`sd_set_light`, `si_set`,
+/// `adguard_rule` of the configuration) and waits until the new lists are in
+/// use; the caller then empties the caches and brings sing-box's bindings up
+/// to date, as after any other ruleset change. Fails (keeping the old lists)
+/// when no download succeeded.
+async fn refresh_builtin(config: &CompiledConfig, id: &str) -> Result<Reply, Reply> {
+    let provider = config
+        .rule_sources
+        .provider(id)
+        .filter(|provider| !matches!(provider.kind, crate::rule_sources::Kind::Light))
+        .ok_or_else(|| error(400, format!("内置规则集 `{id}` 不能刷新")))?;
+    match config.rule_sources.refresh(&provider).await {
+        Ok((sources, updated)) if sources > 0 && updated == 0 => Err(error(
+            502,
+            format!("内置规则集 `{id}` 的 {sources} 个来源都没有下载成功（见日志），列表保持不变"),
+        )),
+        Ok((sources, updated)) => Ok(json(
+            200,
+            &serde_json::json!({ "id": id, "sources": sources, "updated": updated }),
+        )),
+        Err(e) => Err(error(409, e)),
     }
 }
 

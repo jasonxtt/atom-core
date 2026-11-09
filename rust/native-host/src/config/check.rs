@@ -5,13 +5,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::{
     CompileSources, ConfigError, ConfigErrorKind, LogLevel, ROOT_FIELDS, RawMap, RawPlugin,
     RawValue, compile_api, compile_log, decode_plugin, expect_map, expect_sequence, expect_string,
     finish_compile, included_plugins, load_yaml, parse_yaml, read_included,
-    reject_removed_management, resolve_relative,
+    reject_removed_management,
 };
 
 const NOTE_FIRST_ERROR: &str =
@@ -233,8 +233,6 @@ pub fn check_config_in(path: &Path, root: Option<&Path>) -> Result<CheckReport, 
         .get("api")
         .and_then(|value| checker.tolerate(value.clone(), "$.api", compile_api));
     let mut decoded = Decoded::default();
-    let mut include_paths: Vec<PathBuf> = Vec::new();
-    let mut standard = false;
     if let Some(includes) = root.get("include") {
         let includes = expect_sequence(includes, "$.include").unwrap_or_else(|error| {
             checker.global(&error);
@@ -248,11 +246,6 @@ pub fn check_config_in(path: &Path, root: Option<&Path>) -> Result<CheckReport, 
                     continue;
                 }
             };
-            include_paths.push(resolve_relative(&expression, base_dir));
-            if super::is_standard_include(&expression, base_dir) {
-                standard = true;
-                continue;
-            }
             let (path, raw) = read_included(&expression, base_dir, None)?;
             let included = match included_plugins(&path, &raw) {
                 Ok(included) => included,
@@ -296,11 +289,8 @@ pub fn check_config_in(path: &Path, root: Option<&Path>) -> Result<CheckReport, 
         }
     };
     let sources = CompileSources {
-        config_origin: None,
-        include_paths: &include_paths,
         settings: &settings,
         flag_root: Some(root_dir),
-        standard: standard.then_some((root_dir, None)),
     };
     let mut active = vec![true; total];
     let mut seen: BTreeSet<(usize, String)> = BTreeSet::new();
@@ -318,15 +308,6 @@ pub fn check_config_in(path: &Path, root: Option<&Path>) -> Result<CheckReport, 
         let error = match finish_compile(log, api.clone(), current, None, &sources) {
             Ok(compiled) => {
                 let mut finished = report(checker, declared);
-                if let Some(profile) = &compiled.standard_groups {
-                    let raw = parse_yaml(
-                        std::str::from_utf8(&profile.generated).expect("generated UTF-8"),
-                    )?;
-                    let map =
-                        expect_map(&raw, super::standard_groups::GENERATED, "generated groups")?;
-                    finished.definitions +=
-                        expect_sequence(map.required("plugins", "generated")?, "generated")?.len();
-                }
                 finished.effective = compiled.settings_report.clone();
                 return Ok(finished);
             }

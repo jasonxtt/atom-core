@@ -464,53 +464,6 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (bool, u64, std::time::SystemTime,
 }
 
 #[test]
-fn standard_special_groups_check_is_read_only_and_start_recovers_derived_yaml() {
-    let dir = TempDir::new("read-only");
-    let port = free_port();
-    dir.write(
-        "config.yaml",
-        &format!(
-            "log: {{ level: error }}\ninclude:\n  - sub_config/special_groups.yaml\nplugins:\n  - tag: fwd\n    type: forward\n    args: {{ upstreams: [{{ addr: \"udp://127.0.0.1:15453\" }}] }}\n  - tag: entry\n    type: sequence\n    args: [{{ exec: reject 3 }}]\n{}",
-            listener("udp", "udp_server", &format!("127.0.0.1:{port}"), "")
-        ),
-    );
-    dir.write(
-        "sub_config/special_groups.yaml",
-        "plugins:\n  - tag: special_upstream_matcher\n    type: domain_mapper\n    args: {rules: []}\n  - tag: sequence_special\n    type: sequence\n    args: []\n",
-    );
-    let before = snapshot(dir.path());
-    assert!(
-        check_config(&dir.path().join("config.yaml"))
-            .unwrap()
-            .findings
-            .is_empty()
-    );
-    assert_eq!(
-        snapshot(dir.path()),
-        before,
-        "check never writes derived files"
-    );
-    let host = HostAssembly::from_config_file(&dir.path().join("config.yaml")).unwrap();
-    host.block_on(async {
-        let bound = host.bind_host().await.unwrap();
-        let shutdown = TransportCancellation::new();
-        let serving = tokio::task::spawn_local(bound.serve(shutdown.clone()));
-        assert_eq!(udp_exchange(([127, 0, 0, 1], port).into()).await[3] & 15, 3);
-        shutdown.cancel();
-        serving.await.unwrap().unwrap();
-    });
-    drop(host);
-    let generated =
-        std::fs::read_to_string(dir.path().join("sub_config/special_groups.yaml")).unwrap();
-    assert!(generated.contains("由 special_groups API 自动生成"));
-    assert_eq!(
-        std::fs::read(dir.path().join("config.yaml")).unwrap(),
-        before[&dir.path().join("config.yaml")].3
-    );
-    assert!(!dir.path().join("webinfo").exists());
-}
-
-#[test]
 fn the_config_all_shape_has_no_findings_and_check_does_not_touch_it() {
     let report = check_config(&Path::new(SHAPE).join("config.yaml")).expect("check runs");
     assert!(report.findings.is_empty(), "{report}");
@@ -670,8 +623,7 @@ fn log_file_is_appended_not_truncated() {
 
 // --- Phase 6b: the experimental `native_management` mode was removed ---------
 
-const MANAGEMENT_REMOVED: &str =
-    "native_management was removed; use the standard special_groups configuration";
+const MANAGEMENT_REMOVED: &str = "native_management was removed";
 
 fn config_with_native_management(value: &str) -> String {
     let port = free_port();

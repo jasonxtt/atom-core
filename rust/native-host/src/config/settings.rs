@@ -75,12 +75,6 @@ pub(crate) struct CacheTuning {
     pub(crate) dump_interval: Option<u64>,
 }
 
-impl CacheTuning {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.size.is_none() && self.lazy_cache_ttl.is_none() && self.dump_interval.is_none()
-    }
-}
-
 /// The stored differences of one `route_learner` category.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -89,12 +83,6 @@ pub(crate) struct CategoryTuning {
     pub(crate) ttl: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_entries: Option<u64>,
-}
-
-impl CategoryTuning {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.ttl.is_none() && self.max_entries.is_none()
-    }
 }
 
 /// The stored differences of the learners: the write interval (every

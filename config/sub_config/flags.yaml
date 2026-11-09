@@ -2,7 +2,8 @@ plugins:
 #功能开关（feature_flag），取代原 switch1–switch17（配置 schema 3）
 #流程里用 `flag 名字`（开关）或 `flag 名字=选项`（多选一）引用，关闭用 "!flag 名字"
 #当前值存 webinfo/settings.json 的 flags 段，只存与这里 default 不同的值；
-#修改用 GET /api/v1/flags、POST /api/v1/flags/{名字} {"value": ...}、DELETE /api/v1/flags/{名字}（恢复默认）
+#atom：其中 core_mode、block_qtypes、block_aaaa、prefer_v4、ddns_foreign、full_cache、lazy_cache 用 GET/PUT /api/v1/atom/dns 修改；
+#其余不开放（AtomDNS 原有的 /api/v1/flags 在 atom 第 6 步删除）
 #requery_on_change: true（可选，默认 false）：该开关的值实际改变并发布后，若配置里有 requery 插件，程序随即启动一次 requery
 #（requery 按自己的 flush_rules 清缓存，再预热）；值没变、更新试运行（503）、没有 requery 插件时都不触发
 #首次启动时从旧的 rule/switchN.txt 迁移一次（旧文件保留但不再读取）
@@ -50,16 +51,6 @@ plugins:
     args:
       label: 空结果屏蔽
       description: 记忆为无 IPv4 的域名的 A 请求、记忆为无 IPv6 的域名的 AAAA 请求直接返回空。
-      section: blocking
-      kind: bool
-      default: true
-
-#原 switch1 的另一部分
-  - tag: block_blocklist
-    type: feature_flag
-    args:
-      label: 黑名单屏蔽
-      description: 屏蔽黑名单里的域名。
       section: blocking
       kind: bool
       default: true

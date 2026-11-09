@@ -12,12 +12,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use atomdns_native_host::{BoundHost, CompiledConfig, HostAssembly, HostOptions};
 use atomdns_upstream_core::TransportCancellation;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 // ----- fixtures -------------------------------------------------------------
 
@@ -282,49 +280,23 @@ async fn serve(host: &HostAssembly) -> (TransportCancellation, tokio::task::Join
 
 struct Http {
     status: u16,
-    headers: Vec<(String, String)>,
     body: String,
 }
 
-impl Http {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-async fn api(port: u16, method: &str, path: &str, body: &str) -> Http {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: native\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+/// A plugin route (`/plugins/...`), served in process: atom step 6 removed
+/// them from HTTP.
+async fn api(host: &HostAssembly, method: &str, path: &str, body: &str) -> Http {
+    assert!(
+        path.starts_with("/plugins/"),
+        "{path} is not a plugin route"
     );
-    stream.write_all(request.as_bytes()).await.unwrap();
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await.unwrap();
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let (head, body) = text.split_once("\r\n\r\n").expect("http response");
-    let mut lines = head.split("\r\n");
-    let status = lines
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .parse()
-        .unwrap();
-    let headers = lines
-        .filter_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            Some((key.trim().to_owned(), value.trim().to_owned()))
-        })
-        .collect();
+    let (status, body) = host
+        .plugin_request(method, path, body.as_bytes())
+        .await
+        .unwrap_or((404, b"404 page not found\n".to_vec()));
     Http {
         status,
-        headers,
-        body: body.to_owned(),
+        body: String::from_utf8_lossy(&body).into_owned(),
     }
 }
 
@@ -390,7 +362,7 @@ fn rules_learn_by_condition_and_the_next_query_follows_the_learned_route() {
         // the sequence.
         assert_eq!(a(ports.dns, "proxy1.test").await, 0);
         assert_eq!(a(ports.dns, "proxy1.test").await, 12);
-        let special = api(ports.api, "GET", "/plugins/my_sv4list/show", "").await;
+        let special = api(&host, "GET", "/plugins/my_sv4list/show", "").await;
         assert!(special.body.contains("proxy1.test"), "{}", special.body);
         // no-V6: an empty NOERROR and an NXDOMAIN answer to AAAA are learned,
         // a SERVFAIL one is not (the rule asks for rcode 0 or 3), and an
@@ -567,7 +539,7 @@ fn cached_learning_labels_follow_expiry_and_flush_in_every_execution_path() {
                 );
                 let entries = json(
                     &api(
-                        ports.api,
+                        &host,
                         "GET",
                         &format!("/plugins/route_learner/entries?category={category}"),
                         "",
@@ -588,7 +560,7 @@ fn cached_learning_labels_follow_expiry_and_flush_in_every_execution_path() {
                 if mode == "nested" {
                     // An outer miss around an inner hit must not persist the
                     // query-local annotation as a new effective route.
-                    api(ports.api, "GET", "/plugins/outer/flush", "").await;
+                    api(&host, "GET", "/plugins/outer/flush", "").await;
                     assert_eq!(a(ports.dns, name).await, 0);
                     assert_eq!(a(ports.dns, name).await, 0);
                     assert_eq!(
@@ -598,7 +570,7 @@ fn cached_learning_labels_follow_expiry_and_flush_in_every_execution_path() {
                 }
                 // Refill the cache while the learning label is already live,
                 // so expiry must remove a label actually stored in the cache.
-                flush_label_caches(ports.api, mode == "nested").await;
+                flush_label_caches(&host, mode == "nested").await;
                 assert_eq!(a(ports.dns, name).await, 0);
                 let cached_effective = host
                     .audit_snapshot()
@@ -622,13 +594,13 @@ fn cached_learning_labels_follow_expiry_and_flush_in_every_execution_path() {
                 );
                 // Learn again, refill with the learned prefix, then flush the
                 // category without flushing the response cache.
-                flush_label_caches(ports.api, mode == "nested").await;
+                flush_label_caches(&host, mode == "nested").await;
                 assert_eq!(a(ports.dns, name).await, 0);
-                flush_label_caches(ports.api, mode == "nested").await;
+                flush_label_caches(&host, mode == "nested").await;
                 assert_eq!(a(ports.dns, name).await, 0);
                 for tag in [category, "my_sv4list"] {
                     assert_eq!(
-                        api(ports.api, "GET", &format!("/plugins/{tag}/flush"), "")
+                        api(&host, "GET", &format!("/plugins/{tag}/flush"), "")
                             .await
                             .status,
                         200
@@ -648,10 +620,10 @@ fn cached_learning_labels_follow_expiry_and_flush_in_every_execution_path() {
     }
 }
 
-async fn flush_label_caches(api_port: u16, nested: bool) {
-    api(api_port, "GET", "/plugins/cache/flush", "").await;
+async fn flush_label_caches(host: &HostAssembly, nested: bool) {
+    api(host, "GET", "/plugins/cache/flush", "").await;
     if nested {
-        api(api_port, "GET", "/plugins/outer/flush", "").await;
+        api(host, "GET", "/plugins/outer/flush", "").await;
     }
 }
 
@@ -705,7 +677,7 @@ fn the_mapper_merges_learned_facts_first_and_never_applies_its_default() {
         // An expired name is learned afresh by the next query's rule (once
         // the cached answer is out of the way: a cache hit ends the flow
         // before the rules).
-        api(ports.api, "GET", "/plugins/cache/flush", "").await;
+        api(&host, "GET", "/plugins/cache/flush", "").await;
         assert_eq!(a(ports.dns, "direct2.test").await, 0);
         assert_eq!(a(ports.dns, "direct2.test").await, 11);
         shutdown.cancel();
@@ -733,17 +705,8 @@ fn show_save_flush_entries_and_status() {
         }
         a(ports.dns, "direct-c.test").await;
 
-        let shown = api(ports.api, "GET", "/plugins/my_realiplist/show", "").await;
+        let shown = api(&host, "GET", "/plugins/my_realiplist/show", "").await;
         assert_eq!(shown.status, 200);
-        assert_eq!(
-            shown.header("Content-Type"),
-            Some("text/plain; charset=utf-8")
-        );
-        assert_eq!(shown.header("X-Total-Count"), Some("3"));
-        assert_eq!(
-            shown.header("Access-Control-Expose-Headers"),
-            Some("X-Total-Count")
-        );
         let lines: Vec<&str> = shown.body.lines().collect();
         assert_eq!(lines.len(), 3, "{}", shown.body);
         // By hits, then name; the layout of a statistics line.
@@ -767,32 +730,30 @@ fn show_save_flush_entries_and_status() {
         assert_eq!(parsed[2].2, "direct-a.test");
         assert_eq!(parsed[0].1.len(), 10);
         let window = api(
-            ports.api,
+            &host,
             "GET",
             "/plugins/my_realiplist/show?q=DIRECT-&limit=1&offset=1",
             "",
         )
         .await;
-        assert_eq!(window.header("X-Total-Count"), Some("3"));
         assert_eq!(window.body.lines().count(), 1);
         assert!(window.body.contains("direct-c.test"));
         assert_eq!(
-            api(ports.api, "GET", "/plugins/my_realiplist/show?q=zzz", "")
+            api(&host, "GET", "/plugins/my_realiplist/show?q=zzz", "")
                 .await
-                .header("X-Total-Count"),
-            Some("0")
+                .body,
+            ""
         );
 
         // The detail route.
         let detail = api(
-            ports.api,
+            &host,
             "GET",
             "/plugins/route_learner/entries?category=my_realiplist&sort=hits&limit=2",
             "",
         )
         .await;
         assert_eq!(detail.status, 200);
-        assert_eq!(detail.header("X-Total-Count"), Some("3"));
         let detail = json(&detail.body);
         assert_eq!(detail["total"], 3);
         let first = &detail["entries"][0];
@@ -807,7 +768,7 @@ fn show_save_flush_entries_and_status() {
         assert_eq!(detail["entries"].as_array().unwrap().len(), 2);
         assert_eq!(
             api(
-                ports.api,
+                &host,
                 "GET",
                 "/plugins/route_learner/entries?category=nope",
                 ""
@@ -817,7 +778,7 @@ fn show_save_flush_entries_and_status() {
             404
         );
         let status = json(
-            &api(ports.api, "GET", "/plugins/route_learner/status", "")
+            &api(&host, "GET", "/plugins/route_learner/status", "")
                 .await
                 .body,
         );
@@ -833,25 +794,25 @@ fn show_save_flush_entries_and_status() {
 
         // Methods and actions.
         assert_eq!(
-            api(ports.api, "POST", "/plugins/my_realiplist/show", "")
+            api(&host, "POST", "/plugins/my_realiplist/show", "")
                 .await
                 .status,
             405
         );
         assert_eq!(
-            api(ports.api, "POST", "/plugins/route_learner/entries", "")
+            api(&host, "POST", "/plugins/route_learner/entries", "")
                 .await
                 .status,
             405
         );
         assert_eq!(
-            api(ports.api, "GET", "/plugins/my_realiplist/nosuch", "")
+            api(&host, "GET", "/plugins/my_realiplist/nosuch", "")
                 .await
                 .status,
             404
         );
         assert_eq!(
-            api(ports.api, "GET", "/plugins/my_realiplist/restartall", "")
+            api(&host, "GET", "/plugins/my_realiplist/restartall", "")
                 .await
                 .status,
             501
@@ -859,7 +820,7 @@ fn show_save_flush_entries_and_status() {
 
         // `save` writes the file once; a second save with nothing new changes
         // nothing.
-        let saved = api(ports.api, "GET", "/plugins/my_realiplist/save", "").await;
+        let saved = api(&host, "GET", "/plugins/my_realiplist/save", "").await;
         assert_eq!(
             (saved.status, saved.body.as_str()),
             (200, "domain_output saved")
@@ -873,7 +834,7 @@ fn show_save_flush_entries_and_status() {
         assert_eq!(rows[1][4], "learn_direct");
         let before = tree.text("gen/route_learner.json");
         assert_eq!(
-            api(ports.api, "GET", "/plugins/my_realiplist/save", "")
+            api(&host, "GET", "/plugins/my_realiplist/save", "")
                 .await
                 .status,
             200
@@ -883,15 +844,15 @@ fn show_save_flush_entries_and_status() {
         // Expired names are neither listed nor counted.
         learner.advance_clock(101);
         assert_eq!(
-            api(ports.api, "GET", "/plugins/my_realiplist/show", "")
+            api(&host, "GET", "/plugins/my_realiplist/show", "")
                 .await
-                .header("X-Total-Count"),
-            Some("0")
+                .body,
+            ""
         );
         // `flush` clears one category only and writes at once.
         a(ports.dns, "direct-d.test").await;
         a(ports.dns, "proxy-d.test").await;
-        let flushed = api(ports.api, "GET", "/plugins/my_realiplist/flush", "").await;
+        let flushed = api(&host, "GET", "/plugins/my_realiplist/flush", "").await;
         assert_eq!(
             (flushed.status, flushed.body.as_str()),
             (200, "domain_output flushed")
@@ -957,109 +918,6 @@ fn closing_the_host_writes_the_state_and_a_restart_routes_by_it_at_once() {
     host.block_on(async {
         let (shutdown, task) = serve(&host).await;
         assert_eq!(a(ports.dns, "direct9.test").await, 0);
-        shutdown.cancel();
-        task.await.unwrap();
-    });
-}
-
-#[test]
-fn a_hot_apply_hands_the_live_state_over_and_the_switches_still_work() {
-    let tree = Tree::new("handover");
-    let ports = ports();
-    let upstream = Upstream::start();
-    config(&tree, &ports, &upstream, "", "");
-    let host = assemble(compile(&tree));
-    host.block_on(async {
-        let (shutdown, task) = serve(&host).await;
-        assert_eq!(a(ports.dns, "direct5.test").await, 0);
-        assert_eq!(aaaa(ports.dns, "v6none5.test").await, 0);
-        let page = json(
-            &api(ports.api, "GET", "/api/v1/domain-generation", "")
-                .await
-                .body,
-        );
-        assert_eq!(page["remember_direct"], true);
-
-        // Turning `no_v4` off is a settings apply: a new generation. What was
-        // learned survives it in memory: the state file cannot be written or
-        // read here (a directory stands in its place), so a hand-over through
-        // the file would lose it. The flush that follows the apply does need
-        // the file and reports it.
-        std::fs::create_dir_all(tree.path("gen/route_learner.json")).unwrap();
-        let reply = api(
-            ports.api,
-            "POST",
-            "/api/v1/domain-generation",
-            r#"{"no_v4":false}"#,
-        )
-        .await;
-        assert_eq!(reply.status, 500, "{}", reply.body);
-        assert!(
-            reply.body.contains("settings were applied"),
-            "{}",
-            reply.body
-        );
-        std::fs::remove_dir_all(tree.path("gen/route_learner.json")).unwrap();
-        assert_eq!(a(ports.dns, "direct5.test").await, 11);
-        assert_eq!(aaaa(ports.dns, "v6none5.test").await, 6);
-        let status = json(
-            &api(ports.api, "GET", "/plugins/route_learner/status", "")
-                .await
-                .body,
-        );
-        assert_eq!(status["counters"]["learned"], 2);
-
-        // `remember_direct` off: the category is flushed and stops learning
-        // and answering; the others are untouched.
-        let reply = json(
-            &api(
-                ports.api,
-                "POST",
-                "/api/v1/domain-generation",
-                r#"{"remember_direct":false}"#,
-            )
-            .await
-            .body,
-        );
-        assert_eq!(reply["flush_targets"], serde_json::json!(["my_realiplist"]));
-        assert_eq!(a(ports.dns, "direct5.test").await, 0);
-        assert_eq!(
-            a(ports.dns, "direct5.test").await,
-            0,
-            "not learned while off"
-        );
-        assert_eq!(aaaa(ports.dns, "v6none5.test").await, 6);
-        let effective = json(
-            &api(ports.api, "GET", "/api/v1/settings/effective", "")
-                .await
-                .body,
-        );
-        assert!(
-            effective.to_string().contains("my_realiplist"),
-            "{effective}"
-        );
-        api(
-            ports.api,
-            "POST",
-            "/api/v1/domain-generation",
-            r#"{"remember_direct":true}"#,
-        )
-        .await;
-        assert_eq!(a(ports.dns, "direct6.test").await, 0);
-        assert_eq!(a(ports.dns, "direct6.test").await, 11);
-        // The master switch gates every category.
-        let master = json(
-            &api(
-                ports.api,
-                "POST",
-                "/api/v1/domain-generation",
-                r#"{"enabled":false}"#,
-            )
-            .await
-            .body,
-        );
-        assert_eq!(master["flush_targets"].as_array().unwrap().len(), 5);
-        assert_eq!(aaaa(ports.dns, "v6none5.test").await, 0);
         shutdown.cancel();
         task.await.unwrap();
     });
@@ -1155,458 +1013,4 @@ fn bad_configurations_are_refused_with_the_path() {
     assert!(error.contains("already has a route_learner"), "{error}");
 }
 
-/// The `requery` flush rule: the caches are still flushed, the URLs that
-/// flush a learned category are skipped, anything else is called.
-#[test]
-fn requery_flushes_the_caches_but_never_a_learned_category() {
-    let tree = Tree::new("requery");
-    let ports = ports();
-    let upstream = Upstream::start();
-    config(
-        &tree,
-        &ports,
-        &upstream,
-        "  - tag: requery\n    type: requery\n    args: {file: webinfo/requeryconfig.json}\n  - tag: top_domains\n    type: domain_output\n    args: {file_stat: gen/top.txt, dump_interval: 3600}\n",
-        "",
-    );
-    let api_port = ports.api;
-    tree.write(
-        "webinfo/requeryconfig.json",
-        &format!(
-            r#"{{
-  "domain_processing": {{"source_files": [{{"alias": "stats", "path": "gen/top.txt"}}]}},
-  "url_actions": {{
-    "save_rules": [],
-    "flush_rules": [
-      "http://127.0.0.1:{api_port}/plugins/cache/flush",
-      "http://127.0.0.1:{api_port}/plugins/my_realiplist/flush",
-      "http://localhost:{api_port}/plugins/my_nov6list/flush",
-      "http://127.0.0.1:{api_port}/plugins/top_domains/flush"
-    ]
-  }},
-  "scheduler": {{"enabled": false, "start_datetime": "", "interval_minutes": 0}},
-  "execution_settings": {{"queries_per_second": 200, "resolver_address": "127.0.0.1:{dns}", "url_call_delay_ms": 5, "date_range_days": 30}},
-  "status": {{"task_state": "idle", "progress": {{"processed": 0, "total": 0}}}}
-}}"#,
-            dns = ports.dns
-        ),
-    );
-    tree.write("gen/top.txt", "0000000001 9999-12-31 plain-r.test\n");
-    let host = assemble(compile(&tree));
-    host.block_on(async {
-        let (shutdown, task) = serve(&host).await;
-        // A cached name, a learned direct name and a learned no-V6 name.
-        a(ports.dns, "direct7.test").await;
-        aaaa(ports.dns, "v6none7.test").await;
-        a(ports.dns, "plain-r.test").await;
-        let cached = upstream.count("plain-r.test", 1);
-        assert_eq!(a(ports.dns, "plain-r.test").await, 0);
-        assert_eq!(
-            upstream.count("plain-r.test", 1),
-            cached,
-            "served from the cache"
-        );
-
-        let started = api(ports.api, "POST", "/plugins/requery/trigger", "").await;
-        assert_eq!(started.status, 200, "{}", started.body);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let done = loop {
-            let status = json(
-                &api(ports.api, "GET", "/plugins/requery/status", "")
-                    .await
-                    .body,
-            );
-            if status["task_state"] == "idle" {
-                break status;
-            }
-            assert!(status["task_state"] != "failed", "{status}");
-            assert!(Instant::now() < deadline, "task did not finish: {status}");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert_eq!(done["skipped_flush_urls"], 2, "{done}");
-        // The cache was flushed: the re-query reached the upstream again.
-        assert!(upstream.count("plain-r.test", 1) > cached);
-        // The learned names were not touched.
-        assert_eq!(a(ports.dns, "direct7.test").await, 11);
-        assert_eq!(aaaa(ports.dns, "v6none7.test").await, 6);
-        // The ranking's flush URL was called: only the re-queried name is left.
-        let top = tree.text("gen/top.txt");
-        assert!(!top.contains("direct7.test"), "{top}");
-        shutdown.cancel();
-        task.await.unwrap();
-    });
-}
-
 // ----- tunable numbers (cache and learner settings) ----------------------------------
-
-fn settings_file(tree: &Tree) -> serde_json::Value {
-    json(&tree.text("webinfo/settings.json"))
-}
-
-#[test]
-fn the_cache_numbers_are_tuned_through_the_api_and_a_change_replaces_the_cache() {
-    let tree = Tree::new("cache-tuning");
-    let ports = ports();
-    let upstream = Upstream::start();
-    config(&tree, &ports, &upstream, "", "");
-    let host = assemble(compile(&tree));
-    host.block_on(async {
-        let (shutdown, task) = serve(&host).await;
-        let listed = json(&api(ports.api, "GET", "/api/v1/cache/settings", "").await.body);
-        assert_eq!(listed["settings_file"], "webinfo/settings.json");
-        let caches = listed["caches"].as_array().unwrap();
-        assert_eq!(caches.len(), 1);
-        assert_eq!(caches[0]["tag"], "cache");
-        assert_eq!(
-            caches[0]["size"],
-            serde_json::json!({"value": 1024, "default": 1024, "modified": false})
-        );
-        assert_eq!(caches[0]["lazy_cache_ttl"]["value"], 0);
-        assert_eq!(caches[0]["dump_interval"]["value"], 600);
-
-        // The second query is a cache hit.
-        assert_eq!(a(ports.dns, "plain.test").await, 0);
-        assert_eq!(a(ports.dns, "plain.test").await, 0);
-        assert_eq!(upstream.count("plain.test", 1), 1);
-
-        let changed = api(
-            ports.api,
-            "POST",
-            "/api/v1/cache/settings/cache",
-            r#"{"size":5000,"lazy_cache_ttl":604800}"#,
-        )
-        .await;
-        assert_eq!(changed.status, 200, "{}", changed.body);
-        let changed = json(&changed.body);
-        assert_eq!(changed["reset"], serde_json::json!(["cache"]));
-        assert_eq!(changed["cache"]["size"]["value"], 5000);
-        assert_eq!(changed["cache"]["size"]["modified"], true);
-        assert_eq!(changed["cache"]["dump_interval"]["modified"], false);
-        assert_eq!(
-            settings_file(&tree),
-            serde_json::json!({"version": 1, "caches": {"cache": {"size": 5000, "lazy_cache_ttl": 604_800}}})
-        );
-        let effective = json(&api(ports.api, "GET", "/api/v1/settings/effective", "").await.body);
-        assert!(
-            effective["items"].as_array().unwrap().iter().any(|item| item["kind"] == "cache"
-                && item["field"] == "size"
-                && item["value"] == "5000"
-                && item["source"] == "settings"),
-            "{effective}"
-        );
-        // The cache is a new, empty one.
-        assert_eq!(a(ports.dns, "plain.test").await, 0);
-        assert_eq!(upstream.count("plain.test", 1), 2);
-
-        // The same values again change nothing; a value equal to the YAML one
-        // is not stored.
-        let again = json(
-            &api(
-                ports.api,
-                "POST",
-                "/api/v1/cache/settings/cache",
-                r#"{"size":5000}"#,
-            )
-            .await
-            .body,
-        );
-        assert_eq!(again["reset"], serde_json::json!([]));
-        assert_eq!(a(ports.dns, "plain.test").await, 0);
-        assert_eq!(upstream.count("plain.test", 1), 2, "still cached");
-        let back = json(
-            &api(
-                ports.api,
-                "POST",
-                "/api/v1/cache/settings/cache",
-                r#"{"size":1024}"#,
-            )
-            .await
-            .body,
-        );
-        assert_eq!(back["reset"], serde_json::json!(["cache"]));
-        assert_eq!(
-            settings_file(&tree),
-            serde_json::json!({"version": 1, "caches": {"cache": {"lazy_cache_ttl": 604_800}}})
-        );
-
-        // Bad requests change nothing.
-        for (method, path, body, status) in [
-            ("POST", "/api/v1/cache/settings/cache", r#"{"size":10}"#, 400),
-            ("POST", "/api/v1/cache/settings/cache", r#"{"size":"big"}"#, 400),
-            ("POST", "/api/v1/cache/settings/cache", r#"{"size":1.5}"#, 400),
-            ("POST", "/api/v1/cache/settings/cache", r#"{"dump_interval":5}"#, 400),
-            ("POST", "/api/v1/cache/settings/cache", r#"{"bogus":1}"#, 400),
-            ("POST", "/api/v1/cache/settings/cache", "{}", 400),
-            ("POST", "/api/v1/cache/settings/cache", "not json", 400),
-            ("POST", "/api/v1/cache/settings/nothing", r#"{"size":5000}"#, 404),
-            ("GET", "/api/v1/cache/settings/cache", "", 405),
-            ("PUT", "/api/v1/cache/settings", "", 405),
-        ] {
-            let reply = api(ports.api, method, path, body).await;
-            assert_eq!(reply.status, status, "{method} {path} {body}: {}", reply.body);
-        }
-        assert_eq!(
-            settings_file(&tree),
-            serde_json::json!({"version": 1, "caches": {"cache": {"lazy_cache_ttl": 604_800}}})
-        );
-
-        // `null` restores one field; DELETE restores them all.
-        let nulled = json(
-            &api(
-                ports.api,
-                "POST",
-                "/api/v1/cache/settings/cache",
-                r#"{"lazy_cache_ttl":null}"#,
-            )
-            .await
-            .body,
-        );
-        assert_eq!(nulled["cache"]["lazy_cache_ttl"]["modified"], false);
-        assert_eq!(settings_file(&tree), serde_json::json!({"version": 1}));
-        api(
-            ports.api,
-            "POST",
-            "/api/v1/cache/settings/cache",
-            r#"{"dump_interval":3600}"#,
-        )
-        .await;
-        let deleted = json(&api(ports.api, "DELETE", "/api/v1/cache/settings/cache", "").await.body);
-        assert_eq!(deleted["cache"]["dump_interval"]["value"], 600);
-        assert_eq!(deleted["reset"], serde_json::json!(["cache"]));
-        assert_eq!(settings_file(&tree), serde_json::json!({"version": 1}));
-        shutdown.cancel();
-        task.await.unwrap();
-    });
-}
-
-#[test]
-fn the_learner_numbers_are_tuned_through_the_api_and_the_learned_names_stay() {
-    let tree = Tree::new("learner-tuning");
-    let ports = ports();
-    let upstream = Upstream::start();
-    config(&tree, &ports, &upstream, "", "");
-    let host = assemble(compile(&tree));
-    host.block_on(async {
-        let (shutdown, task) = serve(&host).await;
-        let listed = json(&api(ports.api, "GET", "/api/v1/learning/settings", "").await.body);
-        assert_eq!(
-            listed["write_interval"],
-            serde_json::json!({"value": 3600, "default": 3600, "modified": false})
-        );
-        let categories = listed["categories"].as_array().unwrap();
-        assert_eq!(categories.len(), 5);
-        assert_eq!(categories[0]["tag"], "my_sv4list", "declaration order");
-        assert_eq!(categories[0]["ttl"]["value"], 1000);
-        assert_eq!(categories[1]["tag"], "my_realiplist");
-        assert_eq!(categories[1]["ttl"]["default"], 100);
-        assert_eq!(categories[1]["max_entries"]["value"], 20000);
-
-        for name in ["direct1.test", "direct2.test", "direct3.test"] {
-            assert_eq!(a(ports.dns, name).await, 0);
-        }
-        assert_eq!(a(ports.dns, "direct1.test").await, 11);
-
-        let changed = api(
-            ports.api,
-            "POST",
-            "/api/v1/learning/settings",
-            r#"{"write_interval":600,"categories":{"my_realiplist":{"ttl":7200,"max_entries":50},"my_nov6list":{"ttl":120}}}"#,
-        )
-        .await;
-        assert_eq!(changed.status, 200, "{}", changed.body);
-        let changed = json(&changed.body);
-        assert_eq!(changed["write_interval"]["value"], 600);
-        assert_eq!(changed["categories"][1]["ttl"]["modified"], true);
-        assert_eq!(changed["categories"][2]["ttl"]["modified"], false);
-        assert_eq!(
-            settings_file(&tree),
-            serde_json::json!({"version": 1, "learning": {
-                "write_interval": 600,
-                "categories": {
-                    "my_realiplist": {"ttl": 7200, "max_entries": 50},
-                    "my_nov6list": {"ttl": 120}
-                }
-            }})
-        );
-        let status = json(&api(ports.api, "GET", "/plugins/route_learner/status", "").await.body);
-        assert_eq!(status["write_interval_seconds"], 600);
-        let direct = status["categories"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|category| category["tag"] == "my_realiplist")
-            .unwrap();
-        assert_eq!(direct["ttl_seconds"], 7200);
-        assert_eq!(direct["max_entries"], 50);
-        assert_eq!(direct["entries"], 3, "what was learned stays");
-        assert_eq!(a(ports.dns, "direct2.test").await, 11);
-
-        // Lowering the capacity keeps that many names.
-        api(
-            ports.api,
-            "POST",
-            "/api/v1/learning/settings",
-            r#"{"categories":{"my_realiplist":{"max_entries":2}}}"#,
-        )
-        .await;
-        let status = json(&api(ports.api, "GET", "/plugins/route_learner/status", "").await.body);
-        let direct = status["categories"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|category| category["tag"] == "my_realiplist")
-            .unwrap();
-        assert_eq!(direct["entries"], 2);
-        assert_eq!(status["counters"]["evicted"], 1);
-
-        // Values equal to the YAML ones are not stored; null restores.
-        let restored = api(
-            ports.api,
-            "POST",
-            "/api/v1/learning/settings",
-            r#"{"write_interval":3600,"categories":{"my_realiplist":{"ttl":100,"max_entries":null},"my_nov6list":{"ttl":null}}}"#,
-        )
-        .await;
-        assert_eq!(restored.status, 200, "{}", restored.body);
-        assert_eq!(settings_file(&tree), serde_json::json!({"version": 1}));
-
-        // Bad requests change nothing.
-        api(
-            ports.api,
-            "POST",
-            "/api/v1/learning/settings",
-            r#"{"write_interval":900}"#,
-        )
-        .await;
-        let kept = settings_file(&tree);
-        for (method, body, status) in [
-            ("POST", r#"{"write_interval":10}"#, 400),
-            ("POST", r#"{"categories":{"my_realiplist":{"ttl":10}}}"#, 400),
-            ("POST", r#"{"categories":{"my_realiplist":{"max_entries":0}}}"#, 400),
-            ("POST", r#"{"categories":{"my_realiplist":{"max_entries":262145}}}"#, 400),
-            ("POST", r#"{"categories":{"my_realiplist":{"mark":3}}}"#, 400),
-            ("POST", r#"{"categories":{"my_realiplist":5}}"#, 400),
-            ("POST", r#"{"categories":{"nothing":{"ttl":100}}}"#, 404),
-            ("POST", r#"{"bogus":1}"#, 400),
-            ("POST", "{}", 400),
-            ("PUT", "{}", 405),
-        ] {
-            let reply = api(ports.api, method, "/api/v1/learning/settings", body).await;
-            assert_eq!(reply.status, status, "{method} {body}: {}", reply.body);
-        }
-        assert_eq!(settings_file(&tree), kept);
-        let deleted = api(ports.api, "DELETE", "/api/v1/learning/settings", "").await;
-        assert_eq!(deleted.status, 200);
-        assert_eq!(settings_file(&tree), serde_json::json!({"version": 1}));
-        shutdown.cancel();
-        task.await.unwrap();
-    });
-}
-
-#[test]
-fn caches_and_learning_rules_carry_display_labels() {
-    let tree = Tree::new("labels");
-    let ports = ports();
-    let upstream = Upstream::start();
-    config(&tree, &ports, &upstream, "", "");
-    // The cache and the rule that learns direct names get a label; the other rules do not.
-    let yaml = tree
-        .text("config.yaml")
-        .replace(
-            r#"args: {dump_file: "cache/c.gz"}"#,
-            r#"args: {dump_file: "cache/c.gz", label: "全局缓存·兼容模式"}"#,
-        )
-        .replace(
-            "{tag: learn_direct, type: route_learn, args: {learner: route_learner,",
-            r#"{tag: learn_direct, type: route_learn, args: {label: "探测到国内 IP", learner: route_learner,"#,
-        );
-    tree.write("config.yaml", &yaml);
-    let host = assemble(compile(&tree));
-    host.block_on(async {
-        let (shutdown, task) = serve(&host).await;
-        let inventory = json(
-            &api(ports.api, "GET", "/api/v1/cache/inventory", "")
-                .await
-                .body,
-        );
-        assert_eq!(
-            inventory["caches"][0],
-            serde_json::json!({"tag": "cache", "label": "全局缓存·兼容模式"})
-        );
-        let listed = json(
-            &api(ports.api, "GET", "/api/v1/cache/settings", "")
-                .await
-                .body,
-        );
-        assert_eq!(listed["caches"][0]["label"], "全局缓存·兼容模式");
-
-        assert_eq!(a(ports.dns, "direct1.test").await, 0);
-        assert_eq!(a(ports.dns, "proxy1.test").await, 0);
-        let entries = json(
-            &api(
-                ports.api,
-                "GET",
-                "/plugins/route_learner/entries?limit=50",
-                "",
-            )
-            .await
-            .body,
-        );
-        let find = |name: &str| {
-            entries["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|entry| entry["name"] == name)
-                .unwrap_or_else(|| panic!("{name}: {entries}"))
-                .clone()
-        };
-        assert_eq!(find("direct1.test")["reason"], "learn_direct");
-        assert_eq!(find("direct1.test")["reason_label"], "探测到国内 IP");
-        assert_eq!(find("proxy1.test")["reason"], "learn_proxy");
-        assert_eq!(find("proxy1.test")["reason_label"], "");
-
-        // Renaming a cache never replaces it: the second query is still a hit.
-        assert_eq!(a(ports.dns, "plain.test").await, 0);
-        assert_eq!(a(ports.dns, "plain.test").await, 0);
-        assert_eq!(upstream.count("plain.test", 1), 1);
-        shutdown.cancel();
-        task.await.unwrap();
-    });
-}
-
-#[test]
-fn a_bad_label_is_a_load_error_with_its_path() {
-    let tree = Tree::new("bad-label");
-    let ports = ports();
-    let upstream = Upstream::start();
-    config(&tree, &ports, &upstream, "", "");
-    let base = tree.text("config.yaml");
-    for (from, to, path) in [
-        (
-            r#"args: {dump_file: "cache/c.gz"}"#,
-            r#"args: {dump_file: "cache/c.gz", label: ""}"#,
-            "cache",
-        ),
-        (
-            r#"args: {dump_file: "cache/c.gz"}"#,
-            r#"args: {dump_file: "cache/c.gz", label: 5}"#,
-            "cache",
-        ),
-        (
-            "{tag: learn_direct, type: route_learn, args: {learner: route_learner,",
-            &format!(
-                "{{tag: learn_direct, type: route_learn, args: {{label: \"{}\", learner: route_learner,",
-                "长".repeat(65)
-            ),
-            "route_learn",
-        ),
-    ] {
-        tree.write("config.yaml", &base.replace(from, to));
-        let error = atomdns_native_host::load_and_compile(&tree.path("config.yaml"))
-            .err()
-            .unwrap_or_else(|| panic!("{path}: a bad label must fail"))
-            .to_string();
-        assert!(error.contains("label"), "{path}: {error}");
-    }
-}
