@@ -404,7 +404,7 @@ fn default_rules(adguard: bool) -> Vec<Rule> {
     rules
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -1047,6 +1047,24 @@ impl AtomRules {
         let hit = table.first(&query)?;
         let state = self.state.borrow();
         Some((hit.index, state.rules.get(hit.index)?.clone()))
+    }
+
+    /// What the table decides for `qname_wire` from a client no `client`
+    /// condition names (the binding ledger, [`crate::atom_ledger`]); `None`:
+    /// no rule, the original judgment.
+    pub(crate) fn decide(&self, qname_wire: &[u8], fast_flags: u64) -> Option<Verdict> {
+        let hostname = crate::matchers::wire_name_to_ascii_domain(qname_wire);
+        let presentation = crate::config::presentation_name(qname_wire);
+        let query = Query {
+            hostname: hostname.as_deref(),
+            presentation: presentation.as_deref(),
+            fast_flags,
+            client: None,
+        };
+        self.table
+            .get()
+            .first(&query)
+            .map(|rule| rule.verdict.clone())
     }
 
     // ---- rulesets -------------------------------------------------------

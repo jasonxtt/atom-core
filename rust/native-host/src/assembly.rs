@@ -1294,12 +1294,17 @@ impl ExchangeExecutor for ForwardCatalog {
         else {
             return Box::pin(async move { Err(ExchangeError::UnknownExecutable(executable)) });
         };
+        let name = self.fakeip_name(executable, query);
         let query = self.outgoing_query(executable, query, None);
         Box::pin(async move {
-            owner
+            let response = owner
                 .exchange(&query?, deadline, cancellation)
                 .await
-                .map_err(ExchangeError::Upstream)
+                .map_err(ExchangeError::Upstream)?;
+            if let Some(name) = name {
+                crate::atom_ledger::record(&name, None);
+            }
+            Ok(response)
         })
     }
 
@@ -1323,7 +1328,65 @@ impl ExchangeExecutor for ForwardCatalog {
         )
     }
 
+    /// A FakeIP query sing-box answered goes into the binding ledger
+    /// ([`crate::atom_ledger`]) with its directive.
     fn exchange_invocation_with_outbound<'a>(
+        &'a self,
+        executable: atomdns_sequence_core::ExecutableId,
+        query: &'a [u8],
+        deadline: std::time::Instant,
+        cancellation: TransportCancellation,
+        ledger: UpstreamAttemptLedgerHandle,
+        outbound: Option<std::sync::Arc<str>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<InvocationExchange, ExchangeError>> + 'a>,
+    > {
+        let Some(name) = self.fakeip_name(executable, query) else {
+            return self.exchange_invocation_inner(
+                executable,
+                query,
+                deadline,
+                cancellation,
+                ledger,
+                outbound,
+            );
+        };
+        let directive = outbound.clone();
+        let exchange = self.exchange_invocation_inner(
+            executable,
+            query,
+            deadline,
+            cancellation,
+            ledger,
+            outbound,
+        );
+        Box::pin(async move {
+            let result = exchange.await;
+            if result.is_ok() {
+                crate::atom_ledger::record(&name, directive.as_deref());
+            }
+            result
+        })
+    }
+}
+
+impl ForwardCatalog {
+    /// The question name of a query for the FakeIP upstream (`None` for any
+    /// other upstream).
+    fn fakeip_name(
+        &self,
+        executable: atomdns_sequence_core::ExecutableId,
+        query: &[u8],
+    ) -> Option<Vec<u8>> {
+        if !self.fakeip.contains(&executable) {
+            return None;
+        }
+        parse_query(query)
+            .ok()
+            .map(|(_, question)| question.qname_wire)
+    }
+
+    fn exchange_invocation_inner<'a>(
         &'a self,
         executable: atomdns_sequence_core::ExecutableId,
         query: &'a [u8],

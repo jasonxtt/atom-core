@@ -178,13 +178,18 @@ pub(crate) async fn handle(
         }
     };
     Some(match reply {
-        Ok(reply) => match flush_caches(config, cache).await {
-            Ok(()) => reply,
-            Err(e) => error(
-                500,
-                format!("修改已保存并生效，但清空缓存失败，旧的缓存应答可能还会被使用: {e}"),
-            ),
-        },
+        Ok(reply) => {
+            let flushed = flush_caches(config, cache).await;
+            // Names clients already hold follow the new rules at once.
+            crate::atom_ledger::resync(config, rules, segments[0]).await;
+            match flushed {
+                Ok(()) => reply,
+                Err(e) => error(
+                    500,
+                    format!("修改已保存并生效，但清空缓存失败，旧的缓存应答可能还会被使用: {e}"),
+                ),
+            }
+        }
         Err(reply) => reply,
     })
 }

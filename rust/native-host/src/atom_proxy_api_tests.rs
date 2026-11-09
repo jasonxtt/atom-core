@@ -507,6 +507,8 @@ fn settings_are_validated_and_applied() {
     assert_eq!(status, 200);
     assert_eq!(settings["mixed_port"], 7890);
     assert_eq!(settings["resolver_effective"], "udp://223.5.5.5");
+    assert_eq!(settings["direct_ttl_max"], 300);
+    assert_eq!(settings["fakeip_ttl_max"], 1);
     let (status, refused) = api.call("PUT", "/api/v1/atom/settings", r#"{"mixed_port": 6666}"#);
     assert_eq!(status, 400, "{refused}");
     let (status, applied) = api.call(
@@ -519,6 +521,21 @@ fn settings_are_validated_and_applied() {
     let live = api.live();
     assert_eq!(live["dns"]["servers"][0]["inet4_range"], "198.18.0.0/15");
     assert_eq!(live["dns"]["servers"][1]["type"], "tcp");
+    let (status, refused) = api.call("PUT", "/api/v1/atom/settings", r#"{"fakeip_ttl_max": 0}"#);
+    assert_eq!(status, 400, "{refused}");
+    let before = api.fake.live();
+    let (status, applied) = api.call(
+        "PUT",
+        "/api/v1/atom/settings",
+        r#"{"direct_ttl_max": 60, "fakeip_ttl_max": 5}"#,
+    );
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(
+        (&applied["direct_ttl_max"], &applied["fakeip_ttl_max"]),
+        (&Value::from(60), &Value::from(5))
+    );
+    // Not part of the sing-box configuration: nothing was applied.
+    assert_eq!(api.fake.live(), before);
     let (status, applied) = api.call("PUT", "/api/v1/atom/settings", r#"{"mixed_port": 17890}"#);
     assert_eq!(status, 200, "{applied}");
     assert_eq!(api.live()["inbounds"][3]["listen_port"], 17890);

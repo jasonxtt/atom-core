@@ -960,3 +960,76 @@ plugins:
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// An answer for `a.test` A with one record per `(address, ttl)`.
+fn answer(records: &[([u8; 4], u32)]) -> Vec<u8> {
+    let mut wire = vec![0, 1, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0];
+    wire[7] = u8::try_from(records.len()).unwrap();
+    wire.extend_from_slice(&[1, b'a', 4, b't', b'e', b's', b't', 0, 0, 1, 0, 1]);
+    for (address, ttl) in records {
+        wire.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1]);
+        wire.extend_from_slice(&ttl.to_be_bytes());
+        wire.extend_from_slice(&[0, 4]);
+        wire.extend_from_slice(address);
+    }
+    wire
+}
+
+fn ttls(wire: &[u8]) -> Vec<u32> {
+    hickory_proto::op::Message::from_vec(wire)
+        .unwrap()
+        .answers()
+        .iter()
+        .map(hickory_proto::rr::Record::ttl)
+        .collect()
+}
+
+#[test]
+fn answers_have_their_ttls_capped() {
+    let host = crate::atom_singbox::Host {
+        binary: "/bin/true".into(),
+        dir: "/nonexistent".into(),
+        reload: vec!["true".into()],
+        clash_api: "127.0.0.1:9".parse().unwrap(),
+        dns_in: "127.0.0.1:9".parse().unwrap(),
+        atomdns: "127.0.0.1:53".parse().unwrap(),
+        redirect_port: 7892,
+        tproxy_port: 7893,
+        resolver_group: "domestic".into(),
+        nft_table: None,
+        nft: vec!["nft".into()],
+    };
+    let rules = AtomRules::load(
+        Path::new(""),
+        MARKS,
+        None,
+        String::new(),
+        Vec::new(),
+        Some(host),
+    )
+    .unwrap();
+    // Defaults: FakeIPs 1 second, real addresses 300.
+    let fake = answer(&[([28, 0, 0, 7], 600)]);
+    assert_eq!(ttls(&rules.cap_ttls(&fake).unwrap()), [1]);
+    let real = answer(&[([1, 2, 3, 4], 3600), ([1, 2, 3, 5], 20)]);
+    assert_eq!(ttls(&rules.cap_ttls(&real).unwrap()), [300, 20]);
+    // An answer without addresses is left alone.
+    assert_eq!(rules.cap_ttls(&answer(&[])), None);
+    assert_eq!(rules.cap_ttls(b"junk"), None);
+    {
+        let owner = rules.proxy.as_ref().unwrap();
+        let mut state = owner.state.borrow_mut();
+        state.settings.fakeip_ttl_max = 30;
+        state.settings.direct_ttl_max = 60;
+        state.settings.fakeip_range = "29.1.0.0/16".into();
+    }
+    assert_eq!(
+        ttls(&rules.cap_ttls(&fake).unwrap()),
+        [60],
+        "28.0.0.7 is real now"
+    );
+    let fake = answer(&[([29, 1, 200, 1], 600)]);
+    assert_eq!(ttls(&rules.cap_ttls(&fake).unwrap()), [30]);
+    // Without a proxy side nothing is capped.
+    assert_eq!(owner(Path::new("")).cap_ttls(&real), None);
+}

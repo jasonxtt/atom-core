@@ -228,6 +228,17 @@ fn settings_are_checked() {
     assert!(with(&|s| s.resolver = "udp://dns.example".into()).is_err());
     assert!(with(&|s| s.mixed_port = 9090).unwrap_err().contains("占用"));
     assert!(with(&|s| s.mixed_port = 0).is_err());
+    with(&|s| {
+        s.direct_ttl_max = 86400;
+        s.fakeip_ttl_max = 1;
+    })
+    .unwrap();
+    assert!(
+        with(&|s| s.direct_ttl_max = 0)
+            .unwrap_err()
+            .contains("direct_ttl_max")
+    );
+    assert!(with(&|s| s.fakeip_ttl_max = 86401).is_err());
     assert_eq!(
         parse_resolver("udp://1.2.3.4:5353").unwrap(),
         ("udp", "1.2.3.4".parse().unwrap(), 5353)

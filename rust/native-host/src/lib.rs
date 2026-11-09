@@ -3,6 +3,7 @@
 
 mod api;
 mod assembly;
+mod atom_ledger;
 mod atom_links;
 mod atom_proxy;
 mod atom_proxy_api;

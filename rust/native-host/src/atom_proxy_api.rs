@@ -121,6 +121,8 @@ fn settings_view(rules: &AtomRules, state: &ProxyState) -> Value {
         "resolver": state.settings.resolver,
         "resolver_effective": rules.resolver_for(state),
         "mixed_port": state.settings.mixed_port,
+        "direct_ttl_max": state.settings.direct_ttl_max,
+        "fakeip_ttl_max": state.settings.fakeip_ttl_max,
     })
 }
 
@@ -463,6 +465,8 @@ async fn put_settings(
         fakeip_range: Option<String>,
         resolver: Option<String>,
         mixed_port: Option<u16>,
+        direct_ttl_max: Option<u32>,
+        fakeip_ttl_max: Option<u32>,
     }
     let parsed = object(bytes).and_then(|(version, map)| Ok((version, from_map::<Put>(map)?)));
     let (version, request) = match parsed {
@@ -492,6 +496,12 @@ async fn put_settings(
     if let Some(port) = request.mixed_port {
         next.settings.mixed_port = port;
     }
+    if let Some(ttl) = request.direct_ttl_max {
+        next.settings.direct_ttl_max = ttl;
+    }
+    if let Some(ttl) = request.fakeip_ttl_max {
+        next.settings.fakeip_ttl_max = ttl;
+    }
     if next.settings == current.settings {
         return reply_json(200, &settings_view(rules, &current));
     }
@@ -499,8 +509,10 @@ async fn put_settings(
     if let Err(e) = rules.transact(None, Some(next.clone()), "settings").await {
         return fail(&e);
     }
-    // Cached answers hold FakeIPs of the old range.
+    // Cached answers hold FakeIPs of the old range; sing-box dropped every
+    // mapping and binding.
     if next.settings.fakeip_range != current.settings.fakeip_range {
+        crate::atom_ledger::clear();
         if let Err(e) = flush_caches(config, cache).await {
             return error(
                 500,
@@ -570,6 +582,7 @@ async fn status(rules: &AtomRules) -> Reply {
                 "host": host_view,
             },
             "last_apply": crate::atom_rules::last_apply(),
+            "bindings": crate::atom_ledger::view(),
             "warnings": {"empty_groups": current.empty_groups()},
             // For the nft rules (atom steps 4 and 7): what must reach sing-box.
             "nft": {
@@ -651,14 +664,21 @@ pub(crate) async fn handle(
         }
         ("PUT", ["groups", id]) => update_group(rules, id, body).await,
         ("DELETE", ["groups", id]) => match delete_group(rules, id, query).await {
-            // Rules moved to Final: cached answers carry the old SET.
-            Ok((reply, true)) => match flush_caches(config, cache).await {
-                Ok(()) => Ok(reply),
-                Err(e) => Err(error(
-                    500,
-                    format!("修改已保存并生效，但清空缓存失败，旧的缓存应答可能还会被使用: {e}"),
-                )),
-            },
+            // Rules moved to Final: cached answers carry the old SET, and
+            // sing-box still binds names to the deleted group.
+            Ok((reply, true)) => {
+                let flushed = flush_caches(config, cache).await;
+                crate::atom_ledger::resync(config, rules, "groups").await;
+                match flushed {
+                    Ok(()) => Ok(reply),
+                    Err(e) => Err(error(
+                        500,
+                        format!(
+                            "修改已保存并生效，但清空缓存失败，旧的缓存应答可能还会被使用: {e}"
+                        ),
+                    )),
+                }
+            }
             Ok((reply, false)) => Ok(reply),
             Err(reply) => Err(reply),
         },

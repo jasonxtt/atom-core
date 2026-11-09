@@ -34,6 +34,11 @@ pub(crate) const DEFAULT_INTERVAL: &str = "3m";
 pub(crate) const DEFAULT_TOLERANCE: u16 = 50;
 pub(crate) const DEFAULT_FAKEIP_RANGE: &str = "28.0.0.0/8";
 pub(crate) const DEFAULT_MIXED_PORT: u16 = 7890;
+/// The TTL caps of the answers AtomDNS sends (design §4.5): real addresses
+/// (a change of the rules reaches them when it expires) and FakeIPs.
+pub(crate) const DEFAULT_DIRECT_TTL_MAX: u32 = 300;
+pub(crate) const DEFAULT_FAKEIP_TTL_MAX: u32 = 1;
+const TTL_MAX_LIMIT: u32 = 86400;
 const MAX_NAME_CHARS: usize = 64;
 /// The most nodes one state holds (an import is refused beyond it).
 const MAX_NODES: usize = 4096;
@@ -120,6 +125,20 @@ pub(crate) struct Settings {
     pub(crate) resolver: String,
     /// The mixed inbound; AtomDNS's `main_proxy` follows it.
     pub(crate) mixed_port: u16,
+    /// The most TTL (seconds) of an A/AAAA answer with real addresses.
+    #[serde(default = "direct_ttl_max_default")]
+    pub(crate) direct_ttl_max: u32,
+    /// The most TTL (seconds) of an A/AAAA answer with FakeIPs.
+    #[serde(default = "fakeip_ttl_max_default")]
+    pub(crate) fakeip_ttl_max: u32,
+}
+
+fn direct_ttl_max_default() -> u32 {
+    DEFAULT_DIRECT_TTL_MAX
+}
+
+fn fakeip_ttl_max_default() -> u32 {
+    DEFAULT_FAKEIP_TTL_MAX
 }
 
 impl Default for Settings {
@@ -128,6 +147,8 @@ impl Default for Settings {
             fakeip_range: DEFAULT_FAKEIP_RANGE.to_owned(),
             resolver: String::new(),
             mixed_port: DEFAULT_MIXED_PORT,
+            direct_ttl_max: DEFAULT_DIRECT_TTL_MAX,
+            fakeip_ttl_max: DEFAULT_FAKEIP_TTL_MAX,
         }
     }
 }
@@ -407,6 +428,16 @@ pub(crate) fn check_settings(settings: &Settings, reserved: &[u16]) -> Result<()
     }
     if !settings.resolver.trim().is_empty() {
         parse_resolver(&settings.resolver).map_err(invalid)?;
+    }
+    for (name, value) in [
+        ("direct_ttl_max", settings.direct_ttl_max),
+        ("fakeip_ttl_max", settings.fakeip_ttl_max),
+    ] {
+        if !(1..=TTL_MAX_LIMIT).contains(&value) {
+            return Err(invalid(format!(
+                "{name} {value} 无效：要 1 到 {TTL_MAX_LIMIT} 秒"
+            )));
+        }
     }
     if settings.mixed_port == 0 || reserved.contains(&settings.mixed_port) {
         return Err(invalid(format!(

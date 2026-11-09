@@ -1403,7 +1403,14 @@ pub(crate) async fn execute_request(
     request_shutdown: TransportCancellation,
     checkpoint: &mut ExecutionCheckpoint,
 ) -> ExecutionResult {
-    execute_request_with_observation(request, forwards, request_shutdown, checkpoint).await
+    let rules = request.config.local.atom_rules.clone();
+    let mut result =
+        execute_request_with_observation(request, forwards, request_shutdown, checkpoint).await;
+    // atom: the answer's TTLs are capped on the way out (cache hits too).
+    if let Some(capped) = rules.and_then(|rules| rules.cap_ttls(&result.response_wire)) {
+        result.response_wire = capped;
+    }
+    result
 }
 
 #[cfg(test)]

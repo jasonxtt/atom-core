@@ -182,6 +182,39 @@ impl AtomRules {
             .map(|proxy| proxy.state.borrow().clone())
     }
 
+    /// `wire` with its TTLs capped (design §4.5), when it is an answer with
+    /// A/AAAA addresses: FakeIPs to `fakeip_ttl_max`, real addresses to
+    /// `direct_ttl_max`. `None`: left as it is (no address, no proxy side).
+    pub(crate) fn cap_ttls(&self, wire: &[u8]) -> Option<Vec<u8>> {
+        let owner = self.proxy.as_ref()?;
+        let (range, direct, fakeip) = {
+            let state = owner.state.borrow();
+            let settings = &state.settings;
+            (
+                crate::rule_formats::parse_prefix(&settings.fakeip_range),
+                settings.direct_ttl_max,
+                settings.fakeip_ttl_max,
+            )
+        };
+        let addresses = atomdns_dns_core::observe_answer_addresses(wire).ok()?;
+        if addresses.is_empty() {
+            return None;
+        }
+        let fake = |address: &std::net::IpAddr| match (address, range) {
+            (std::net::IpAddr::V4(address), Some((std::net::IpAddr::V4(network), bits))) => {
+                let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
+                u32::from(*address) & mask == u32::from(network) & mask
+            }
+            _ => false,
+        };
+        let cap = if addresses.iter().any(fake) {
+            fakeip
+        } else {
+            direct
+        };
+        atomdns_dns_core::clamp_response_ttls(wire, 0, cap).ok()
+    }
+
     pub(crate) fn proxy_host(&self) -> Option<&Host> {
         self.proxy.as_ref().map(|proxy| &proxy.host)
     }
