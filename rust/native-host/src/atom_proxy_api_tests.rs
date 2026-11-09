@@ -966,6 +966,22 @@ fn groups_and_final_move_in_the_display_order_without_a_reload() {
     assert_eq!(moved["order"], serde_json::json!([ai, "g-default", media, "final"]));
     api.reloads_from_disk().expect("the saved order loads");
 
+    // Even when the running file is not the saved state's (a failed
+    // compensation), a move applies nothing.
+    let path = api.fake.host.config_path();
+    let mut stale: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    stale["marker"] = "stale".into();
+    std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+    let (file, reloads) = (api.fake.live(), api.fake.reload_count());
+    let (status, moved) = api.call(
+        "POST",
+        "/api/v1/atom/groups/move",
+        &format!(r#"{{"id": "final", "before_id": "{ai}"}}"#),
+    );
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(moved["order"], serde_json::json!(["final", ai, "g-default", media]));
+    assert_eq!((api.fake.live(), api.fake.reload_count()), (file, reloads));
+
     // A deleted group leaves the order; a new one goes last.
     let (status, _) = api.call("DELETE", &format!("/api/v1/atom/groups/{media}"), "");
     assert_eq!(status, 200);
@@ -976,7 +992,7 @@ fn groups_and_final_move_in_the_display_order_without_a_reload() {
     );
     let new = created["group"]["id"].as_str().unwrap().to_owned();
     let (_, groups) = api.call("GET", "/api/v1/atom/groups", "");
-    assert_eq!(groups["order"], serde_json::json!([ai, "g-default", "final", new]));
+    assert_eq!(groups["order"], serde_json::json!(["final", ai, "g-default", new]));
 
     for (body, want) in [
         (r#"{"id": "final"}"#.to_owned(), 400),

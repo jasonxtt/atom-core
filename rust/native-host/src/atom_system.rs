@@ -52,12 +52,13 @@ fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
     Some((field("MemTotal:")?, field("MemAvailable:")?))
 }
 
-/// The process running `binary`: the one whose `/proc/<pid>/exe` is that
-/// file, else the only one named `sing-box`.
+/// The process running `binary`: the only one whose `/proc/<pid>/exe` is
+/// that file; when none is, the only one named `sing-box`. Several
+/// candidates: none (better no figures than another instance's).
 #[cfg(target_os = "linux")]
 fn find_process(binary: &Path) -> Option<u32> {
     let wanted = std::fs::canonicalize(binary).ok();
-    let mut by_name = Vec::new();
+    let (mut by_exe, mut by_name) = (Vec::new(), Vec::new());
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
             continue;
@@ -65,15 +66,16 @@ fn find_process(binary: &Path) -> Option<u32> {
         let dir = entry.path();
         if let (Some(wanted), Ok(exe)) = (&wanted, std::fs::read_link(dir.join("exe"))) {
             if &exe == wanted {
-                return Some(pid);
+                by_exe.push(pid);
+                continue;
             }
         }
         if std::fs::read_to_string(dir.join("comm")).is_ok_and(|comm| comm.trim() == "sing-box") {
             by_name.push(pid);
         }
     }
-    match by_name.as_slice() {
-        [pid] => Some(*pid),
+    match (by_exe.as_slice(), by_name.as_slice()) {
+        ([pid], _) | ([], [pid]) => Some(*pid),
         _ => None,
     }
 }

@@ -431,8 +431,8 @@ fn groups_view(state: &ProxyState) -> Value {
 }
 
 /// Moves a group (or Final) before or after another in the display order.
-/// Only atom's state changes; the sing-box configuration stays as it is.
-async fn move_group(rules: &AtomRules, bytes: &[u8]) -> Answer {
+/// Only atom's state changes; sing-box is not touched.
+fn move_group(rules: &AtomRules, bytes: &[u8]) -> Answer {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Move {
@@ -468,12 +468,8 @@ async fn move_group(rules: &AtomRules, bytes: &[u8]) -> Answer {
     if order == old {
         return Ok(reply_json(200, &groups_view(&current)));
     }
-    let mut next = current;
-    next.order = order;
-    next.version += 1;
-    rules
-        .transact(None, Some(next.clone()), "groups")
-        .await
+    let next = rules
+        .save_display_order(order, version)
         .map_err(|e| fail(&e))?;
     Ok(reply_json(200, &groups_view(&next)))
 }
@@ -525,8 +521,9 @@ async fn runtime(rules: &AtomRules) -> Answer {
         let last = entry(&node.id)
             .and_then(|p| p.get("history"))
             .and_then(Value::as_array)
-            .and_then(|history| history.last())
-            .filter(|last| last.get("delay").and_then(Value::as_u64).unwrap_or(0) > 0);
+            // A failed test removes the history: any entry is a success
+            // (0 ms included).
+            .and_then(|history| history.last());
         nodes.insert(
             node.id.clone(),
             json!({
@@ -758,12 +755,18 @@ pub(crate) async fn handle(
         return error(404, "not found");
     }
     if segments == ["system"] {
-        return match method {
-            "GET" => reply_json(
-                200,
-                &crate::atom_system::snapshot(rules.proxy_host().map(|host| host.binary.as_path())),
-            ),
-            _ => error(405, "method not allowed"),
+        if method != "GET" {
+            return error(405, "method not allowed");
+        }
+        // /proc scans: off the runtime thread that serves DNS.
+        let binary = rules.proxy_host().map(|host| host.binary.clone());
+        return match tokio::task::spawn_blocking(move || {
+            crate::atom_system::snapshot(binary.as_deref())
+        })
+        .await
+        {
+            Ok(value) => reply_json(200, &value),
+            Err(e) => error(500, format!("任务异常结束: {e}")),
         };
     }
     if rules.proxy_host().is_none() {
@@ -796,7 +799,7 @@ pub(crate) async fn handle(
         ("POST", ["nodes", id, "delay"]) => delay(rules, id, true, body).await,
         ("GET", ["groups"]) => Ok(reply_json(200, &groups_view(&current()))),
         ("POST", ["groups"]) => create_group(rules, body).await,
-        ("POST", ["groups", "move"]) => move_group(rules, body).await,
+        ("POST", ["groups", "move"]) => move_group(rules, body),
         ("GET", ["groups", id]) => {
             let state = current();
             match state.group(id) {

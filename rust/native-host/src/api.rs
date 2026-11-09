@@ -616,9 +616,9 @@ async fn process_connection(
     }
     if let Some(control) = control.as_ref().filter(|control| !control.admission_open()) {
         let response = if control.recovery_required() {
-            Response::error(503, "recovery required")
+            busy_refusal(&request, "recovery required")
         } else {
-            Response::error(503, "host is applying configuration")
+            busy_refusal(&request, "host is applying configuration")
         };
         let (_reader, mut writer) = stream.into_split();
         let result = write_response(&mut writer, &response).await;
@@ -645,9 +645,9 @@ async fn process_connection(
                 Ok(lease) => Some(lease),
                 Err(_) => {
                     let response = if control.recovery_required() {
-                        Response::error(503, "recovery required")
+                        busy_refusal(&request, "recovery required")
                     } else {
-                        Response::error(503, "host is applying configuration")
+                        busy_refusal(&request, "host is applying configuration")
                     };
                     let (_reader, mut writer) = stream.into_split();
                     let result = write_response(&mut writer, &response).await;
@@ -2611,6 +2611,17 @@ pub(crate) fn routes_to_audit(target: &str) -> bool {
     matches!(route(target), Route::Audit(_) | Route::AuditV2(_))
 }
 
+/// A 503 refusal before dispatch (admission closed, no lease); JSON under
+/// the atom API's prefix (atom fork), text elsewhere as before.
+fn busy_refusal(request: &Request, message: &str) -> Response {
+    let response = Response::error(503, message);
+    if request.target.starts_with(crate::atom_rules_api::PREFIX) {
+        atom_envelope(response)
+    } else {
+        response
+    }
+}
+
 /// An audit answer in the atom API's form: an error becomes `{"error"}`, a
 /// text confirmation `{"message"}`; JSON passes through.
 fn atom_envelope(response: Response) -> Response {
@@ -2860,7 +2871,37 @@ mod tests {
         migrate_legacy_settings, normalized_ip, parse_audit_filter, parse_rank_limit, query_pairs,
         query_type_name, response_code_name,
     };
+    use super::{
+        AuditRoute, AuditV2Route, Request, Response, Route, atom_envelope, busy_refusal, route,
+    };
 
+    #[test]
+    fn atom_routes_answer_refusals_and_audit_text_as_json() {
+        let request = |target: &str| Request {
+            method: "GET".to_owned(),
+            target: target.to_owned(),
+            body: Vec::new(),
+        };
+        let refused = busy_refusal(&request("/api/v1/atom/rules"), "host is applying configuration");
+        assert_eq!((refused.status, refused.content_type), (503, Some("application/json")));
+        assert_eq!(refused.body, b"{\"error\":\"host is applying configuration\"}\n");
+        let legacy = busy_refusal(&request("/api/v1/audit/clear"), "recovery required");
+        assert_eq!(legacy.content_type, Some("text/plain; charset=utf-8"));
+        assert_eq!(legacy.body, b"recovery required\n");
+
+        let message = atom_envelope(Response::success("Audit log collection started."));
+        assert_eq!(message.body, b"{\"message\":\"Audit log collection started.\"}\n");
+        let canceled = atom_envelope(Response::empty(499));
+        assert_eq!((canceled.status, canceled.body.as_slice()), (499, &b"{\"error\":\"\"}\n"[..]));
+        let json = Response::json(&serde_json::json!({"capturing": true}));
+        assert_eq!(atom_envelope(json).body, b"{\"capturing\":true}\n");
+        assert!(matches!(
+            route("/api/v1/atom/audit/rank/slowest"),
+            Route::AuditV2(AuditV2Route::RankSlowest)
+        ));
+        assert!(matches!(route("/api/v1/atom/audit/clear"), Route::Audit(AuditRoute::Clear)));
+        assert!(matches!(route("/api/v1/atom/audit/plugins"), Route::Unknown));
+    }
     #[test]
     fn health_probe_observes_lifecycle_through_closed_admission() {
         let host = crate::HostAssembly::from_config(

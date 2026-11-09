@@ -366,6 +366,30 @@ impl AtomRules {
         }
     }
 
+    /// Saves a new display order of the groups (`groups/move`). sing-box
+    /// never sees it, so nothing is applied, even when the running file is
+    /// not the saved state's.
+    pub(crate) fn save_display_order(
+        &self,
+        order: Vec<String>,
+        version: Option<u64>,
+    ) -> Result<ProxyState, Refusal> {
+        let owner = self.proxy.as_ref().ok_or_else(unconfigured)?;
+        if self.busy.get() {
+            return Err(busy());
+        }
+        self.check_proxy_version(version)?;
+        let mut next = owner.state.borrow().clone();
+        next.order = order;
+        next.version += 1;
+        if !self.root.as_os_str().is_empty() {
+            atom_proxy::save(&self.root, &next)
+                .map_err(|error| Refusal::new(500, format!("保存失败: {error}")))?;
+        }
+        *owner.state.borrow_mut() = next.clone();
+        Ok(next)
+    }
+
     /// Commits a rules change: through sing-box when its IP rules differ.
     pub(crate) async fn commit_rules(&self, next: State) -> Result<(), Refusal> {
         if self.proxy.is_none() || ip_rules(&next.rules) == ip_rules(&self.state.borrow().rules) {
