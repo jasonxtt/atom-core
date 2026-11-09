@@ -643,6 +643,43 @@ fn fail_next_save() {
     crate::atom_proxy::FAIL_NEXT_SAVE.with(|fail| fail.set(true));
 }
 
+/// A failed save whose compensation fails too leaves sing-box on the new
+/// configuration: nft follows it (what is live), not the unsaved state.
+#[test]
+fn a_failed_compensation_leaves_nft_on_the_live_configuration() {
+    let api = Api::new("nft-compensate");
+    let (status, _) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
+    assert_eq!(status, 201);
+    // The compensation writes config.json through `<file>.tmp-<pid>`: a
+    // directory there makes that write fail.
+    let blocker = api
+        .fake
+        .host
+        .dir
+        .join(format!("config.json.tmp-{}", std::process::id()));
+    std::fs::create_dir_all(&blocker).unwrap();
+    fail_next_save();
+    let (status, body) = api.call(
+        "PUT",
+        "/api/v1/atom/settings",
+        r#"{"fakeip_range": "29.0.0.0/8"}"#,
+    );
+    std::fs::remove_dir_all(&blocker).unwrap();
+    assert_eq!(status, 500, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("回滚失败"),
+        "{body}"
+    );
+    assert_eq!(api.live()["dns"]["servers"][0]["inet4_range"], "29.0.0.0/8");
+    let script = api.fake.nft_scripts().pop().unwrap();
+    assert!(script.contains("fakeip4 { 29.0.0.0/8 }"), "{script}");
+    let (_, view) = api.call("GET", "/api/v1/atom/status", "");
+    assert_eq!(
+        view["nft"]["sync"]["sets"]["fakeip4"],
+        serde_json::json!(["29.0.0.0/8"])
+    );
+}
+
 #[test]
 fn a_failed_save_keeps_other_changes_out_until_sing_box_is_compensated() {
     let api = Api::new("compensate");

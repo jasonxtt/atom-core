@@ -378,7 +378,7 @@ impl AtomRules {
             let exclusive = self.exclusive()?;
             let secret = sb::new_secret();
             let bytes = self.generate(&host, &next_proxy, &next_rules.rules, &secret)?;
-            run_apply(
+            let result = run_apply(
                 Arc::clone(&exclusive.guard),
                 host.clone(),
                 bytes,
@@ -386,8 +386,12 @@ impl AtomRules {
                 (selections(&next_proxy), selections(&current_proxy)),
                 trigger.to_owned(),
             )
-            .await
-            .map_err(apply_refusal)?;
+            .await;
+            if let Err(error) = result {
+                // Rolled back, or not even that: nft follows what is live.
+                self.sync_nft(Arc::clone(&exclusive.guard)).await;
+                return Err(apply_refusal(error));
+            }
             Some(exclusive)
         } else {
             None
@@ -414,6 +418,10 @@ impl AtomRules {
                     applied,
                     Some(format!("保存失败: {message}；{restored}")),
                 );
+                // The compensation may have failed: nft follows what is live.
+                if let Some(exclusive) = &exclusive {
+                    self.sync_nft(Arc::clone(&exclusive.guard)).await;
+                }
                 return Err(Refusal::new(
                     500,
                     format!("保存失败: {message}；{restored}"),
@@ -432,12 +440,21 @@ impl AtomRules {
             current.version = next.version;
             current.rules = next.rules;
             let proxy_state = self.proxy_state();
-            let table = self.compile(&current, proxy_state.as_ref())?;
+            let table = match self.compile(&current, proxy_state.as_ref()) {
+                Ok(table) => table,
+                Err(refusal) => {
+                    if let Some(exclusive) = &exclusive {
+                        self.sync_nft(Arc::clone(&exclusive.guard)).await;
+                    }
+                    return Err(refusal);
+                }
+            };
             *self.state.borrow_mut() = current;
             self.table.replace(std::rc::Rc::new(table));
         }
         // The FakeIP range and the IP rules only change with a new sing-box
-        // configuration.
+        // configuration; every application attempt ends with nft on what is
+        // live, success or not.
         if let Some(exclusive) = &exclusive {
             self.sync_nft(Arc::clone(&exclusive.guard)).await;
         }
@@ -677,9 +694,7 @@ impl AtomRules {
             "apply".to_owned(),
         )
         .await;
-        if result.is_ok() {
-            self.sync_nft(Arc::clone(&exclusive.guard)).await;
-        }
+        self.sync_nft(Arc::clone(&exclusive.guard)).await;
         drop(exclusive);
         result.map_err(apply_refusal)
     }
