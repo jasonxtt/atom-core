@@ -548,6 +548,34 @@ impl NftSets {
             iprule4,
         }
     }
+
+    /// The sets a generated configuration needs: what sing-box runs, which
+    /// is not the atom state after a failed application (rolled back).
+    /// `None` when the file is not a configuration atom generated.
+    pub(crate) fn of_config(bytes: &[u8]) -> Option<Self> {
+        let value: Value = serde_json::from_slice(bytes).ok()?;
+        let range = value
+            .pointer("/dns/servers")?
+            .as_array()?
+            .iter()
+            .find(|server| server["type"] == "fakeip")?
+            .get("inet4_range")?
+            .as_str()?
+            .to_owned();
+        let mut iprule4: Vec<String> = Vec::new();
+        for rule in value.pointer("/route/rules")?.as_array()? {
+            for cidr in rule["ip_cidr"].as_array().into_iter().flatten() {
+                let cidr = cidr.as_str()?;
+                if !cidr.contains(':') && !iprule4.iter().any(|known| known == cidr) {
+                    iprule4.push(cidr.to_owned());
+                }
+            }
+        }
+        Some(Self {
+            fakeip4: vec![range],
+            iprule4,
+        })
+    }
 }
 
 /// One nft transaction: both sets emptied and filled again. The sets are

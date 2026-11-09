@@ -240,16 +240,24 @@ impl AtomRules {
         .map_err(|message| Refusal::new(500, format!("生成 sing-box 配置失败: {message}")))
     }
 
-    /// The nft sets the current state needs, when this host keeps nft sets.
+    /// The nft sets of what sing-box runs (the live file), when this host
+    /// keeps nft sets. After a failed application that is the rolled-back
+    /// configuration, not the atom state; the state only when there is no
+    /// readable live file.
     fn nft_sets(&self) -> Option<(Host, NftSets)> {
         let proxy = self.proxy.as_ref()?;
         if proxy.host.nft_table.is_none() || self.root.as_os_str().is_empty() {
             return None;
         }
-        let sets = NftSets::of(
-            &proxy.state.borrow().settings.fakeip_range,
-            &ip_rules(&self.state.borrow().rules),
-        );
+        let sets = sb::read_live(&proxy.host)
+            .as_deref()
+            .and_then(NftSets::of_config)
+            .unwrap_or_else(|| {
+                NftSets::of(
+                    &proxy.state.borrow().settings.fakeip_range,
+                    &ip_rules(&self.state.borrow().rules),
+                )
+            });
         Some((proxy.host.clone(), sets))
     }
 

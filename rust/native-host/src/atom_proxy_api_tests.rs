@@ -329,6 +329,45 @@ fn a_failed_nft_update_keeps_the_change_and_is_reported() {
     );
 }
 
+/// A start whose application fails (rolled back) fills nft from what
+/// sing-box runs, not from the atom state it could not apply.
+#[test]
+fn a_failed_startup_application_keeps_nft_on_the_running_configuration() {
+    let api = Api::new("nft-startup");
+    let (status, _) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"ip_cidr": ["1.1.1.1/32"]}, "action": {"type": "block"}}"#,
+    );
+    assert_eq!(status, 201);
+    // sing-box runs something else (an older range and IP rule) than the state.
+    let mut running = api.live();
+    running["dns"]["servers"][0]["inet4_range"] = "29.0.0.0/8".into();
+    running["route"]["rules"][2]["ip_cidr"] = serde_json::json!(["9.9.9.9/32"]);
+    let bytes = serde_json::to_vec(&running).unwrap();
+    std::fs::write(api.fake.host.config_path(), &bytes).unwrap();
+    std::fs::write(api.fake.host.dir.join("running.json"), &bytes).unwrap();
+    std::fs::write(api.fake.host.dir.join("failreload"), "").unwrap();
+    let rules = api.assembly.config().local.atom_rules.clone().unwrap();
+    api.assembly.block_on(rules.ensure());
+    let last = crate::atom_rules::last_apply().unwrap();
+    assert!(!last.ok, "{last:?}");
+    let script = api.fake.nft_scripts().pop().unwrap();
+    assert!(
+        script.contains("fakeip4 { 29.0.0.0/8 }") && script.contains("iprule4 { 9.9.9.9/32 }"),
+        "{script}"
+    );
+    // Once sing-box takes the state, nft follows.
+    std::fs::remove_file(api.fake.host.dir.join("failreload")).unwrap();
+    let (status, _) = api.call("POST", "/api/v1/atom/apply", "");
+    assert_eq!(status, 200);
+    let script = api.fake.nft_scripts().pop().unwrap();
+    assert!(
+        script.contains("fakeip4 { 28.0.0.0/8 }") && script.contains("iprule4 { 1.1.1.1/32 }"),
+        "{script}"
+    );
+}
+
 #[test]
 fn a_refused_check_or_reload_changes_nothing() {
     let api = Api::new("rollback");

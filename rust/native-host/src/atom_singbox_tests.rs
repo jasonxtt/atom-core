@@ -39,7 +39,7 @@ impl FakeSingbox {
         std::fs::write(
             &reload,
             format!(
-                "#!/bin/sh\nd={}\necho x >> $d/reloads\nif [ -f $d/slow ]; then sleep 1; fi\nif [ -f $d/config.json ] && grep -q BADRELOAD $d/config.json; then echo 'reload failed' >&2; exit 1; fi\nif [ -f $d/config.json ]; then cp $d/config.json $d/running.json; else rm -f $d/running.json; fi\n",
+                "#!/bin/sh\nd={}\necho x >> $d/reloads\nif [ -f $d/slow ]; then sleep 1; fi\nif [ -f $d/failreload ]; then echo 'reload refused' >&2; exit 1; fi\nif [ -f $d/config.json ] && grep -q BADRELOAD $d/config.json; then echo 'reload failed' >&2; exit 1; fi\nif [ -f $d/config.json ]; then cp $d/config.json $d/running.json; else rm -f $d/running.json; fi\n",
                 dir.join("sb").display()
             ),
         )
@@ -335,6 +335,35 @@ fn nft_sets_replace_both_sets_in_one_script() {
     );
     let empty = NftSets::of("28.0.0.0/8", &[]);
     assert!(nft_script("atom", &empty).ends_with("flush set inet atom iprule4\n"));
+}
+
+#[test]
+fn nft_sets_follow_a_generated_configuration() {
+    let rules = [IpRule {
+        cidrs: vec!["91.108.4.0/22".into(), "2001:b28:f23d::/48".into()],
+        action: Action::Block,
+    }];
+    let mut state = sample_state();
+    state.settings.fakeip_range = "29.0.0.0/16".into();
+    let fake_host = Host {
+        binary: "/bin/true".into(),
+        dir: "/tmp/sb".into(),
+        reload: vec!["true".into()],
+        clash_api: "127.0.0.1:9090".parse().unwrap(),
+        dns_in: "127.0.0.1:6666".parse().unwrap(),
+        atomdns: "127.0.0.1:53".parse().unwrap(),
+        redirect_port: 7892,
+        tproxy_port: 7893,
+        resolver_group: "domestic".into(),
+        nft_table: Some("atom".into()),
+        nft: vec!["nft".into()],
+    };
+    let bytes = generate(&fake_host, &state, &rules, "udp://223.5.5.5", "s").unwrap();
+    assert_eq!(
+        NftSets::of_config(&bytes),
+        Some(NftSets::of("29.0.0.0/16", &rules))
+    );
+    assert_eq!(NftSets::of_config(b"{}"), None);
 }
 
 #[test]
