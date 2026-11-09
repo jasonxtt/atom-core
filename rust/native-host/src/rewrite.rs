@@ -239,13 +239,26 @@ pub struct RewriteConfig {
 }
 
 impl Rewrite {
-    /// Reads every file (a missing one is skipped) into one rule set.
-    pub(crate) fn load(files: Vec<PathBuf>, dns: DnsServer) -> Result<Self, String> {
+    /// Reads every file (a missing one is skipped) into one rule set. What
+    /// it read (or found missing) is recorded in `inputs`, so a hot apply
+    /// whose candidate read an older list is refused at its commit point
+    /// (atom: `PUT /api/v1/atom/rewrite` replaces the file while a
+    /// generation may be compiling).
+    pub(crate) fn load(
+        files: Vec<PathBuf>,
+        dns: DnsServer,
+        mut inputs: Option<&mut crate::special_groups::CandidateInputSet>,
+    ) -> Result<Self, String> {
         let mut builder = RuleBuilder::default();
         for (index, file) in files.iter().enumerate() {
             let bytes = match std::fs::read(file) {
                 Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(inputs) = inputs.as_deref_mut() {
+                        inputs.record_missing(file)?;
+                    }
+                    continue;
+                }
                 Err(error) => {
                     return Err(format!(
                         "failed to read file #{index} {}, {error}",
@@ -253,6 +266,9 @@ impl Rewrite {
                     ));
                 }
             };
+            if let Some(inputs) = inputs.as_deref_mut() {
+                inputs.record_bytes(file, &bytes)?;
+            }
             let text = std::str::from_utf8(&bytes).map_err(|_| {
                 format!(
                     "failed to load rules from file #{index} {}, rules must be UTF-8 text",

@@ -543,7 +543,7 @@ impl RuleSources {
             Err(error) => return Err((500, error.to_string())),
         }
         drop(guard);
-        changed(&self.ctx(), provider).await;
+        changed_and_settled(&self.ctx(), provider).await;
         Ok(values)
     }
 
@@ -571,12 +571,21 @@ impl RuleSources {
         let ctx = self.ctx();
         let mut updated = 0;
         for key in &keys {
+            // A download of this source already running (startup, or another
+            // refresh) would make ours return at once without its outcome:
+            // wait for it, then download once more.
+            while provider.owner().flights.borrow().contains_key(key) {
+                if ctx.cancel.is_cancelled() {
+                    return Err("host is stopping".to_owned());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
             if download_source(&ctx, provider, key.clone()).await {
                 updated += 1;
             }
         }
         if updated > 0 {
-            changed(&ctx, provider).await;
+            changed_and_settled(&ctx, provider).await;
         }
         Ok((keys.len(), updated))
     }
@@ -1135,6 +1144,26 @@ async fn changed(ctx: &Ctx, provider: &Rc<Provider>) {
     }
     // The replaced generations are dropped by now.
     let _ = on_build_thread(crate::memory::release_free_memory).await;
+}
+
+/// [`changed`], then waits until no rebuild of the provider or of a mapper
+/// that names it is pending. A rebuild already running when [`changed`]
+/// was called only gets marked dirty there and builds once more with the
+/// files as they are now, so once everything is idle the latest write is
+/// in use (atom: the API answers only then).
+async fn changed_and_settled(ctx: &Ctx, provider: &Rc<Provider>) {
+    changed(ctx, provider).await;
+    loop {
+        let busy = provider.reload.get() != Build::Idle
+            || ctx.inner.mappers.iter().any(|slot| {
+                slot.build.get() != Build::Idle
+                    && slot.spec.rules.iter().any(|rule| rule.tag == provider.tag)
+            });
+        if !busy || ctx.cancel.is_cancelled() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 /// Frees a replaced generation off the DNS thread, where dropping a large

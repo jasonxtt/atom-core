@@ -2224,7 +2224,8 @@ fn compile_definitions(
                     .push((plugin.tag.clone(), compile_sleep(plugin)?));
             }
             PluginKind::Rewrite => {
-                let (rewrite, _files) = compile_rewrite(plugin)?;
+                let mut inputs = candidate_inputs.borrow_mut();
+                let rewrite = compile_rewrite(plugin, inputs.as_mut())?;
                 rewrites.push((plugin.tag.clone(), Rc::new(rewrite)));
             }
             // Validated and resolved by the settings overlay before compiling.
@@ -3270,7 +3271,10 @@ fn compile_sleep(plugin: &RawPlugin) -> Result<Duration, ConfigError> {
 
 /// `rewrite`: the rule files (the first one is where `/post` writes) and the
 /// DNS server a domain target resolves through. A missing file is allowed.
-fn compile_rewrite(plugin: &RawPlugin) -> Result<(Rewrite, Vec<PathBuf>), ConfigError> {
+fn compile_rewrite(
+    plugin: &RawPlugin,
+    inputs: Option<&mut crate::special_groups::CandidateInputSet>,
+) -> Result<Rewrite, ConfigError> {
     let path = format!("{}.args", plugin.source_path);
     let args = expect_map(&plugin.args, &path, "rewrite args must be a mapping")?;
     args.reject_unknown(&["files", "dns"], &path)?;
@@ -3296,9 +3300,8 @@ fn compile_rewrite(plugin: &RawPlugin) -> Result<(Rewrite, Vec<PathBuf>), Config
     }
     let dns = DnsServer::parse(&dns_text)
         .map_err(|reason| ConfigError::new(format!("{path}.dns"), reason))?;
-    let rewrite = Rewrite::load(files.clone(), dns)
-        .map_err(|reason| ConfigError::new(format!("{path}.files"), reason))?;
-    Ok((rewrite, files))
+    Rewrite::load(files, dns, inputs)
+        .map_err(|reason| ConfigError::new(format!("{path}.files"), reason))
 }
 
 /// A validated `domain_output`.

@@ -48,7 +48,7 @@ impl Host {
             yaml.push_str(&flag(tag, default));
         }
         yaml.push_str(
-            "  - tag: client_ecs\n    type: ecs_address\n    args: {addr: '2408:8888::8'}\n  - tag: domestic\n    type: aliapi\n    args: {upstreams: [{tag: one, addr: 'udp://127.0.0.1:15998'}]}\n  - tag: nocnfake\n    type: aliapi\n    args: {upstreams: [{tag: fake, addr: 'udp://127.0.0.1:6666'}]}\n  - tag: ddnslist\n    type: domain_set_light\n    args: {files: [rule/ddnslist.txt]}\n  - tag: rewrite\n    type: rewrite\n    args: {files: [rule/rewrite.txt], dns: 'udp://127.0.0.1:15998'}\n  - tag: atom_rules\n    type: atom_rules\n    args: {marks: {proxy: 41, direct: 42, block: 40}}\n  - tag: entry\n    type: sequence\n    args: [{exec: $rewrite}, {exec: $atom_rules}, {exec: $domestic}]\n",
+            "  - tag: client_ecs\n    type: ecs_address\n    args: {addr: '2408:8888::8'}\n  - tag: domestic\n    type: aliapi\n    args: {upstreams: [{tag: one, addr: 'udp://127.0.0.1:15998'}]}\n  - tag: nocnfake\n    type: aliapi\n    args: {upstreams: [{tag: fake, addr: 'udp://127.0.0.1:6666'}]}\n  - tag: ddnslist\n    type: domain_set_light\n    args: {files: [rule/ddnslist.txt]}\n  - tag: mapper\n    type: domain_mapper\n    args: {default_mark: 17, default_tag: none, rules: [{tag: ddnslist, mark: 6, output_tag: DDNS}]}\n  - tag: rewrite\n    type: rewrite\n    args: {files: [rule/rewrite.txt], dns: 'udp://127.0.0.1:15998'}\n  - tag: atom_rules\n    type: atom_rules\n    args: {marks: {proxy: 41, direct: 42, block: 40}}\n  - tag: entry\n    type: sequence\n    args: [{exec: $rewrite}, {exec: $atom_rules}, {exec: $domestic}]\n",
         );
         yaml.push_str(&format!(
             "  - tag: main\n    type: udp_server\n    args: {{entry: entry, listen: '127.0.0.1:{dns}'}}\n"
@@ -252,4 +252,72 @@ fn ddns_and_rewrite_replace_their_files() {
     assert_eq!(status, 400, "{value}");
     assert_eq!(host.call("GET", "rewrite", &Value::Null).1, view);
     assert_eq!(host.call("DELETE", "rewrite", &Value::Null).0, 405);
+}
+
+/// What the configuration reads from the rewrite file is part of a hot
+/// apply's fingerprints, so a candidate compiled from an older list is
+/// refused at its commit point (codex review of step 6a, round 1).
+#[test]
+fn the_rewrite_file_is_a_fingerprinted_input() {
+    let host = Host::new("rewrite-input");
+    let file = host.root.join("rule/rewrite.txt");
+    let control = host.host.control();
+    let view = control.view();
+    let inputs = &view.config.compile_inputs.files;
+    assert!(
+        inputs
+            .iter()
+            .any(|(path, digest)| path.ends_with("rule/rewrite.txt") && digest.is_some()),
+        "{inputs:?} lacks {}",
+        file.display()
+    );
+}
+
+/// Two overlapping DDNS replacements: each answers only once the list on
+/// disk is the one the mapper uses (a rebuild already running when the
+/// second one wrote is waited for; codex review of step 6a, round 1).
+#[test]
+fn overlapping_ddns_replacements_answer_once_their_list_is_in_use() {
+    let host = Host::new("ddns-overlap");
+    let control = host.host.control();
+    let file = host.root.join("rule/ddnslist.txt");
+    host.host.block_on(async {
+        let put = |name: &'static str| {
+            let control = control.clone();
+            let file = file.clone();
+            async move {
+                let view = control.view();
+                let body = json!({"entries": [format!("full:{name}")]}).to_string();
+                let reply = crate::atom_rules_api::handle(
+                    Some(&control),
+                    &view.config,
+                    &view.cache,
+                    "PUT",
+                    "/api/v1/atom/ddns",
+                    body.as_bytes(),
+                    &TransportCancellation::new(),
+                )
+                .await
+                .expect("an atom route");
+                assert_eq!(reply.status, 200);
+                let on_disk = std::fs::read_to_string(&file).unwrap();
+                let listed = on_disk.trim().trim_start_matches("full:").to_owned();
+                let mapper = view
+                    .config
+                    .domain_mappers
+                    .iter()
+                    .find(|mapper| mapper.tag == "mapper")
+                    .unwrap();
+                assert_ne!(
+                    mapper.evaluate(Some(&listed)).fast_flags & (1 << 6),
+                    0,
+                    "{listed} is on disk but not in use when {name} is answered"
+                );
+            }
+        };
+        let first = tokio::task::spawn_local(put("first.example"));
+        let second = tokio::task::spawn_local(put("second.example"));
+        first.await.unwrap();
+        second.await.unwrap();
+    });
 }
