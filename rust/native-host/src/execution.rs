@@ -148,11 +148,11 @@ impl<E: ExchangeExecutor + ?Sized> SequenceResolver for EngineResolver<'_, E> {
             options.entry_sequence = Some(sequence);
             options.admission_deadline = Some(deadline);
             let mut checkpoint = ExecutionCheckpoint::new(false);
+            // No client: an in-process query (requery, a rewrite target)
+            // meets no client condition, inverted or not (atom step 6,
+            // `client_invert`), as the binding ledger's recomputation does.
             let request = ExecutionRequest {
-                client: atomdns_sequence_core::ClientContext::from_peer(
-                    std::net::Ipv4Addr::LOCALHOST.into(),
-                    atomdns_sequence_core::ClientTransport::Udp,
-                ),
+                client: atomdns_sequence_core::ClientContext::default(),
                 config: self.config,
                 cache: self.cache,
                 options: &options,

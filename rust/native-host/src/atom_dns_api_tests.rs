@@ -506,3 +506,64 @@ fn an_upstream_entry_needs_what_the_document_requires() {
         assert_eq!(status, 400, "without {field}: {value}");
     }
 }
+
+/// A DNS query for `name` A, RD set.
+fn query(name: &str) -> Vec<u8> {
+    let mut packet = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in name.split('.') {
+        packet.push(u8::try_from(label.len()).unwrap());
+        packet.extend_from_slice(label.as_bytes());
+    }
+    packet.extend_from_slice(&[0, 0, 1, 0, 1]);
+    packet
+}
+
+/// An in-process query (what `requery` sends through `LocalApi::resolve`, and
+/// a rewrite's domain target) has no client: it meets no client rule, plain
+/// or inverted (codex review of step 6a, round 4: it used to carry 127.0.0.1,
+/// which met `client: [127.0.0.1]` and every inverted rule without it).
+#[test]
+fn in_process_queries_meet_no_client_rule() {
+    let host = Host::new("in-process");
+    let path = host.root.join("config.yaml");
+    let yaml = std::fs::read_to_string(&path).unwrap().replace(
+        "  - tag: entry\n",
+        "  - tag: probe\n    type: sequence\n    args: [{exec: $atom_rules}, {matches: fast_mark 40, exec: reject 3}, {exec: reject 5}]\n  - tag: entry\n",
+    );
+    std::fs::write(&path, yaml).unwrap();
+    let probe = Host {
+        root: host.root.clone(),
+        host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
+    };
+    for rule in [
+        json!({"match": {"suffix": ["plain.example"], "client": ["127.0.0.1"]}, "action": {"type": "block"}}),
+        json!({"match": {"suffix": ["outside.example"], "client": ["192.168.1.0/24"], "client_invert": true}, "action": {"type": "block"}}),
+        json!({"match": {"suffix": ["named.example"]}, "action": {"type": "block"}}),
+    ] {
+        let (status, value) = probe.call("POST", "rules", &rule);
+        assert_eq!(status, 201, "{value}");
+    }
+    let control = probe.host.control();
+    let local = crate::local_url::LocalApi {
+        control: crate::runtime_snapshot::RuntimeControlWeak::from_control(&control),
+        api: None,
+        roots: None,
+    };
+    let rcode = |name: &'static str| {
+        let local = local.clone();
+        probe.host.block_on(async move {
+            let reply = local
+                .resolve("probe", &query(name), std::time::Duration::from_secs(2))
+                .await
+                .expect("an in-process answer");
+            reply[3] & 0x0f
+        })
+    };
+    assert_eq!(rcode("a.named.example"), 3, "a name rule still blocks");
+    assert_eq!(rcode("a.plain.example"), 5, "a client rule does not match");
+    assert_eq!(
+        rcode("a.outside.example"),
+        5,
+        "an inverted client rule does not match"
+    );
+}
