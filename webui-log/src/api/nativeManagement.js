@@ -14,13 +14,19 @@ function isHarmless(value) {
   return value == null || value === false || value === 0 || value === ''
 }
 
-function normalizeProtocol(value) {
-  switch (String(value || '').trim().toLowerCase()) {
+export function normalizeProtocol(value) {
+  const protocol = String(value || '').trim().toLowerCase()
+  switch (protocol) {
     case 'dot': return 'tls'
     case 'doh': return 'https'
     case 'doq': return 'quic'
-    default: return String(value || '').trim().toLowerCase()
+    default: return protocol
   }
+}
+
+export function nativeUpstreamProtocol(upstream) {
+  const protocol = normalizeProtocol(upstream?.protocol)
+  return protocol === 'https' && upstream.enable_http3 === true ? 'h3' : protocol
 }
 
 function readOnly(reason) {
@@ -33,7 +39,7 @@ export function isNativeUpstreamReadOnly(upstream, capabilities) {
     return readOnly('包含原生端不支持的字段，已保留为只读')
   }
   const supported = new Set((capabilities?.upstream_protocols || []).map(normalizeProtocol))
-  const protocol = normalizeProtocol(upstream.protocol)
+  const protocol = nativeUpstreamProtocol(upstream)
   if (!protocol || !supported.has(protocol)) {
     return readOnly(`协议 ${upstream.protocol || '(未指定)'} 当前不可用，已保留为只读`)
   }
@@ -41,8 +47,9 @@ export function isNativeUpstreamReadOnly(upstream, capabilities) {
   // proxy switch of an entry (never a literal `socks5` address).
   const proxySwitch = !(capabilities?.unsupported_features || []).includes('socks_proxy')
   const unsupportedOptions = [
-    'idle_timeout', 'enable_pipeline', 'enable_http3', 'socks5',
-    ...(proxySwitch ? [] : ['use_socks_proxy']),
+    'idle_timeout', 'enable_pipeline', 'socks5',
+    ...(protocol === 'h3' ? [] : ['enable_http3']),
+    ...(proxySwitch && !['h3', 'quic'].includes(protocol) ? [] : ['use_socks_proxy']),
     'so_mark', 'bind_to_device', 'max_conns', 'account_id', 'access_key_id',
     'access_key_secret', 'server_addr', 'ecs_client_ip', 'ecs_client_mask'
   ]

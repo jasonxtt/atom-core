@@ -260,15 +260,31 @@ pub enum UpstreamTransport {
     Tcp,
     Tls,
     Https,
+    H3,
+    Quic,
 }
 
 impl UpstreamTransport {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "udp" => Some(Self::Udp),
+            "tcp" => Some(Self::Tcp),
+            "tls" => Some(Self::Tls),
+            "https" => Some(Self::Https),
+            "h3" => Some(Self::H3),
+            "quic" => Some(Self::Quic),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Udp => "udp",
             Self::Tcp => "tcp",
             Self::Tls => "tls",
             Self::Https => "https",
+            Self::H3 => "h3",
+            Self::Quic => "quic",
         }
     }
 }

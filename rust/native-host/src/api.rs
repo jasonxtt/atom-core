@@ -3275,7 +3275,7 @@ fn capabilities(config: &CompiledConfig) -> serde_json::Value {
     // Upstream edits are available on a file-backed configuration that has `aliapi` groups.
     let upstream_edit = enabled || settings_upstreams(config);
     let protocols = if upstream_edit {
-        vec!["udp", "tcp", "dot", "doh"]
+        vec!["udp", "tcp", "dot", "doh", "h3", "quic"]
     } else {
         Vec::new()
     };
@@ -3288,7 +3288,7 @@ fn capabilities(config: &CompiledConfig) -> serde_json::Value {
     // when every `aliapi` group names a plugin-level `proxy`; the managed
     // upstream overrides do not.
     let defaults = &config.yaml_defaults;
-    let mut unsupported_features = vec!["signed_aliapi", "quic", "http3"];
+    let mut unsupported_features = vec!["signed_aliapi"];
     if !settings_upstreams(config)
         || defaults
             .upstreams

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
-import { isNativeUpstreamReadOnly } from '../src/api/nativeManagement.js'
+import { isNativeUpstreamReadOnly, nativeUpstreamProtocol } from '../src/api/nativeManagement.js'
 import { requestOperation } from '../src/api/runtimeCapabilities.js'
 import {
   isModified,
@@ -41,7 +41,21 @@ test('only protocols that can use a proxy carry a checked switch', () => {
     assert.equal(nativeProxyFlag(protocol, true), true)
     assert.equal(nativeProxyFlag(protocol, false), false)
   }
-  for (const protocol of ['udp', 'aliapi', '', undefined]) assert.equal(nativeProxyFlag(protocol, true), false, String(protocol))
+  for (const protocol of ['udp', 'h3', 'quic', 'doq', 'aliapi', '', undefined]) assert.equal(nativeProxyFlag(protocol, true), false, String(protocol))
+})
+
+test('QUIC upstream editing follows runtime capabilities and refuses a proxy', () => {
+  const capable = { ...settingsBacked, upstream_protocols: [...settingsBacked.upstream_protocols, 'h3', 'quic'], unsupported_features: [] }
+  for (const [entry, protocol] of [
+    [{ protocol: 'https', addr: 'https://dns.example/dns-query', enable_http3: true }, 'h3'],
+    [{ protocol: 'h3', addr: 'h3://dns.example/dns-query' }, 'h3'],
+    [{ protocol: 'doq', addr: 'doq://dns.example' }, 'quic']
+  ]) {
+    assert.equal(nativeUpstreamProtocol(entry), protocol)
+    assert.equal(isNativeUpstreamReadOnly(entry, settingsBacked).readOnly, true)
+    assert.equal(isNativeUpstreamReadOnly(entry, capable).readOnly, false)
+    assert.equal(isNativeUpstreamReadOnly({ ...entry, use_socks_proxy: true }, capable).readOnly, true)
+  }
 })
 
 test('effective items become the modified marks of the pages', () => {

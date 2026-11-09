@@ -197,11 +197,11 @@ impl UpstreamEntry {
             return raw.to_owned();
         }
         let scheme = match self.protocol_name().as_str() {
-            scheme @ ("udp" | "tcp" | "tls" | "https" | "quic") => scheme.to_owned(),
+            scheme @ ("udp" | "tcp" | "tls" | "https" | "h3" | "quic") => scheme.to_owned(),
             _ => return raw.to_owned(),
         };
-        if scheme == "https" && !raw.contains('/') {
-            format!("https://{raw}/dns-query")
+        if matches!(scheme.as_str(), "https" | "h3") && !raw.contains('/') {
+            format!("{scheme}://{raw}/dns-query")
         } else {
             format!("{scheme}://{raw}")
         }
@@ -230,19 +230,31 @@ impl UpstreamEntry {
         if self.addr.trim().is_empty() {
             return Err(at("addr is required for DNS types".to_owned()));
         }
+        if !matches!(
+            protocol.as_str(),
+            "udp" | "tcp" | "tls" | "https" | "h3" | "quic"
+        ) {
+            return Err(at(format!("protocol `{protocol}` is not supported")));
+        }
         if let Some((scheme, _)) = self.addr.trim().split_once("://") {
-            if !matches!(protocol.as_str(), "udp" | "tcp" | "tls" | "https" | "quic")
-                || !scheme.eq_ignore_ascii_case(&protocol)
-            {
+            let matches = scheme.eq_ignore_ascii_case(&protocol)
+                || (protocol == "quic" && scheme.eq_ignore_ascii_case("doq"));
+            if !matches {
                 return Err(at(format!(
                     "protocol {protocol} does not match the scheme {scheme} of the address"
                 )));
             }
-        } else if !matches!(protocol.as_str(), "udp" | "tcp" | "tls" | "https") {
-            return Err(at(format!("protocol `{protocol}` is not supported")));
         }
-        if protocol == "quic" {
-            return Err(at("protocol quic is not supported".to_owned()));
+        if self.enable_http3 && !matches!(protocol.as_str(), "https" | "h3") {
+            return Err(at(
+                "enable_http3 requires an https or h3 upstream".to_owned()
+            ));
+        }
+        if (self.enable_http3 || matches!(protocol.as_str(), "h3" | "quic")) && self.proxy_switch()
+        {
+            return Err(at(
+                "SOCKS5 is unsupported for HTTP/3 and DoQ upstreams".to_owned()
+            ));
         }
         if !self.socks5.trim().is_empty() {
             return Err(at(
@@ -254,7 +266,6 @@ impl UpstreamEntry {
             ("so_mark", self.so_mark != 0),
             ("bind_to_device", !self.bind_to_device.is_empty()),
             ("enable_pipeline", self.enable_pipeline),
-            ("enable_http3", self.enable_http3),
             ("idle_timeout", self.idle_timeout > 0),
         ] {
             if set {
@@ -1026,6 +1037,7 @@ fn raw_to_entry(item: &RawMap, proxied: bool) -> UpstreamEntry {
         addr,
         dial_addr: text("dial_addr"),
         upstream_query_timeout: number("upstream_query_timeout"),
+        enable_http3: matches!(item.get("enable_http3"), Some(RawValue::Bool(true))),
         insecure_skip_verify: matches!(
             item.get("insecure_skip_verify"),
             Some(RawValue::Bool(true))
@@ -1060,6 +1072,10 @@ pub(super) fn upstream_to_raw(entry: &UpstreamEntry) -> RawValue {
     if entry.insecure_skip_verify {
         map.entries
             .push(("insecure_skip_verify".to_owned(), RawValue::Bool(true)));
+    }
+    if entry.enable_http3 {
+        map.entries
+            .push(("enable_http3".to_owned(), RawValue::Bool(true)));
     }
     if !entry.bootstrap.is_empty() {
         map.entries
@@ -1563,7 +1579,10 @@ mod tests {
                 r#"{"tag":"a","protocol":"udp","addr":"1.1.1.1","so_mark":3}"#,
                 "so_mark",
             ),
-            (r#"{"tag":"a","protocol":"quic","addr":"1.1.1.1"}"#, "quic"),
+            (
+                r#"{"tag":"a","protocol":"quic","addr":"192.0.2.53","use_proxy":true}"#,
+                "SOCKS5 is unsupported",
+            ),
         ] {
             let error = entry(json).validate(0).unwrap_err();
             assert!(error.contains(reason), "{json}: {error}");

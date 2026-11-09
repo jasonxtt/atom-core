@@ -13,6 +13,7 @@ const PROTOCOL_LABELS = {
   dot: 'DoT',
   https: 'DoH',
   doh: 'DoH',
+  h3: 'DoH (HTTP/3)',
   quic: 'DoQ',
   doq: 'DoQ',
   aliapi: 'AliAPI'

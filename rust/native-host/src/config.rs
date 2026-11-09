@@ -138,14 +138,20 @@ pub enum ForwardScheme {
     Tcp,
     Tls,
     Https,
+    H3,
+    Quic,
 }
 
 impl ForwardScheme {
+    pub(crate) const fn is_quic(self) -> bool {
+        matches!(self, Self::H3 | Self::Quic)
+    }
+
     const fn default_port(self) -> u16 {
         match self {
             Self::Udp | Self::Tcp => 53,
-            Self::Tls => 853,
-            Self::Https => 443,
+            Self::Tls | Self::Quic => 853,
+            Self::Https | Self::H3 => 443,
         }
     }
 
@@ -153,6 +159,7 @@ impl ForwardScheme {
         match self {
             Self::Udp => Transport::Udp,
             Self::Tcp | Self::Tls | Self::Https => Transport::Tcp,
+            Self::H3 | Self::Quic => Transport::Quic,
         }
     }
 }
@@ -5111,6 +5118,7 @@ pub(crate) struct ForwardTargetOptions {
     pub(crate) bootstrap_version: Option<u8>,
     pub(crate) query_timeout: Duration,
     pub(crate) insecure_skip_verify: bool,
+    pub(crate) enable_http3: bool,
     pub(crate) socks5: Option<String>,
 }
 
@@ -5142,6 +5150,11 @@ fn parse_forward_target(
             .map(|value| expect_bool(value, &format!("{path}.insecure_skip_verify")))
             .transpose()?
             .unwrap_or(false),
+        enable_http3: item
+            .get("enable_http3")
+            .map(|value| expect_bool(value, &format!("{path}.enable_http3")))
+            .transpose()?
+            .unwrap_or(false),
         socks5: None,
     };
     validate_inactive_forward_options(item, path)?;
@@ -5161,7 +5174,18 @@ pub(crate) fn build_forward_target(
             "addr must not be empty",
         ));
     }
-    let (scheme, host, port, service) = parse_service_address(value, path)?;
+    let (mut scheme, host, port, service) = parse_service_address(value, path)?;
+    if options.enable_http3 {
+        match scheme {
+            ForwardScheme::Https | ForwardScheme::H3 => scheme = ForwardScheme::H3,
+            _ => {
+                return Err(ConfigError::new(
+                    format!("{path}.enable_http3"),
+                    "enable_http3 requires an https or h3 upstream",
+                ));
+            }
+        }
+    }
     let dial_addr = options
         .dial_addr
         .as_deref()
@@ -5181,6 +5205,12 @@ pub(crate) fn build_forward_target(
         ..
     } = options;
     let socks5 = socks5.filter(|_| scheme != ForwardScheme::Udp);
+    if scheme.is_quic() && socks5.is_some() {
+        return Err(ConfigError::new(
+            format!("{path}.socks5"),
+            "SOCKS5 is unsupported for HTTP/3 and DoQ upstreams",
+        ));
+    }
 
     if host.parse::<std::net::IpAddr>().is_err()
         && dial_addr.is_none()
@@ -5195,17 +5225,17 @@ pub(crate) fn build_forward_target(
     if matches!(scheme, ForwardScheme::Udp | ForwardScheme::Tcp) && insecure_skip_verify {
         return Err(ConfigError::new(
             format!("{path}.insecure_skip_verify"),
-            "insecure_skip_verify is only valid for tls/https upstreams",
+            "insecure_skip_verify requires an encrypted upstream",
         ));
     }
-    if matches!(scheme, ForwardScheme::Tls | ForwardScheme::Https) {
+    if !matches!(scheme, ForwardScheme::Udp | ForwardScheme::Tcp) {
         ServerIdentity::new(&host).map_err(|error| {
             ConfigError::new(
                 format!("{path}.addr"),
                 format!("invalid secure identity: {error}"),
             )
         })?;
-        if scheme == ForwardScheme::Https {
+        if matches!(scheme, ForwardScheme::Https | ForwardScheme::H3) {
             let dial = dial_addr.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], port)));
             atomdns_upstream_core::DohEndpoint::new(&service, dial).map_err(|error| {
                 ConfigError::new(
@@ -5234,12 +5264,14 @@ fn parse_service_address(
     value: &str,
     path: &str,
 ) -> Result<(ForwardScheme, String, u16, String), ConfigError> {
-    if let Some((scheme_name, _)) = value.split_once("://") {
+    if let Some((scheme_name, authority_and_target)) = value.split_once("://") {
         let scheme = match scheme_name {
             "udp" => ForwardScheme::Udp,
             "tcp" => ForwardScheme::Tcp,
             "tls" => ForwardScheme::Tls,
             "https" => ForwardScheme::Https,
+            "h3" => ForwardScheme::H3,
+            "quic" | "doq" => ForwardScheme::Quic,
             other => {
                 return Err(ConfigError::new(
                     path,
@@ -5247,7 +5279,14 @@ fn parse_service_address(
                 ));
             }
         };
-        let url = Url::parse(value)
+        // HTTP/3 still uses the HTTPS URI scheme in requests. Parse it as
+        // HTTPS here too so both DoH modes validate the same service URL.
+        let service = if scheme == ForwardScheme::H3 {
+            format!("https://{authority_and_target}")
+        } else {
+            value.to_owned()
+        };
+        let url = Url::parse(&service)
             .map_err(|error| ConfigError::new(path, format!("invalid upstream URL: {error}")))?;
         if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
             return Err(ConfigError::new(
@@ -5264,15 +5303,15 @@ fn parse_service_address(
         if port == 0 {
             return Err(ConfigError::new(path, "port must be nonzero"));
         }
-        if !matches!(scheme, ForwardScheme::Https)
+        if !matches!(scheme, ForwardScheme::Https | ForwardScheme::H3)
             && ((!url.path().is_empty() && url.path() != "/") || url.query().is_some())
         {
             return Err(ConfigError::new(
                 path,
-                "only https upstreams accept path/query components",
+                "only https and h3 upstreams accept path/query components",
             ));
         }
-        Ok((scheme, host, port, value.to_owned()))
+        Ok((scheme, host, port, service))
     } else if let Ok(socket) = value.parse::<SocketAddr>() {
         Ok((
             ForwardScheme::Udp,
@@ -5406,14 +5445,6 @@ fn validate_inactive_forward_options(item: &RawMap, path: &str) -> Result<(), Co
             return Err(ConfigError::new(
                 format!("{path}.enable_pipeline"),
                 "pipeline is unsupported",
-            ));
-        }
-    }
-    if let Some(value) = item.get("enable_http3") {
-        if expect_bool(value, &format!("{path}.enable_http3"))? {
-            return Err(ConfigError::new(
-                format!("{path}.enable_http3"),
-                "http3 is unsupported",
             ));
         }
     }
@@ -6158,7 +6189,7 @@ plugins:
         let cases = [
             (
                 "unsupported scheme",
-                UDP.replace("udp://127.0.0.1:15453", "quic://127.0.0.1:15453"),
+                UDP.replace("udp://127.0.0.1:15453", "unsupported://127.0.0.1:15453"),
             ),
             (
                 "wrong YAML type",

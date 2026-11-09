@@ -2,6 +2,7 @@
 import { capabilityState, operationReason, supportsOperation } from '../api/runtimeCapabilities'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { getJSON, getJSONWithHeaders, getText } from '../api/http'
+import { nativeUpstreamProtocol } from '../api/nativeManagement'
 import AppIcon from '../components/AppIcon.vue'
 import Sparkline from '../components/Sparkline.vue'
 import DetailField from '../components/DetailField.vue'
@@ -363,7 +364,7 @@ const upstreamStatSections = computed(() => {
         return {
           key: `${group}-${item?.tag || index}`,
           name: String(item?.tag || '-'),
-          typeLabel: protocolDisplayLabel(item?.protocol),
+          typeLabel: protocolDisplayLabel(nativeUpstreamProtocol(item)),
           address: upstreamAddressDisplay(item || {}),
           avgLatencyText: latencyCount > 0 ? avgLatencyNumber.toFixed(2) : '-',
           avgLatencyNumber,

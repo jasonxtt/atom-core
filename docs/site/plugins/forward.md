@@ -46,7 +46,8 @@
 | `dial_addr` | IP | — | 直接连接的 IP，跳过对 `addr` 域名的解析 |
 | `bootstrap` / `bootstrap_version` | | 继承 | 覆盖全局设置 |
 | `upstream_query_timeout` | 毫秒 | `5000` | 单次查询超时 |
-| `insecure_skip_verify` | 布尔 | `false` | 不校验证书，仅 `tls` / `https` 可用 |
+| `insecure_skip_verify` | 布尔 | `false` | 跳过加密上游的证书校验 |
+| `enable_http3` | 布尔 | `false` | 对 `https://` 上游使用 HTTP/3 |
 
 ## 地址格式
 
@@ -56,8 +57,12 @@
 | `tcp://223.5.5.5` | TCP | 53 |
 | `tls://1.1.1.1` | DNS over TLS | 853 |
 | `https://dns.google/dns-query` | DNS over HTTPS | 443 |
+| `h3://dns.example/dns-query` | DNS over HTTPS（HTTP/3） | 443 |
+| `quic://dns.example`、`doq://dns.example` | DNS over QUIC | 853 |
 
 `addr` 使用域名时，必须同时提供 `dial_addr` 或 `bootstrap`，否则配置检查不通过。
+DoH3 和 DoQ 通过 UDP 直连，默认校验证书。指定 `dial_addr` 时仍使用 `addr` 的主机名校验证书。
+`h3://` 和 `https://` 配合 `enable_http3: true` 等价，均固定使用 HTTP/3。
 
 ## aliapi
 
@@ -66,7 +71,7 @@
 | 参数 | 位置 | 说明 |
 | --- | --- | --- |
 | `proxy` | 插件 | 引用一个 [`socks5_proxy`](/plugins/settings-objects)，如 `proxy: $main_proxy` |
-| `use_proxy` | 上游项 | 该上游经 `proxy` 连接（TCP / DoT / DoH 有效，UDP 不走代理） |
+| `use_proxy` | 上游项 | 该上游经 `proxy` 连接，适用于 TCP、DoT 和使用 HTTP/1.1 或 HTTP/2 的 DoH |
 | `show_when` | 插件 | 仅影响 WebUI：满足条件时才显示该上游组，写法同 `matches`，如 `flag dns_mode=fakeip` |
 
 ```yaml
@@ -95,7 +100,7 @@
 ## 与 MosDNS 的差异
 
 ::: warning 不支持的选项
-`enable_http3`、`enable_pipeline`、正数 `idle_timeout`、`max_conns`、`so_mark`、`bind_to_device`，以及 `quic://` 上游，
+`enable_pipeline`、正数 `idle_timeout`、`max_conns`、`so_mark`、`bind_to_device`，
 写了会在启动时报错，而不是被静默忽略。`forward` 不支持 `socks5`，需要代理请用 `aliapi` 的 `proxy`。
 `aliapi` 不支持阿里云签名 API（`account_id` 等字段）。
 :::
