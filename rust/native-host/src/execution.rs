@@ -1406,8 +1406,12 @@ pub(crate) async fn execute_request(
     let rules = request.config.local.atom_rules.clone();
     let mut result =
         execute_request_with_observation(request, forwards, request_shutdown, checkpoint).await;
-    // atom: the answer's TTLs are capped on the way out (cache hits too).
+    // atom: the answer's TTLs are capped on the way out (cache hits too);
+    // the audit shows what the client gets.
     if let Some(capped) = rules.and_then(|rules| rules.cap_ttls(&result.response_wire)) {
+        if checkpoint.capture_audit_details() {
+            result.response_details = diagnose_response_wire(&capped);
+        }
         result.response_wire = capped;
     }
     result

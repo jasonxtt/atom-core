@@ -1371,8 +1371,10 @@ impl ExchangeExecutor for ForwardCatalog {
 }
 
 impl ForwardCatalog {
-    /// The question name of a query for the FakeIP upstream (`None` for any
-    /// other upstream).
+    /// The question name of an A query for the FakeIP upstream (`None` for
+    /// any other query or upstream). sing-box's FakeIP range is IPv4 only: it
+    /// answers AAAA with an empty response before it reads the directive, so
+    /// an AAAA answer acknowledges nothing.
     fn fakeip_name(
         &self,
         executable: atomdns_sequence_core::ExecutableId,
@@ -1383,6 +1385,7 @@ impl ForwardCatalog {
         }
         parse_query(query)
             .ok()
+            .filter(|(_, question)| question.qtype == 1)
             .map(|(_, question)| question.qname_wire)
     }
 
@@ -2139,5 +2142,45 @@ mod tests {
             ForwardCatalog::selected_owner_indices(4, 3, first),
             vec![first, (first + 1) % 4, (first + 2) % 4]
         );
+    }
+}
+
+#[cfg(test)]
+mod atom_ledger_tests {
+    use super::ForwardCatalog;
+
+    #[test]
+    fn only_fakeip_a_queries_name_a_ledger_entry() {
+        let yaml = r"log: {level: error}
+plugins:
+  - tag: nocnfake
+    type: aliapi
+    args: {concurrent: 1, upstreams: [{tag: sing-box, addr: 'udp://127.0.0.1:9'}]}
+  - tag: foreign
+    type: aliapi
+    args: {concurrent: 1, upstreams: [{tag: google, addr: 'udp://127.0.0.1:9'}]}
+  - tag: entry
+    type: sequence
+    args:
+      - exec: $nocnfake
+      - exec: $foreign
+  - tag: listener
+    type: udp_server
+    args: {entry: entry, listen: '127.0.0.1:15999'}
+";
+        let config = crate::config::compile_yaml(yaml).unwrap();
+        let catalog = ForwardCatalog::from_compiled_config(&config, None).unwrap();
+        let fakeip = *catalog.fakeip.iter().next().unwrap();
+        let other = *catalog.owners.keys().find(|id| **id != fakeip).unwrap();
+        let query = |qtype: u8| {
+            let mut wire = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+            wire.extend_from_slice(&[1, b'a', 4, b't', b'e', b's', b't', 0, 0, qtype, 0, 1]);
+            wire
+        };
+        let name = vec![1, b'a', 4, b't', b'e', b's', b't', 0];
+        assert_eq!(catalog.fakeip_name(fakeip, &query(1)), Some(name));
+        // sing-box answers AAAA before it reads the directive (IPv4 range only).
+        assert_eq!(catalog.fakeip_name(fakeip, &query(28)), None);
+        assert_eq!(catalog.fakeip_name(other, &query(1)), None);
     }
 }
