@@ -474,75 +474,79 @@ fn move_group(rules: &AtomRules, bytes: &[u8]) -> Answer {
     Ok(reply_json(200, &groups_view(&next)))
 }
 
-/// The sing-box host and the secret of the configuration it runs.
-fn live(rules: &AtomRules) -> Result<(crate::atom_singbox::Host, String), Reply> {
+/// Runs `work` against the Clash API on the blocking pool. The secret
+/// comes from the running file, read and parsed there too, so no file or
+/// network work happens on the runtime thread that serves DNS. 409: sing-box
+/// has no configuration yet; 502: the Clash API failed.
+async fn with_clash<T: Send + 'static>(
+    rules: &AtomRules,
+    work: impl FnOnce(&crate::atom_singbox::Host, &str) -> Result<T, String> + Send + 'static,
+) -> Result<T, Reply> {
     let host = rules
         .proxy_host()
         .cloned()
         .ok_or_else(|| error(404, "没有配置 sing-box（atom_rules 的 singbox 段）"))?;
-    let secret = rules
-        .live_secret()
-        .ok_or_else(|| error(409, "sing-box 还没有应用过配置"))?;
-    Ok((host, secret))
-}
-
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Result<T, Reply> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .unwrap_or_else(|e| Err(format!("任务异常结束: {e}")))
-        .map_err(|message| error(502, message))
+    tokio::task::spawn_blocking(move || {
+        let secret = crate::atom_singbox::read_live(&host)
+            .as_deref()
+            .and_then(crate::atom_singbox::secret_of)
+            .ok_or_else(|| error(409, "sing-box 还没有应用过配置"))?;
+        work(&host, &secret).map_err(|message| error(502, message))
+    })
+    .await
+    .unwrap_or_else(|e| Err(error(502, format!("任务异常结束: {e}"))))
 }
 
 /// `GET runtime`: what sing-box chose and measured. `groups`: the current
 /// member of every group and Final (an automatic group's choice included);
 /// `nodes`: each node's latest delay test (`delay` null: none, or it
-/// failed).
+/// failed). The Clash API's answer is read and reduced on the blocking pool.
 async fn runtime(rules: &AtomRules) -> Answer {
-    let (host, secret) = live(rules)?;
-    let value = blocking(move || crate::atom_singbox::proxies(&host, &secret)).await?;
     let current = state(rules);
-    let proxies = value.get("proxies").and_then(Value::as_object);
-    let entry = |id: &str| proxies.and_then(|proxies| proxies.get(id));
-    let mut groups = Map::new();
-    for id in current
+    let group_ids: Vec<String> = current
         .groups
         .iter()
-        .map(|group| group.id.as_str())
-        .chain([FINAL])
-    {
-        if let Some(now) = entry(id).and_then(|p| p.get("now")).and_then(Value::as_str) {
-            groups.insert(id.to_owned(), json!({ "now": now }));
+        .map(|group| group.id.clone())
+        .chain([FINAL.to_owned()])
+        .collect();
+    let node_ids: Vec<String> = current.nodes.iter().map(|node| node.id.clone()).collect();
+    let value = with_clash(rules, move |host, secret| {
+        let value = crate::atom_singbox::proxies(host, secret)?;
+        let proxies = value.get("proxies").and_then(Value::as_object);
+        let entry = |id: &str| proxies.and_then(|proxies| proxies.get(id));
+        let mut groups = Map::new();
+        for id in group_ids {
+            if let Some(now) = entry(&id).and_then(|p| p.get("now")).and_then(Value::as_str) {
+                groups.insert(id, json!({ "now": now }));
+            }
         }
-    }
-    let mut nodes = Map::new();
-    for node in &current.nodes {
-        let last = entry(&node.id)
-            .and_then(|p| p.get("history"))
-            .and_then(Value::as_array)
-            // A failed test removes the history: any entry is a success
-            // (0 ms included).
-            .and_then(|history| history.last());
-        nodes.insert(
-            node.id.clone(),
-            json!({
+        let mut nodes = Map::new();
+        for id in node_ids {
+            let last = entry(&id)
+                .and_then(|p| p.get("history"))
+                .and_then(Value::as_array)
+                // A failed test removes the history: any entry is a success
+                // (0 ms included).
+                .and_then(|history| history.last());
+            let view = json!({
                 "delay": last.and_then(|last| last.get("delay")),
                 "time": last.and_then(|last| last.get("time")),
-            }),
-        );
-    }
-    Ok(reply_json(200, &json!({ "groups": groups, "nodes": nodes })))
+            });
+            nodes.insert(id, view);
+        }
+        Ok(json!({ "groups": groups, "nodes": nodes }))
+    })
+    .await?;
+    Ok(reply_json(200, &value))
 }
 
 /// `GET connections` (sing-box's snapshot, as it is) and `DELETE
 /// connections[/{id}]` (`closed`: the ID, null for all).
 async fn connections(rules: &AtomRules, method: &str, id: Option<&str>) -> Answer {
-    let (host, secret) = live(rules)?;
     if method == "GET" {
         // Passed through as bytes: a large snapshot is neither parsed nor
         // serialized on the runtime thread that serves DNS.
-        let mut body = blocking(move || crate::atom_singbox::connections(&host, &secret)).await?;
+        let mut body = with_clash(rules, crate::atom_singbox::connections).await?;
         body.push(b'\n');
         return Ok(Reply {
             status: 200,
@@ -553,7 +557,10 @@ async fn connections(rules: &AtomRules, method: &str, id: Option<&str>) -> Answe
     }
     let id = id.map(str::to_owned);
     let closed = id.clone();
-    blocking(move || crate::atom_singbox::close_connections(&host, &secret, id.as_deref())).await?;
+    with_clash(rules, move |host, secret| {
+        crate::atom_singbox::close_connections(host, secret, id.as_deref())
+    })
+    .await?;
     Ok(reply_json(200, &json!({ "closed": closed })))
 }
 
