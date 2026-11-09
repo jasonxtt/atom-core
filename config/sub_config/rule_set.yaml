@@ -49,13 +49,6 @@ plugins:
       proxy: $main_proxy                         #定义: sub_config/settings.yaml
       local_config: "srs/geositenocn.json" 
 
-#ddns域名列表
-  - tag: ddnslist
-    type: domain_set_light
-    args:
-      files:
-        - "rule/ddnslist.txt"
-
 #统一域名匹配,设置fast_mark和域名输出tag
 #atom：黑名单（mark 1）、灰名单（7）、白名单（8）在第 6 步删除，用户在规则表里写屏蔽、代理、直连规则；
 #cuscn（13）、cusnocn（15）由规则表按 mark 判断（atom_rules.yaml 的 builtin），原判断里不再有它们的分支
@@ -70,9 +63,6 @@ plugins:
         - tag: adguard
           mark: 5 
           output_tag: "广告屏蔽"
-        - tag: ddnslist
-          mark: 6 
-          output_tag: "DDNS域名"
         - tag: cuscn
           mark: 13
           output_tag: "直连域名"

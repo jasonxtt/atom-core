@@ -51,6 +51,16 @@ plugins:
       dump_file: cache/cache_google.dump
       dump_interval: 21600
 
+#规则缓存：直连规则指定了上游组时用（程序生成的 atom_direct 序列）；规则关了缓存时不经过它
+  - tag: cache_atom
+    type: cache
+    args:
+      label: "规则缓存"
+      size: 20000
+      lazy_cache_ttl: 604800
+      dump_file: cache/cache_atom.dump
+      dump_interval: 21600
+
 #国外查询缓存·带 ECS：列表外域名首次查询（安全模式）和安全模式记忆直连（sequence_google_node），不受「分组缓存」开关控制
   - tag: cache_google_node
     type: cache

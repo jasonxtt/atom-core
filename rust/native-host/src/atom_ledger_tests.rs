@@ -81,7 +81,7 @@ fn a_recomputation_sends_only_what_changes() {
     {
         Some("x.com") => Some(Verdict::Proxy(Arc::from("g-y"))),
         Some("same.com") => Some(Verdict::Proxy(Arc::from("g-x"))),
-        Some("d.com") => Some(Verdict::Direct),
+        Some("d.com") => Some(Verdict::Direct(None)),
         Some("b.com") => Some(Verdict::Block),
         _ => None,
     };
@@ -116,6 +116,7 @@ fn rules_without_proxy() -> AtomRules {
             proxy: 41,
             direct: 42,
             block: 40,
+            route: None,
         },
         None,
         String::new(),
@@ -131,6 +132,8 @@ fn rule(matches: Match, action: Action) -> RuleInput {
         remark: String::new(),
         matches,
         action,
+        dns: None,
+        cache: true,
     }
 }
 
@@ -187,7 +190,7 @@ fn a_recomputation_skips_rules_with_a_client_condition() {
         rules.decide(&wire("www.a.com"), 0),
         Some(Verdict::Proxy(Arc::from("g-x")))
     );
-    assert_eq!(rules.decide(&wire("nas.lan"), 0), Some(Verdict::Direct));
+    assert_eq!(rules.decide(&wire("nas.lan"), 0), Some(Verdict::Direct(None)));
     assert_eq!(rules.decide(&wire("b.com"), 0), None);
     assert_eq!(
         rules
@@ -275,6 +278,7 @@ fn a_resync_sends_the_changes_and_keeps_what_failed() {
             proxy: 41,
             direct: 42,
             block: 40,
+            route: None,
         },
         None,
         String::new(),

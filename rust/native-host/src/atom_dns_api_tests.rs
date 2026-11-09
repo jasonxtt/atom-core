@@ -1,4 +1,4 @@
-//! Tests of `atom_dns_api`: `dns`, `upstreams`, `ddns`, `rewrite`.
+//! Tests of `atom_dns_api`: `dns`, `upstreams` (custom groups included), `rewrite`.
 
 use atomdns_upstream_core::TransportCancellation;
 use serde_json::{Value, json};
@@ -22,7 +22,6 @@ impl Host {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("webinfo")).unwrap();
         std::fs::create_dir_all(root.join("rule")).unwrap();
-        std::fs::write(root.join("rule/ddnslist.txt"), "full:home.example\n").unwrap();
         std::fs::write(
             root.join("rule/rewrite.txt"),
             "full:nas.example 192.0.2.9\n",
@@ -41,14 +40,13 @@ impl Host {
             ("block_qtypes", true),
             ("block_aaaa", false),
             ("prefer_v4", false),
-            ("ddns_foreign", false),
             ("full_cache", true),
             ("lazy_cache", true),
         ] {
             yaml.push_str(&flag(tag, default));
         }
         yaml.push_str(
-            "  - tag: client_ecs\n    type: ecs_address\n    args: {addr: '2408:8888::8'}\n  - tag: domestic\n    type: aliapi\n    args: {upstreams: [{tag: one, addr: 'udp://127.0.0.1:15998'}]}\n  - tag: nocnfake\n    type: aliapi\n    args: {upstreams: [{tag: fake, addr: 'udp://127.0.0.1:6666'}]}\n  - tag: ddnslist\n    type: domain_set_light\n    args: {files: [rule/ddnslist.txt]}\n  - tag: mapper\n    type: domain_mapper\n    args: {default_mark: 17, default_tag: none, rules: [{tag: ddnslist, mark: 6, output_tag: DDNS}]}\n  - tag: rewrite\n    type: rewrite\n    args: {files: [rule/rewrite.txt], dns: 'udp://127.0.0.1:15998'}\n  - tag: atom_rules\n    type: atom_rules\n    args: {marks: {proxy: 41, direct: 42, block: 40}}\n  - tag: entry\n    type: sequence\n    args: [{exec: $rewrite}, {exec: $atom_rules}, {exec: $domestic}]\n",
+            "  - tag: client_ecs\n    type: ecs_address\n    args: {addr: '2408:8888::8'}\n  - tag: domestic\n    type: aliapi\n    args: {upstreams: [{tag: one, addr: 'udp://127.0.0.1:15998'}]}\n  - tag: nocnfake\n    type: aliapi\n    args: {upstreams: [{tag: fake, addr: 'udp://127.0.0.1:6666'}]}\n  - tag: cache_atom\n    type: cache\n    args: {size: 64}\n  - tag: rewrite\n    type: rewrite\n    args: {files: [rule/rewrite.txt], dns: 'udp://127.0.0.1:15998'}\n  - tag: atom_rules\n    type: atom_rules\n    args: {marks: {proxy: 41, direct: 42, block: 40, route: 43}}\n  - tag: entry\n    type: sequence\n    args: [{exec: $rewrite}, {exec: $atom_rules}, {matches: fast_mark 43, exec: [$atom_direct, exit]}, {exec: $domestic}]\n",
         );
         yaml.push_str(&format!(
             "  - tag: main\n    type: udp_server\n    args: {{entry: entry, listen: '127.0.0.1:{dns}'}}\n"
@@ -207,30 +205,9 @@ fn upstreams_list_every_group_but_fakeip_and_replace_one() {
 }
 
 #[test]
-fn ddns_and_rewrite_replace_their_files() {
+fn rewrite_replaces_its_file() {
     let host = Host::new("fixed");
-    let (status, view) = host.call("GET", "ddns", &Value::Null);
-    assert_eq!(
-        (status, view),
-        (200, json!({"entries": ["full:home.example"]}))
-    );
-    let (status, view) = host.call(
-        "PUT",
-        "ddns",
-        &json!({"entries": ["  domain:dyn.example ", "", "# note", "full:b.example"]}),
-    );
-    assert_eq!(status, 200, "{view}");
-    assert_eq!(
-        view,
-        json!({"entries": ["domain:dyn.example", "full:b.example"]})
-    );
-    assert_eq!(
-        std::fs::read_to_string(host.root.join("rule/ddnslist.txt")).unwrap(),
-        "domain:dyn.example\nfull:b.example\n"
-    );
-    assert_eq!(host.call("GET", "ddns", &Value::Null).1, view);
-    assert_eq!(host.call("PUT", "ddns", &json!({"values": []})).0, 400);
-
+    assert_eq!(host.call("GET", "ddns", &Value::Null).0, 404, "DDNS is a rule now");
     let (status, view) = host.call("GET", "rewrite", &Value::Null);
     assert_eq!(
         (status, view),
@@ -273,56 +250,6 @@ fn the_rewrite_file_is_a_fingerprinted_input() {
     );
 }
 
-/// Two overlapping DDNS replacements: each answers only once its own list
-/// (or a later one) is the one the mapper uses. A rebuild already running
-/// when the second one wrote is waited for (codex review of step 6a, round
-/// 1); the other replacement may write again after a reply settled, while
-/// that reply still empties the caches.
-#[test]
-fn overlapping_ddns_replacements_answer_once_their_list_is_in_use() {
-    let host = Host::new("ddns-overlap");
-    let control = host.host.control();
-    let file = host.root.join("rule/ddnslist.txt");
-    host.host.block_on(async {
-        let put = |name: &'static str, other: &'static str| {
-            let control = control.clone();
-            let file = file.clone();
-            async move {
-                let view = control.view();
-                let body = json!({"entries": [format!("full:{name}")]}).to_string();
-                let reply = crate::atom_rules_api::handle(
-                    Some(&control),
-                    &view.config,
-                    &view.cache,
-                    "PUT",
-                    "/api/v1/atom/ddns",
-                    body.as_bytes(),
-                    &TransportCancellation::new(),
-                )
-                .await
-                .expect("an atom route");
-                assert_eq!(reply.status, 200);
-                let on_disk = std::fs::read_to_string(&file).unwrap();
-                let mapper = view
-                    .config
-                    .domain_mappers
-                    .iter()
-                    .find(|mapper| mapper.tag == "mapper")
-                    .unwrap();
-                let own = mapper.evaluate(Some(name)).fast_flags & (1 << 6) != 0;
-                assert!(
-                    own || on_disk.trim() == format!("full:{other}"),
-                    "{name} is answered before its list is in use (on disk: {on_disk:?})"
-                );
-            }
-        };
-        let first = tokio::task::spawn_local(put("first.example", "second.example"));
-        let second = tokio::task::spawn_local(put("second.example", "first.example"));
-        first.await.unwrap();
-        second.await.unwrap();
-    });
-}
-
 /// A rewrite plugin reading several files cannot be replaced whole: the
 /// other files would bring their rules back at the next load (codex review
 /// of step 6a, round 2).
@@ -359,92 +286,10 @@ fn a_rewrite_with_several_files_is_not_replaced() {
     );
 }
 
-/// A DDNS entry the file loader would refuse (one line of 64 KiB or more
-/// fails the whole file at the next start) is refused before anything is
-/// written (codex review of step 6a, round 3).
+/// atom's own configuration keeps the rewrite rules in one file, so `PUT
+/// rewrite` can replace them; the DDNS list is gone (step 6b: a rule).
 #[test]
-fn an_overlong_ddns_entry_is_refused_and_nothing_is_written() {
-    let host = Host::new("ddns-long");
-    let long = format!("keyword:{}", "a".repeat(64 * 1024));
-    let (status, value) = host.call("PUT", "ddns", &json!({"entries": [long]}));
-    assert_eq!(status, 400, "{value}");
-    assert_eq!(
-        std::fs::read_to_string(host.root.join("rule/ddnslist.txt")).unwrap(),
-        "full:home.example\n"
-    );
-}
-
-/// A rebuild that keeps the previous rules is reported, not answered 200:
-/// here the mapper also reads another list whose file became unloadable.
-#[test]
-fn a_ddns_list_the_mapper_cannot_build_is_reported() {
-    let host = Host::new("ddns-bad");
-    let path = host.root.join("config.yaml");
-    let yaml = std::fs::read_to_string(&path)
-        .unwrap()
-        .replace(
-            "rules: [{tag: ddnslist, mark: 6, output_tag: DDNS}]",
-            "rules: [{tag: ddnslist, mark: 6, output_tag: DDNS}, {tag: other, mark: 7, output_tag: O}]",
-        )
-        .replace(
-            "  - tag: mapper\n",
-            "  - tag: other\n    type: domain_set_light\n    args: {files: [rule/other.txt]}\n  - tag: mapper\n",
-        );
-    std::fs::write(host.root.join("rule/other.txt"), "full:o.example\n").unwrap();
-    std::fs::write(&path, yaml).unwrap();
-    let bad = Host {
-        root: host.root.clone(),
-        host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
-    };
-    std::fs::write(
-        bad.root.join("rule/other.txt"),
-        format!("keyword:{}\n", "a".repeat(64 * 1024)),
-    )
-    .unwrap();
-    let (status, value) = bad.call("PUT", "ddns", &json!({"entries": ["full:new.example"]}));
-    assert_eq!(status, 500, "{value}");
-    assert!(
-        value["error"].as_str().unwrap().contains("没有生效"),
-        "{value}"
-    );
-}
-
-/// A DDNS list with more than its one writable file (another file, or inline
-/// `exps`) cannot be replaced whole (codex review of step 6a, round 3).
-#[test]
-fn a_ddns_list_with_other_sources_is_not_replaced() {
-    for (from, to) in [
-        (
-            "files: [rule/ddnslist.txt]",
-            "files: [rule/ddnslist.txt, rule/more.txt]",
-        ),
-        (
-            "files: [rule/ddnslist.txt]",
-            "files: [rule/ddnslist.txt], exps: ['full:inline.example']",
-        ),
-    ] {
-        let host = Host::new("ddns-more");
-        let path = host.root.join("config.yaml");
-        let yaml = std::fs::read_to_string(&path).unwrap().replace(from, to);
-        std::fs::write(host.root.join("rule/more.txt"), "full:more.example\n").unwrap();
-        std::fs::write(&path, yaml).unwrap();
-        let other = Host {
-            root: host.root.clone(),
-            host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
-        };
-        let (status, value) = other.call("PUT", "ddns", &json!({"entries": []}));
-        assert_eq!(status, 409, "{to}: {value}");
-        assert_eq!(
-            std::fs::read_to_string(other.root.join("rule/ddnslist.txt")).unwrap(),
-            "full:home.example\n"
-        );
-    }
-}
-
-/// atom's own configuration keeps the DDNS list and the rewrite rules in one
-/// file each, so `PUT ddns` and `PUT rewrite` can replace them.
-#[test]
-fn the_shipped_ddns_and_rewrite_plugins_read_one_file() {
+fn the_shipped_rewrite_plugin_reads_one_file_and_ddns_is_gone() {
     let text = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../config/sub_config/rule_set.yaml"
@@ -460,10 +305,10 @@ fn the_shipped_ddns_and_rewrite_plugins_read_one_file() {
             .cloned()
             .unwrap_or_else(|| panic!("no {tag}"))
     };
-    let ddns = plugin("ddnslist");
-    assert_eq!(ddns["type"], "domain_set_light");
-    assert_eq!(ddns["args"]["files"].as_array().unwrap().len(), 1);
-    assert!(ddns["args"].get("exps").is_none());
+    assert!(
+        yaml["plugins"].as_array().unwrap().iter().all(|p| p["tag"] != "ddnslist"),
+        "the DDNS list is a rule now"
+    );
     let rewrite = plugin("rewrite");
     assert_eq!(rewrite["args"]["files"].as_array().unwrap().len(), 1);
 }
@@ -566,4 +411,166 @@ fn in_process_queries_meet_no_client_rule() {
         5,
         "an inverted client rule does not match"
     );
+}
+
+/// A UDP DNS server answering every A query with `address`, counting the
+/// queries it saw.
+fn fake_upstream(address: [u8; 4]) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&seen);
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 1500];
+        while let Ok((size, peer)) = socket.recv_from(&mut buffer) {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let query = &buffer[..size];
+            // Header with QR, RD, RA; one question, one answer, no OPT.
+            let question_end = 12 + query[12..].iter().position(|b| *b == 0).unwrap() + 5;
+            let mut reply = query[..2].to_vec();
+            reply.extend_from_slice(&[0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]);
+            reply.extend_from_slice(&query[12..question_end]);
+            reply.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0x01, 0x2c, 0, 4]);
+            reply.extend_from_slice(&address);
+            let _ = socket.send_to(&reply, peer);
+        }
+    });
+    (port, seen)
+}
+
+/// The address of an answer with one A record (the fake's), if any.
+fn first_a(reply: &[u8]) -> Option<[u8; 4]> {
+    let answers = u16::from_be_bytes([reply[6], reply[7]]);
+    (answers > 0).then(|| reply[reply.len() - 4..].try_into().unwrap())
+}
+
+#[test]
+fn custom_upstream_groups_are_created_named_used_and_deleted() {
+    let host = Host::new("groups");
+    let entry = |port: u16| json!({"tag": format!("u{port}"), "enabled": true, "protocol": "udp", "addr": format!("127.0.0.1:{port}")});
+    let (status, created) = host.call(
+        "POST",
+        "upstreams",
+        &json!({"name": "公司 DNS", "upstreams": [entry(15990)]}),
+    );
+    assert_eq!(status, 201, "{created}");
+    let tag = created["tag"].as_str().unwrap().to_owned();
+    assert!(crate::config::atom_routes::valid_tag(&tag), "{tag}");
+    let group = created["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["tag"] == tag.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!((&group["name"], &group["builtin"]), (&json!("公司 DNS"), &json!(false)));
+    let domestic = &created["groups"][0];
+    assert_eq!((&domestic["name"], &domestic["builtin"]), (&json!("国内"), &json!(true)));
+    assert_eq!(host.settings()["atom_groups"], json!([{"tag": tag, "name": "公司 DNS"}]));
+
+    // Rename; a custom group keeps at least one upstream.
+    let (status, view) = host.call(
+        "PUT",
+        &format!("upstreams/{tag}"),
+        &json!({"name": "内网 DNS", "upstreams": [entry(15991)]}),
+    );
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(host.settings()["atom_groups"][0]["name"], "内网 DNS");
+    assert_eq!(host.settings()["upstreams"][&tag][0]["addr"], "127.0.0.1:15991");
+    assert_eq!(
+        host.call("PUT", &format!("upstreams/{tag}"), &json!({"upstreams": []})).0,
+        400
+    );
+    assert_eq!(
+        host.call("PUT", "upstreams/domestic", &json!({"name": "x", "upstreams": []})).0,
+        400,
+        "builtin groups keep their names"
+    );
+    for bad in [json!({"name": " ", "upstreams": [entry(1)]}), json!({"name": "x", "upstreams": []})] {
+        assert_eq!(host.call("POST", "upstreams", &bad).0, 400, "{bad}");
+    }
+
+    // A rule names it; then the group cannot go.
+    let rule = json!({"match": {"suffix": ["corp.example"]}, "action": {"type": "direct"}, "dns": tag});
+    let (status, created_rule) = host.call("POST", "rules", &rule);
+    assert_eq!(status, 201, "{created_rule}");
+    let rule_id = created_rule["rule"]["id"].as_str().unwrap().to_owned();
+    let (status, refused) = host.call("DELETE", &format!("upstreams/{tag}"), &Value::Null);
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["rules"], json!([rule_id]));
+    assert_eq!(host.call("DELETE", "upstreams/domestic", &Value::Null).0, 400);
+    assert_eq!(host.call("DELETE", "upstreams/u-00000000", &Value::Null).0, 404);
+
+    // Rule checks: an unknown group, dns or cache on a non-direct rule.
+    for bad in [
+        json!({"match": {"suffix": ["a.example"]}, "action": {"type": "direct"}, "dns": "u-ffffffff"}),
+        json!({"match": {"suffix": ["a.example"]}, "action": {"type": "block"}, "dns": "domestic"}),
+        json!({"match": {"suffix": ["a.example"]}, "action": {"type": "block"}, "cache": false}),
+    ] {
+        let (status, value) = host.call("POST", "rules", &bad);
+        assert_eq!(status, 400, "{bad}: {value}");
+    }
+
+    let (status, _) = host.call("DELETE", &format!("rules/{rule_id}"), &Value::Null);
+    assert_eq!(status, 200);
+    let (status, view) = host.call("DELETE", &format!("upstreams/{tag}"), &Value::Null);
+    assert_eq!(status, 200, "{view}");
+    assert!(host.settings().get("atom_groups").is_none());
+    assert!(host.settings()["upstreams"].get(&tag).is_none());
+}
+
+/// A direct rule with `dns` asks that group (through the generated
+/// `atom_direct`), with the rule cache; `cache: false` asks every time.
+#[test]
+fn a_direct_rule_asks_its_group_with_or_without_the_cache() {
+    let host = Host::new("routed");
+    let (port, seen) = fake_upstream([192, 0, 2, 77]);
+    let upstream = json!({"tag": "corp", "enabled": true, "protocol": "udp", "addr": format!("127.0.0.1:{port}")});
+    let (status, created) = host.call(
+        "POST",
+        "upstreams",
+        &json!({"name": "公司", "upstreams": [upstream]}),
+    );
+    assert_eq!(status, 201, "{created}");
+    let tag = created["tag"].as_str().unwrap().to_owned();
+    for rule in [
+        json!({"match": {"suffix": ["cached.example"]}, "action": {"type": "direct"}, "dns": tag}),
+        json!({"match": {"suffix": ["fresh.example"]}, "action": {"type": "direct"}, "dns": tag, "cache": false}),
+    ] {
+        let (status, value) = host.call("POST", "rules", &rule);
+        assert_eq!(status, 201, "{value}");
+    }
+    let (_, rules) = host.call("GET", "rules", &Value::Null);
+    // After the default LAN rule.
+    assert_eq!(rules["rules"][2]["cache"], false, "{rules}");
+    assert!(rules["rules"][1].get("cache").is_none(), "the default is left out: {rules}");
+
+    let control = host.host.control();
+    let local = crate::local_url::LocalApi {
+        control: crate::runtime_snapshot::RuntimeControlWeak::from_control(&control),
+        api: None,
+        roots: None,
+    };
+    let ask = |name: &'static str| {
+        let local = local.clone();
+        host.host.block_on(async move {
+            local
+                .resolve("entry", &query(name), std::time::Duration::from_secs(2))
+                .await
+                .expect("an answer")
+        })
+    };
+    let count = || seen.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(first_a(&ask("a.cached.example")), Some([192, 0, 2, 77]));
+    assert_eq!(count(), 1);
+    assert_eq!(first_a(&ask("a.cached.example")), Some([192, 0, 2, 77]));
+    assert_eq!(count(), 1, "the rule cache answered");
+    assert_eq!(first_a(&ask("a.fresh.example")), Some([192, 0, 2, 77]));
+    assert_eq!(first_a(&ask("a.fresh.example")), Some([192, 0, 2, 77]));
+    assert_eq!(count(), 3, "no cache: asked both times");
+
+    // The routes survive a restart (the group is in settings.json).
+    let again = crate::HostAssembly::from_config_file_in(&host.root.join("config.yaml"), None)
+        .expect("restarts");
+    assert!(again.config().effective_upstreams.contains_key(&tag));
 }

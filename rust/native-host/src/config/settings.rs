@@ -265,6 +265,11 @@ pub(crate) struct Settings {
     pub(crate) ecs: BTreeMap<String, Addr>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) upstreams: BTreeMap<String, Vec<UpstreamEntry>>,
+    /// atom fork: the custom upstream groups (`POST upstreams`). Each is
+    /// compiled as a forward (`aliapi`) plugin whose list is its
+    /// `upstreams` entry ([`super::atom_routes`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) atom_groups: Vec<AtomGroup>,
     #[serde(default, skip_serializing_if = "DomainGeneration::is_empty")]
     pub(crate) domain_generation: DomainGeneration,
     /// Tuned `cache` numbers by cache tag; only differences from the YAML.
@@ -282,6 +287,15 @@ pub(crate) struct Settings {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) flags: Option<BTreeMap<String, super::flags::FlagValue>>,
+}
+
+/// atom fork: one custom upstream group: its forward plugin's tag
+/// (`u-` and eight hexadecimal digits) and the name the UI shows.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AtomGroup {
+    pub(crate) tag: String,
+    pub(crate) name: String,
 }
 
 /// A present `flags` key must be an object (`null` is not "absent": absent

@@ -1,21 +1,23 @@
 //! atom fork: the AtomDNS side of the management API, under `/api/v1/atom/`
 //! (atom `docs/design.md` §7.2, §8). It replaces AtomDNS's own settings routes
 //! (`/api/v1/flags`, `/api/v1/overrides`, `/api/v1/domain-generation`,
-//! `/api/v1/upstream/config`) and the plugin routes of the DDNS list and the
-//! rewrite rules, which atom step 6 removed with the old WebUI.
+//! `/api/v1/upstream/config`) and the plugin route of the rewrite rules, which
+//! atom step 6 removed with the old WebUI. The DDNS list went in step 6b: a
+//! DDNS name is a direct rule with an upstream group and no cache.
 //!
 //! | path | methods |
 //! |---|---|
 //! | `dns` | GET, PUT (any of the fields) |
-//! | `upstreams` | GET |
-//! | `upstreams/{tag}` | PUT `{upstreams}` (empty: back to the YAML list) |
-//! | `ddns` | GET, PUT `{entries}` |
+//! | `upstreams` | GET, POST `{name, upstreams}` (a custom group) |
+//! | `upstreams/{tag}` | PUT `{upstreams, name?}` (empty: back to the YAML list), DELETE (custom groups) |
 //! | `rewrite` | GET, PUT `{entries}` |
 //!
 //! `dns` and `upstreams` are stored in `webinfo/settings.json` and published
 //! as a new generation (`RuntimeControl::apply_settings`); they carry no
-//! version (the last write wins). `ddns` and `rewrite` replace their rule file;
-//! every successful change of them empties all caches.
+//! version (the last write wins). Custom groups (`settings.atom_groups`)
+//! become forward plugins of the generation (`config::atom_routes`).
+//! `rewrite` replaces its rule file; every successful change of it empties
+//! all caches.
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -29,8 +31,6 @@ use crate::config::settings::{Settings, UpstreamEntry};
 use crate::rule_sources::Reply;
 use crate::runtime_snapshot::{ApplyFailure, RuntimeControl};
 
-/// The DDNS list (`domain_set_light`, `sub_config/rule_set.yaml`).
-const DDNS: &str = "ddnslist";
 /// The rewrite plugin (`sub_config/rule_set.yaml`).
 const REWRITE: &str = "rewrite";
 /// The feature flags `dns` exposes (`sub_config/flags.yaml`).
@@ -39,15 +39,17 @@ const FLAGS: &[&str] = &[
     "block_qtypes",
     "block_aaaa",
     "prefer_v4",
-    "ddns_foreign",
     "full_cache",
     "lazy_cache",
 ];
 
-/// Whether `PUT` of `segments` publishes settings itself: it takes no
-/// management lease, because a published generation waits for every lease.
-pub(crate) fn applies_settings(segments: &[&str]) -> bool {
-    matches!(segments, ["dns"] | ["upstreams", _])
+/// Whether a request publishes settings itself: it takes no management
+/// lease, because a published generation waits for every lease.
+pub(crate) fn applies_settings(method: &str, segments: &[&str]) -> bool {
+    matches!(
+        (method, segments),
+        ("PUT", ["dns"]) | ("POST", ["upstreams"]) | ("PUT" | "DELETE", ["upstreams", _])
+    )
 }
 
 pub(crate) async fn handle(
@@ -67,24 +69,24 @@ pub(crate) async fn handle(
             None => error(503, "runtime control is unavailable"),
         },
         ("GET", ["upstreams"]) => reply_json(200, &upstreams_view(config)),
+        ("POST", ["upstreams"]) => match control {
+            Some(control) => create_group(control, body).await,
+            None => error(503, "runtime control is unavailable"),
+        },
         ("PUT", ["upstreams", tag]) => match control {
             Some(control) => put_upstreams(control, tag, body).await,
             None => error(503, "runtime control is unavailable"),
         },
-        ("GET", ["ddns"]) => match ddns_provider(config) {
-            Ok(provider) => match config.rule_sources.light_rules(&provider).await {
-                Ok(entries) => reply_json(200, &json!({ "entries": entries })),
-                Err(e) => error(500, e),
-            },
-            Err(reply) => reply,
+        ("DELETE", ["upstreams", tag]) => match control {
+            Some(control) => delete_group(control, tag).await,
+            None => error(503, "runtime control is unavailable"),
         },
-        ("PUT", ["ddns"]) => put_ddns(config, cache, body).await,
         ("GET", ["rewrite"]) => match rewrite_runtime(config) {
             Ok(runtime) => reply_json(200, &json!({ "entries": runtime.lines() })),
             Err(reply) => reply,
         },
         ("PUT", ["rewrite"]) => put_rewrite(config, cache, body).await,
-        (_, ["dns" | "upstreams" | "ddns" | "rewrite", ..]) => error(405, "method not allowed"),
+        (_, ["dns" | "upstreams" | "rewrite", ..]) => error(405, "method not allowed"),
         _ => return None,
     })
 }
@@ -396,14 +398,28 @@ async fn trigger_requery(config: &CompiledConfig) {
 
 // ----- upstreams ------------------------------------------------------------
 
+/// The display names of the YAML upstream groups.
+fn builtin_name(tag: &str) -> &str {
+    match tag {
+        "domestic" => "国内",
+        "foreign" => "国外",
+        "foreignecs" => "国外（带 ECS）",
+        other => other,
+    }
+}
+
 fn upstreams_view(config: &CompiledConfig) -> Value {
+    let custom = &config.settings.atom_groups;
     let groups: Vec<Value> = config
         .effective_upstreams
         .iter()
         .filter(|(tag, _)| tag.as_str() != crate::edns_directive::FAKEIP_UPSTREAM)
         .map(|(tag, entries)| {
+            let mine = custom.iter().find(|group| &group.tag == tag);
             json!({
                 "tag": tag,
+                "name": mine.map_or_else(|| builtin_name(tag), |group| group.name.as_str()),
+                "builtin": mine.is_none(),
                 "customized": config.settings.upstreams.contains_key(tag),
                 "upstreams": entries,
             })
@@ -412,11 +428,44 @@ fn upstreams_view(config: &CompiledConfig) -> Value {
     json!({ "groups": groups })
 }
 
+/// A list a group may take: each entry valid, one of them enabled, proxy
+/// switches in their stored form.
+fn checked_entries(tag: &str, mut entries: Vec<UpstreamEntry>) -> Result<Vec<UpstreamEntry>, Reply> {
+    for (index, entry) in entries.iter().enumerate() {
+        entry.validate(index).map_err(|reason| error(400, reason))?;
+    }
+    // A list must keep one enabled upstream (an `aliapi` without one does not
+    // load); an empty list restores the YAML list.
+    if !entries.is_empty() && !entries.iter().any(|entry| entry.enabled) {
+        return Err(error(400, format!("上游组 `{tag}` 至少要保留一个启用的上游")));
+    }
+    for entry in &mut entries {
+        entry.use_proxy = Some(entry.proxy_switch());
+        entry.use_socks_proxy = None;
+    }
+    Ok(entries)
+}
+
+async fn publish(control: &RuntimeControl, settings: Settings, created: Option<&str>) -> Reply {
+    if let Err(e) = control.apply_settings(settings).await {
+        return failure(e);
+    }
+    let mut view = upstreams_view(&control.view().config);
+    match created {
+        Some(tag) => {
+            view["tag"] = json!(tag);
+            reply_json(201, &view)
+        }
+        None => reply_json(200, &view),
+    }
+}
+
 async fn put_upstreams(control: &RuntimeControl, tag: &str, body: &[u8]) -> Reply {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Payload {
         upstreams: Vec<UpstreamEntry>,
+        name: Option<String>,
     }
     let payload: Payload = match serde_json::from_slice(body) {
         Ok(payload) => payload,
@@ -429,35 +478,101 @@ async fn put_upstreams(control: &RuntimeControl, tag: &str, body: &[u8]) -> Repl
     if !current.config.effective_upstreams.contains_key(tag) {
         return error(404, format!("上游组 `{tag}` 不存在"));
     }
-    for (index, entry) in payload.upstreams.iter().enumerate() {
-        if let Err(reason) = entry.validate(index) {
+    let mut settings = current.config.settings.clone();
+    let custom = settings.atom_groups.iter().position(|group| group.tag == tag);
+    if let Some(name) = payload.name {
+        let Some(at) = custom else {
+            return error(400, "内置上游组不能改名");
+        };
+        if let Err(reason) = crate::config::atom_routes::check_name(&name) {
             return error(400, reason);
         }
+        settings.atom_groups[at].name = name;
     }
-    // A list must keep one enabled upstream (an `aliapi` without one does not
-    // load); an empty list restores the YAML list.
-    if !payload.upstreams.is_empty() && !payload.upstreams.iter().any(|entry| entry.enabled) {
-        return error(400, format!("上游组 `{tag}` 至少要保留一个启用的上游"));
+    if custom.is_some() && payload.upstreams.is_empty() {
+        return error(400, format!("自定义上游组 `{tag}` 至少要有一个上游"));
     }
-    let mut settings = current.config.settings.clone();
-    let mut entries = payload.upstreams;
-    for entry in &mut entries {
-        entry.use_proxy = Some(entry.proxy_switch());
-        entry.use_socks_proxy = None;
-    }
+    let entries = match checked_entries(tag, payload.upstreams) {
+        Ok(entries) => entries,
+        Err(reply) => return reply,
+    };
     if entries.is_empty() {
         settings.upstreams.remove(tag);
     } else {
         settings.upstreams.insert(tag.to_owned(), entries);
     }
     drop(current);
-    if let Err(e) = control.apply_settings(settings).await {
-        return failure(e);
-    }
-    reply_json(200, &upstreams_view(&control.view().config))
+    publish(control, settings, None).await
 }
 
-// ----- ddns, rewrite --------------------------------------------------------
+/// `POST upstreams`: a custom group (`u-` and eight hexadecimal digits).
+async fn create_group(control: &RuntimeControl, body: &[u8]) -> Reply {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Payload {
+        name: String,
+        upstreams: Vec<UpstreamEntry>,
+    }
+    let payload: Payload = match serde_json::from_slice(body) {
+        Ok(payload) => payload,
+        Err(e) => return error(400, format!("invalid request body: {e}")),
+    };
+    if let Err(reason) = crate::config::atom_routes::check_name(&payload.name) {
+        return error(400, reason);
+    }
+    if payload.upstreams.is_empty() {
+        return error(400, "上游组至少要有一个上游");
+    }
+    let current = control.view();
+    let mut settings = current.config.settings.clone();
+    let taken = |id: &str| {
+        current.config.effective_upstreams.contains_key(id)
+            || settings.atom_groups.iter().any(|group| group.tag == id)
+    };
+    let tag = crate::atom_rules::new_id("u-", &taken);
+    let entries = match checked_entries(&tag, payload.upstreams) {
+        Ok(entries) => entries,
+        Err(reply) => return reply,
+    };
+    settings.atom_groups.push(crate::config::settings::AtomGroup {
+        tag: tag.clone(),
+        name: payload.name,
+    });
+    settings.upstreams.insert(tag.clone(), entries);
+    drop(current);
+    publish(control, settings, Some(&tag)).await
+}
+
+/// `DELETE upstreams/{tag}`: a custom group no rule names.
+async fn delete_group(control: &RuntimeControl, tag: &str) -> Reply {
+    let current = control.view();
+    let mut settings = current.config.settings.clone();
+    let Some(at) = settings.atom_groups.iter().position(|group| group.tag == tag) else {
+        return if current.config.effective_upstreams.contains_key(tag) {
+            error(400, format!("内置上游组 `{tag}` 不能删除"))
+        } else {
+            error(404, format!("上游组 `{tag}` 不存在"))
+        };
+    };
+    if let Some(rules) = current.config.local.atom_rules.as_deref() {
+        let using = rules.rules_using_group(tag);
+        if !using.is_empty() {
+            return reply_json(
+                409,
+                &json!({
+                    "error": format!("上游组 `{tag}` 被 {} 条规则使用，先改掉这些规则", using.len()),
+                    "rules": using,
+                }),
+            );
+        }
+    }
+    settings.atom_groups.remove(at);
+    settings.upstreams.remove(tag);
+    drop(current);
+    publish(control, settings, None).await
+}
+
+// ----- rewrite --------------------------------------------------------------
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -469,16 +584,6 @@ fn entries(body: &[u8]) -> Result<Vec<String>, Reply> {
     serde_json::from_slice::<Entries>(body)
         .map(|payload| payload.entries)
         .map_err(|e| error(400, format!("invalid request body: {e}")))
-}
-
-fn ddns_provider(
-    config: &CompiledConfig,
-) -> Result<std::rc::Rc<crate::rule_sources::Provider>, Reply> {
-    config
-        .rule_sources
-        .provider(DDNS)
-        .filter(|provider| provider.kind == crate::rule_sources::Kind::Light)
-        .ok_or_else(|| error(404, format!("配置里没有 DDNS 名单 `{DDNS}`")))
 }
 
 fn rewrite_runtime(
@@ -502,21 +607,6 @@ async fn after_change(config: &CompiledConfig, cache: &CacheCatalog, value: &Val
             500,
             format!("修改已保存并生效，但清空缓存失败，旧的缓存应答可能还会被使用: {e}"),
         ),
-    }
-}
-
-async fn put_ddns(config: &CompiledConfig, cache: &CacheCatalog, body: &[u8]) -> Reply {
-    let provider = match ddns_provider(config) {
-        Ok(provider) => provider,
-        Err(reply) => return reply,
-    };
-    let values = match entries(body) {
-        Ok(values) => values,
-        Err(reply) => return reply,
-    };
-    match config.rule_sources.light_replace(&provider, values).await {
-        Ok(entries) => after_change(config, cache, &json!({ "entries": entries })).await,
-        Err((status, reason)) => error(status, reason),
     }
 }
 

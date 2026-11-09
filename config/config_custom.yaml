@@ -7,22 +7,23 @@
 # 一条 A / AAAA 查询的完整路径（sequence_6666，自上而下，前面结束了就不会走到后面）：
 #   1. rewrite 重写（rule/rewrite.txt）           命中就直接应答
 #   2. 屏蔽类型（SOA/PTR/HTTPS，可选 AAAA）       reject
-#   3. unified_matcher1 给域名打 fast_mark        一次匹配拿到广告/DDNS/各名单/学习结果的 mark
+#   3. unified_matcher1 给域名打 fast_mark        一次匹配拿到广告/各名单/学习结果的 mark
 #   4. IPv4 优先                                  开启「IPv4 优先」时执行 prefer_ipv4
-#   5. DDNS 域名                                  国内；开启「DDNS 优先国外」则国外为主（兼容模式可回退国内，安全模式不回退）
-#   6. atom 用户规则表（atom_rules）              有序，第一条命中的生效：代理 → 组（FakeIP + EDNS0 65001 SET，不问国内外 DNS）、
-#                                                 直连（国内 DNS）、屏蔽（空应答）；没命中才往下走 → sub_config/atom_rules.yaml
-#                                                 广告屏蔽是规则表里的一条普通规则（默认规则表），不再是固定步骤
-#   7. 记忆无 V4/V6                               直接空应答（以下属于原国内外判断）
-#   8. 全局缓存（compat 用 cache_all，safe 用 cache_all_noleak）、域名排行
-#   9. $sequence_listed                           域名在名单里或有学习记录：按 mark 的优先级交给对应的结果序列 → process_listed.yaml
-#  10. $sequence_unlisted_v4 / _v6                不在任何名单里：向上游要真实应答，按应答里的 IP 决定直连或代理 → process_v4.yaml / process_v6.yaml
+#   5. atom 用户规则表（atom_rules）              有序，第一条命中的生效：代理 → 组（FakeIP + EDNS0 65001 SET，不问国内外 DNS）、
+#                                                 直连（默认国内 DNS；规则指定了上游组或关了缓存时走程序生成的 atom_direct）、
+#                                                 屏蔽（空应答）；没命中才往下走 → sub_config/atom_rules.yaml
+#                                                 广告屏蔽是规则表里的一条普通规则（默认规则表），不再是固定步骤；
+#                                                 DDNS 也是规则：直连 + 上游组 + 不缓存，放在最前面
+#   6. 记忆无 V4/V6                               直接空应答（以下属于原国内外判断）
+#   7. 全局缓存（compat 用 cache_all，safe 用 cache_all_noleak）、域名排行
+#   8. $sequence_listed                           域名在名单里或有学习记录：按 mark 的优先级交给对应的结果序列 → process_listed.yaml
+#   9. $sequence_unlisted_v4 / _v6                不在任何名单里：向上游要真实应答，按应答里的 IP 决定直连或代理 → process_v4.yaml / process_v6.yaml
 #      其他查询类型（MX、TXT、SRV 等）走 $sequence_other：按名单决定问国内还是国外 DNS → process_ot.yaml
 #
-# 「核心运行模式」（flags.yaml 的 core_mode）只影响第 10 步和记忆直连：
+# 「核心运行模式」（flags.yaml 的 core_mode）只影响第 9 步和记忆直连：
 #   兼容模式 compat：列表外域名先问国内 DNS，性能更高。
 #   安全模式 safe  ：列表外域名只问国外 DNS（带 ECS），国外没有结果或失败也不回退国内。
-#   两种模式下，规则表的直连规则（包括带客户端条件的）、中国域名、DDNS 默认解析、
+#   两种模式下，规则表的直连规则（包括带客户端条件的）、中国域名、
 #   重写的域名目标，仍然按各自的设置使用国内 DNS——它们是你明确指定的，不属于「列表外」。
 #
 # 文件分工：
@@ -98,23 +99,6 @@ plugins:
       - exec: $unified_matcher1                 #一次匹配给域名打上所有名单和学习结果的 fast_mark；定义: sub_config/rule_set.yaml
       - matches: flag prefer_v4                 #IPv4优先：存在A记录时抑制AAAA结果；定义: sub_config/flags.yaml
         exec: prefer_ipv4
-      - matches:                                #DDNS域名 + 安全模式 + 国外优先：只问国外，不回退国内
-        - fast_mark 6
-        - flag ddns_foreign                     #DDNS优先国外解析；定义: sub_config/flags.yaml
-        - flag core_mode=safe
-        exec:
-          - $foreign                            #定义: sub_config/forward_nocn.yaml
-          - exit
-      - matches:                                #DDNS域名 + 兼容模式 + 国外优先：国外为主，国外失败回退国内（无缓存）
-        - fast_mark 6
-        - flag ddns_foreign
-        exec:
-          - $prefer_foreign_nocache             #定义: sub_config/forward_1.yaml
-          - exit
-      - matches: fast_mark 6                    #DDNS 域名：国内 DNS，不经过任何缓存
-        exec:
-          - $domestic                           #定义: sub_config/forward_local.yaml
-          - exit
       - exec: $atom_rules                       #atom 用户规则表：第一条命中的规则给查询打上动作标记；定义: sub_config/atom_rules.yaml
       - matches: fast_mark 40                   #规则：屏蔽，返回空应答
         exec: reject 0
@@ -124,6 +108,8 @@ plugins:
         exec: $sequence_fakeip_exit             #定义: sub_config/forward_1.yaml
       - matches: fast_mark 41                   #规则：代理，其他类型（MX、TXT 等）问国外 DNS
         exec: [$sequence_google, exit]          #定义: sub_config/forward_1.yaml
+      - matches: fast_mark 43                   #规则：直连，指定了上游组或不缓存：程序按上游组生成的序列（atom_direct，见 settings.json 的上游组）
+        exec: [$atom_direct, exit]
       - matches:                                #规则：直连，A/AAAA 问国内 DNS 要真实 IP
         - fast_mark 42
         - qtype 1 28
@@ -196,23 +182,6 @@ plugins:
       - matches: flag prefer_v4                 #IPv4优先：存在A记录时抑制AAAA结果；定义: sub_config/flags.yaml
         exec: prefer_ipv4
       #刷新分流时不因记忆无V4/无V6而提前空答：要重新探测，才能再确认（刷新记录的最近确认时间）这两类记录
-      - matches:                                #DDNS域名 + 安全模式 + 国外优先：只问国外，不回退国内
-        - fast_mark 6
-        - flag ddns_foreign                     #DDNS优先国外解析；定义: sub_config/flags.yaml
-        - flag core_mode=safe
-        exec:
-          - $foreign                            #定义: sub_config/forward_nocn.yaml
-          - exit
-      - matches:                                #DDNS域名 + 兼容模式 + 国外优先：国外为主，国外失败回退国内（无缓存）
-        - fast_mark 6
-        - flag ddns_foreign
-        exec:
-          - $prefer_foreign_nocache             #定义: sub_config/forward_1.yaml
-          - exit
-      - matches: fast_mark 6                    #DDNS 域名：国内 DNS，不经过任何缓存
-        exec:
-          - $domestic                           #定义: sub_config/forward_local.yaml
-          - exit
       - exec: $atom_rules                       #atom 用户规则表：第一条命中的规则给查询打上动作标记；定义: sub_config/atom_rules.yaml
       - matches: fast_mark 40                   #规则：屏蔽，返回空应答
         exec: reject 0
@@ -222,6 +191,8 @@ plugins:
         exec: $sequence_fakeip_exit             #定义: sub_config/forward_1.yaml
       - matches: fast_mark 41                   #规则：代理，其他类型（MX、TXT 等）问国外 DNS
         exec: [$sequence_google, exit]          #定义: sub_config/forward_1.yaml
+      - matches: fast_mark 43                   #规则：直连，指定了上游组或不缓存：程序按上游组生成的序列（atom_direct，见 settings.json 的上游组）
+        exec: [$atom_direct, exit]
       - matches:                                #规则：直连，A/AAAA 问国内 DNS 要真实 IP
         - fast_mark 42
         - qtype 1 28

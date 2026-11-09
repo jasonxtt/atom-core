@@ -498,93 +498,6 @@ impl RuleSources {
         }
     }
 
-    // ----- domain_set_light (atom `ddns`) -----------------------------------
-
-    /// Every rule of a `domain_set_light` provider, as its files give them.
-    pub(crate) async fn light_rules(&self, provider: &Provider) -> Result<Vec<String>, String> {
-        let spec = provider.light.clone().ok_or("not a domain_set_light")?;
-        match on_build_thread(move || providers::load_light(&spec, None)).await {
-            Ok(Ok(rules)) => Ok(rules.into_iter().map(|entry| entry.rule).collect()),
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(error) => Err(error.to_string()),
-        }
-    }
-
-    /// Replaces the rules of a `domain_set_light` provider: the values are
-    /// normalized like file lines, written to its file, and the matchers are
-    /// rebuilt before this returns. The error is `(HTTP status, reason)`.
-    pub(crate) async fn light_replace(
-        &self,
-        provider: &Rc<Provider>,
-        values: Vec<String>,
-    ) -> Result<Vec<String>, (u16, String)> {
-        if self.closed.get() {
-            return Err((503, "host is applying configuration".to_owned()));
-        }
-        let spec = provider
-            .light
-            .clone()
-            .ok_or((500, "not a domain_set_light".to_owned()))?;
-        // Other files or inline `exps` would keep their rules (codex review
-        // of step 6a, round 3).
-        if !spec.single_file() {
-            return Err((
-                409,
-                format!(
-                    "{} 的规则不只来自一个 .txt 文件（还有别的文件或内联条目），不能整份替换",
-                    provider.tag
-                ),
-            ));
-        }
-        let file = spec
-            .writable_file()
-            .map(Path::to_path_buf)
-            .ok_or((500, "no txt file configured".to_owned()))?;
-        let values: Vec<String> = values
-            .into_iter()
-            .filter(|value| !value.contains('\n') && !value.contains('\r'))
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty() && !value.starts_with('#'))
-            .collect();
-        // The loader refuses a whole file for one overlong line.
-        if let Some(long) = values
-            .iter()
-            .find(|value| value.len() >= providers::MAX_LINE_BYTES)
-        {
-            return Err((
-                400,
-                format!(
-                    "条目太长（{} 字节，上限 {} 字节）",
-                    long.len(),
-                    providers::MAX_LINE_BYTES - 1
-                ),
-            ));
-        }
-        if let Some(reason) = values
-            .iter()
-            .find_map(|rule| providers::rule_refusal(&provider.tag, rule))
-        {
-            return Err((400, reason));
-        }
-        let guard = provider.mutate.lock().await;
-        let bytes = rule_lines(values.iter().map(String::as_str));
-        match tokio::task::spawn_blocking(move || write_atomically(&file, &bytes)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => return Err((500, error.to_string())),
-            Err(error) => return Err((500, error.to_string())),
-        }
-        drop(guard);
-        changed_and_settled(&self.ctx(), provider)
-            .await
-            .map_err(|error| {
-                (
-                    500,
-                    format!("名单已写入文件，但没有生效（重建失败，仍在用旧规则）: {error}"),
-                )
-            })?;
-        Ok(values)
-    }
-
     // ----- sd_set_light / si_set / adguard_rule (atom builtin `refresh`) ----
 
     /// Downloads every enabled source of a rule provider again and rebuilds
@@ -1494,15 +1407,6 @@ pub(crate) async fn on_build_thread<T: Send + 'static>(
     result
         .await
         .map_err(|_| "rule build thread stopped".to_owned())?
-}
-
-fn rule_lines<'a>(rules: impl Iterator<Item = &'a str>) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for rule in rules {
-        bytes.extend_from_slice(rule.as_bytes());
-        bytes.push(b'\n');
-    }
-    bytes
 }
 
 /// Replaces `path` through a same-directory temporary file and a rename,

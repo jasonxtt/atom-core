@@ -34,6 +34,7 @@ use crate::rewrite::{DnsServer, Rewrite};
 use crate::webinfo::WebInfo;
 
 pub(crate) mod aliapi;
+pub(crate) mod atom_routes;
 mod check;
 pub(crate) mod flags;
 pub(crate) mod providers;
@@ -1012,6 +1013,7 @@ fn finish_compile(
     sources: &CompileSources<'_>,
 ) -> Result<CompiledConfig, ConfigError> {
     let mut definitions = definitions;
+    atom_routes::synthesize(&mut definitions, sources.settings)?;
     let mut applied = settings::apply(&mut definitions, sources.settings, sources.flag_root)?;
     let dependency_definitions = definitions.clone();
     let mut compiled = compile_definitions(log, api, definitions, inputs, &applied.flags)?;
@@ -3680,14 +3682,17 @@ fn compile_atom_rules(
     use crate::atom_rules::{AtomRules, BuiltinSet, Marks};
     let path = format!("{}.args", plugin.source_path);
     let args = expect_map(&plugin.args, &path, "atom_rules args must be a mapping")?;
-    args.reject_unknown(&["marks", "builtin", "mapper", "socks5", "singbox"], &path)?;
+    args.reject_unknown(
+        &["marks", "builtin", "mapper", "socks5", "singbox", "routes"],
+        &path,
+    )?;
     let marks_path = format!("{path}.marks");
     let marks = expect_map(
         args.required("marks", &path)?,
         &marks_path,
         "marks must be a mapping",
     )?;
-    marks.reject_unknown(&["proxy", "direct", "block"], &marks_path)?;
+    marks.reject_unknown(&["proxy", "direct", "block", "route"], &marks_path)?;
     let mark = |key: &str| -> Result<u8, ConfigError> {
         let key_path = format!("{marks_path}.{key}");
         let value = expect_positive_integer(marks.required(key, &marks_path)?, &key_path)?;
@@ -3700,9 +3705,31 @@ fn compile_atom_rules(
         proxy: mark("proxy")?,
         direct: mark("direct")?,
         block: mark("block")?,
+        route: match marks.get("route") {
+            None | Some(RawValue::Null) => None,
+            Some(_) => Some(mark("route")?),
+        },
     };
-    if marks.proxy == marks.direct || marks.proxy == marks.block || marks.direct == marks.block {
-        return Err(ConfigError::new(marks_path, "the three marks must differ"));
+    let mut distinct: Vec<u8> = [marks.proxy, marks.direct, marks.block]
+        .into_iter()
+        .chain(marks.route)
+        .collect();
+    let count = distinct.len();
+    distinct.sort_unstable();
+    distinct.dedup();
+    if distinct.len() != count {
+        return Err(ConfigError::new(marks_path, "the marks must differ"));
+    }
+    // `routes` is generated (`atom_routes`): upstream group → numeric mark.
+    let mut routes = std::collections::BTreeMap::new();
+    if let Some(value) = args.get("routes") {
+        let routes_path = format!("{path}.routes");
+        for (tag, mark) in &expect_map(value, &routes_path, "routes must be a mapping")?.entries {
+            let mark = expect_positive_integer(mark, &format!("{routes_path}.{tag}"))?;
+            let mark = u32::try_from(mark)
+                .map_err(|_| ConfigError::new(&routes_path, "a mark is at most u32::MAX - 1"))?;
+            routes.insert(tag.clone(), mark);
+        }
     }
     let mapper = match args.get("mapper") {
         None | Some(RawValue::Null) => None,
@@ -3753,7 +3780,7 @@ fn compile_atom_rules(
             &plugin.root_dir,
         )?),
     };
-    let rules = AtomRules::load(&plugin.root_dir, marks, mapper, socks5, builtin, singbox)
+    let rules = AtomRules::load_with_routes(&plugin.root_dir, marks, mapper, socks5, builtin, singbox, routes)
         .map_err(|reason| ConfigError::new(&path, reason))?;
     Ok(Rc::new(rules))
 }

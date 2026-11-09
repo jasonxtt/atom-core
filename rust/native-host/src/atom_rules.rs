@@ -58,6 +58,8 @@ pub(crate) const RULESET_DIR: &str = "webinfo/atom_rulesets";
 const MAX_LIST_RULES: usize = crate::rule_formats::MAX_RULES;
 /// sing-box trims the tag; a short, printable tag keeps the option small.
 const MAX_GROUP_BYTES: usize = 64;
+/// The upstream group of the original direct path.
+const DOMESTIC: &str = "domestic";
 
 // ---------------------------------------------------------------------------
 // Model (the JSON of the API and of the files)
@@ -136,6 +138,22 @@ pub(crate) struct Rule {
     #[serde(rename = "match")]
     pub(crate) matches: Match,
     pub(crate) action: Action,
+    /// Direct only: the upstream group the query goes to (atom step 6b);
+    /// none: the domestic group through the original direct path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dns: Option<String>,
+    /// Direct only: false sends the query past every cache (DDNS names).
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub(crate) cache: bool,
+}
+
+const fn yes() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_yes(value: &bool) -> bool {
+    *value
 }
 
 /// The editable part of a rule (create and replace).
@@ -145,6 +163,8 @@ pub(crate) struct RuleInput {
     pub(crate) remark: String,
     pub(crate) matches: Match,
     pub(crate) action: Action,
+    pub(crate) dns: Option<String>,
+    pub(crate) cache: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -249,7 +269,9 @@ enum SetRef {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     Proxy(Arc<str>),
-    Direct,
+    /// The numeric mark of the upstream group route (`atom_routes`); none:
+    /// the original direct path (domestic, cached).
+    Direct(Option<u32>),
     Block,
 }
 
@@ -333,13 +355,17 @@ pub(crate) struct Marks {
     pub(crate) proxy: u8,
     pub(crate) direct: u8,
     pub(crate) block: u8,
+    /// Direct through an upstream group route (`marks.route`, with the
+    /// generated `routes`); none: no rule may name one.
+    pub(crate) route: Option<u8>,
 }
 
 impl Marks {
     fn mask(self, verdict: &Verdict) -> u64 {
         1u64 << match verdict {
             Verdict::Proxy(_) => self.proxy,
-            Verdict::Direct => self.direct,
+            Verdict::Direct(Some(_)) => self.route.unwrap_or(self.direct),
+            Verdict::Direct(None) => self.direct,
             Verdict::Block => self.block,
         }
     }
@@ -376,6 +402,9 @@ pub(crate) struct AtomRules {
     /// A change is being applied to sing-box: other changes are refused
     /// until it is saved or rolled back.
     busy: std::cell::Cell<bool>,
+    /// The upstream groups a direct rule may name, with their numeric marks
+    /// (`atom_routes`; the uncached one is the next number).
+    routes: BTreeMap<String, u32>,
 }
 
 /// The default table of a new installation (design §4.4). Each rule after
@@ -400,6 +429,8 @@ fn default_rules(builtin: &dyn Fn(&str) -> bool) -> Vec<Rule> {
             ..Match::default()
         },
         action: Action::Direct,
+        dns: None,
+        cache: true,
     }];
     // The corrections of the geosite lists the original judgement uses
     // (design §4.4, atom step 6): they were ahead of geosite there.
@@ -430,6 +461,8 @@ fn default_rules(builtin: &dyn Fn(&str) -> bool) -> Vec<Rule> {
                     ..Match::default()
                 },
                 action,
+                dns: None,
+                cache: true,
             });
         }
     }
@@ -588,6 +621,7 @@ impl AtomRules {
     /// Loads the table and the custom rulesets from `root` (in memory with
     /// the default table when `root` is empty). Nothing is written: a missing
     /// table file is the default table until the first change saves it.
+    #[cfg(test)]
     pub(crate) fn load(
         root: &Path,
         marks: Marks,
@@ -596,6 +630,22 @@ impl AtomRules {
         builtin: Vec<(String, BuiltinSet)>,
         singbox: Option<crate::atom_singbox::Host>,
     ) -> Result<Self, String> {
+        Self::load_with_routes(root, marks, mapper, socks5, builtin, singbox, BTreeMap::new())
+    }
+
+    /// [`Self::load`] with the upstream group routes a direct rule may name.
+    pub(crate) fn load_with_routes(
+        root: &Path,
+        marks: Marks,
+        mapper: Option<String>,
+        socks5: String,
+        builtin: Vec<(String, BuiltinSet)>,
+        singbox: Option<crate::atom_singbox::Host>,
+        routes: BTreeMap<String, u32>,
+    ) -> Result<Self, String> {
+        if !routes.is_empty() && marks.route.is_none() {
+            return Err("routes 需要 marks.route".to_owned());
+        }
         let names: Vec<String> = builtin.iter().map(|(name, _)| name.clone()).collect();
         let has = |name: &str| names.iter().any(|have| have == name);
         let (version, rules) = if root.as_os_str().is_empty() {
@@ -677,6 +727,7 @@ impl AtomRules {
                 None => None,
             },
             busy: std::cell::Cell::new(false),
+            routes,
         };
         let table = {
             let state = rules_owner.state.borrow();
@@ -695,6 +746,42 @@ impl AtomRules {
         Box::new(RulesExecutor {
             rules: Rc::clone(self),
         })
+    }
+
+    /// The numeric mark of a rule's upstream group route: none for the
+    /// original direct path (no `dns`, or the domestic group, with the
+    /// cache). `dns` and `cache: false` are for direct rules only.
+    fn direct_route(&self, rule: &Rule) -> Result<Option<u32>, Refusal> {
+        if rule.dns.is_none() && rule.cache {
+            return Ok(None);
+        }
+        if !matches!(rule.action, Action::Direct) {
+            return Err(Refusal::invalid("dns 和 cache 只能用在直连规则上"));
+        }
+        if self.routes.is_empty() {
+            return Err(Refusal::invalid(
+                "这个配置不支持给规则指定上游组（atom_rules 没有 marks.route）",
+            ));
+        }
+        let group = rule.dns.as_deref().unwrap_or(DOMESTIC);
+        let Some(mark) = self.routes.get(group) else {
+            return Err(Refusal::invalid(format!("上游组 `{group}` 不存在")));
+        };
+        if group == DOMESTIC && rule.cache {
+            return Ok(None);
+        }
+        Ok(Some(mark + u32::from(!rule.cache)))
+    }
+
+    /// The rules whose `dns` names `group` (their IDs, in table order).
+    pub(crate) fn rules_using_group(&self, group: &str) -> Vec<String> {
+        self.state
+            .borrow()
+            .rules
+            .iter()
+            .filter(|rule| rule.dns.as_deref() == Some(group))
+            .map(|rule| rule.id.clone())
+            .collect()
     }
 
     fn builtin(&self, name: &str) -> Option<&BuiltinSet> {
@@ -719,6 +806,7 @@ impl AtomRules {
             ..refusal
         };
         let m = &rule.matches;
+        let route = self.direct_route(rule).map_err(at)?;
         if m.client_invert && m.client.is_empty() {
             return Err(at(Refusal::invalid(
                 "client_invert 只能和 client 条件一起用",
@@ -805,7 +893,7 @@ impl AtomRules {
                 validate_group(group_id, proxy).map_err(at)?;
                 Verdict::Proxy(Arc::from(group_id.as_str()))
             }
-            Action::Direct => Verdict::Direct,
+            Action::Direct => Verdict::Direct(route),
             Action::Block => Verdict::Block,
         };
         let shown = if rule.remark.trim().is_empty() {
@@ -996,6 +1084,8 @@ impl AtomRules {
             remark: input.remark,
             matches: input.matches,
             action: input.action,
+            dns: input.dns,
+            cache: input.cache,
         };
         next.rules
             .insert(at.unwrap_or(next.rules.len()), rule.clone());
@@ -1019,6 +1109,8 @@ impl AtomRules {
             remark: input.remark,
             matches: input.matches,
             action: input.action,
+            dns: input.dns,
+            cache: input.cache,
         };
         next.rules[at] = rule.clone();
         next.version += 1;
@@ -1442,8 +1534,10 @@ impl Executor for RulesExecutor {
         state.apply_mutation(StateMutation::SetFastFlags(
             state.fast_flags | self.rules.marks.mask(&rule.verdict),
         ));
-        if let Verdict::Proxy(group) = &rule.verdict {
-            state.outbound = Some(Arc::clone(group));
+        match &rule.verdict {
+            Verdict::Proxy(group) => state.outbound = Some(Arc::clone(group)),
+            Verdict::Direct(Some(mark)) => state.apply_mutation(StateMutation::AddMark(*mark)),
+            _ => {}
         }
         state.apply_mutation(StateMutation::SetRouting {
             field: RoutingField::DomainSet,

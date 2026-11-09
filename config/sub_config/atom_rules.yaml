@@ -6,11 +6,15 @@
 # 由 /api/v1/atom/rulesets 管理。没有 atom_rules.json 时使用默认规则表：局域网和私有域名 → 直连，广告 → 屏蔽，
 # 代理修正（cusnocn）→ 代理到 Final，直连修正（cuscn）→ 直连。
 #
-# 主流程（config_custom.yaml）在系统固定项（重写、类型屏蔽、DDNS）之后执行 $atom_rules：
+# 主流程（config_custom.yaml）在系统固定项（重写、类型屏蔽）之后执行 $atom_rules：
 # 第一条命中的规则给查询打上动作标记，主流程按标记分派：
 #   marks.block  40   屏蔽：空应答
 #   marks.proxy  41   代理 → 组：A/AAAA 向 sing-box 要 FakeIP，发往 nocnfake 的查询带 EDNS0 65001 SET 组；其他类型问国外 DNS
 #   marks.direct 42   直连：国内 DNS
+#   marks.route  43   直连，但规则指定了上游组（dns）或关了缓存（cache: false）：交给程序生成的 $atom_direct。
+#                     上游组是 aliapi 插件（nocnfake 除外）加上 webinfo/settings.json 的自定义组（atom_groups，
+#                     由 POST/PUT/DELETE /api/v1/atom/upstreams 管理）；每组两个数字 mark，带缓存的先过 cache_atom
+#                     （sub_config/cache.yaml）。DDNS 就写成"直连 + 上游组 + 不缓存"的规则，放在最前面。
 # 没命中的查询继续走原国内外判断（国外结果发 CLEAR，由 sing-box 的 route.final 处理）。
 #
 # builtin：规则的 ruleset 条件可以直接引用的内置集合。
@@ -36,7 +40,7 @@ plugins:
   - tag: atom_rules
     type: atom_rules
     args:
-      marks: {proxy: 41, direct: 42, block: 40}
+      marks: {proxy: 41, direct: 42, block: 40, route: 43}   #route：直连规则指定了上游组或关了缓存，交给生成的 $atom_direct
       mapper: unified_matcher1
       builtin: [adguard, geosite_cn, geosite_no_cn, cuscn, cusnocn]
       proxy: $main_proxy                        #下载远程规则集用的代理；定义: sub_config/settings.yaml

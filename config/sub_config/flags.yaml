@@ -2,7 +2,7 @@ plugins:
 #功能开关（feature_flag），取代原 switch1–switch17（配置 schema 3）
 #流程里用 `flag 名字`（开关）或 `flag 名字=选项`（多选一）引用，关闭用 "!flag 名字"
 #当前值存 webinfo/settings.json 的 flags 段，只存与这里 default 不同的值；
-#atom：其中 core_mode、block_qtypes、block_aaaa、prefer_v4、ddns_foreign、full_cache、lazy_cache 用 GET/PUT /api/v1/atom/dns 修改；
+#atom：其中 core_mode、block_qtypes、block_aaaa、prefer_v4、full_cache、lazy_cache 用 GET/PUT /api/v1/atom/dns 修改；
 #其余不开放（AtomDNS 原有的 /api/v1/flags 在 atom 第 6 步删除）
 #requery_on_change: true（可选，默认 false）：该开关的值实际改变并发布后，若配置里有 requery 插件，程序随即启动一次 requery
 #（requery 按自己的 flush_rules 清缓存，再预热）；值没变、更新试运行（503）、没有 requery 插件时都不触发
@@ -31,16 +31,6 @@ plugins:
     args:
       label: IPv4 优先
       description: 域名有 A 记录时不返回 AAAA 结果；纯 IPv6 域名仍可解析。
-      section: mode
-      kind: bool
-      default: false
-
-#原 switch16
-  - tag: ddns_foreign
-    type: feature_flag
-    args:
-      label: DDNS 优先国外解析
-      description: DDNS 名单内的域名优先用国外上游解析（无缓存）。兼容模式下国外失败会回退国内；安全模式下只用国外。
       section: mode
       kind: bool
       default: false

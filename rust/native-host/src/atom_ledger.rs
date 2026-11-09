@@ -121,7 +121,7 @@ impl Lru {
 pub(crate) fn wanted(verdict: Option<Verdict>) -> Binding {
     match verdict {
         Some(Verdict::Proxy(group)) => Binding::Set(group),
-        Some(Verdict::Direct) => Binding::Set(Arc::from(DIRECT)),
+        Some(Verdict::Direct(_)) => Binding::Set(Arc::from(DIRECT)),
         Some(Verdict::Block) => Binding::Set(Arc::from(BLOCK)),
         None => Binding::Clear,
     }

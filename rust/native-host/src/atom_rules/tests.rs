@@ -10,6 +10,7 @@ const MARKS: Marks = Marks {
     proxy: 41,
     direct: 42,
     block: 40,
+    route: None,
 };
 /// The mark the test mapper would set for the `adguard` builtin.
 const ADS: u64 = 1 << 5;
@@ -42,6 +43,8 @@ fn input(matches: Match, action: Action) -> RuleInput {
         remark: String::new(),
         matches,
         action,
+        dns: None,
+        cache: true,
     }
 }
 

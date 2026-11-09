@@ -26,7 +26,7 @@ info:
       proxy state (`nodes`, `groups`, `final`, `settings`) has another. A
       write may carry `version` (in the body; `?version=` for DELETE); when it
       does and it is not the current one the write is refused with 409.
-      `rules/move` requires it. `dns`, `upstreams`, `ddns` and `rewrite` carry
+      `rules/move` requires it. `dns`, `upstreams` and `rewrite` carry
       no version: the last write wins.
     * A write that changes the generated sing-box configuration is applied to
       sing-box as one transaction (check, write, reload, confirm). The check
@@ -34,7 +34,7 @@ info:
       back on the old configuration); saving atom's state failing is 500. While
       one application runs, other writes are refused with 409 (they are not
       queued).
-    * Every successful change of rules, rulesets, `ddns` and `rewrite` empties
+    * Every successful change of rules, rulesets and `rewrite` empties
       every DNS cache; rule and ruleset changes also bring sing-box's bindings
       of names clients already hold up to date before the answer. A change that
       was saved but whose caches could not be emptied answers 500.
@@ -66,7 +66,7 @@ tags:
   - name: dns
     description: AtomDNS's open settings and upstream DNS groups.
   - name: fixed
-    description: The fixed items ahead of the rule table (DDNS list, rewrite rules).
+    description: The fixed item ahead of the rule table (rewrite rules).
   - name: status
     description: Status of both processes and of the latest application.
   - name: runtime
@@ -237,7 +237,7 @@ paths:
       summary: Which rule a name meets
       description: |
         Only the rule table is consulted: the fixed items ahead of it
-        (rewrite, type blocking, DDNS) and the original judgement after it are
+        (rewrite, type blocking) and the original judgement after it are
         not simulated. IP rules never match a name.
       operationId: testRule
       requestBody:
@@ -1077,7 +1077,10 @@ paths:
     get:
       tags: [dns]
       summary: The upstream DNS groups
-      description: Every upstream group of the configuration except the FakeIP one (fixed to sing-box).
+      description: |
+        Every upstream group except the FakeIP one (fixed to sing-box): the
+        configuration's groups first, then the custom ones. A direct rule's
+        `dns` names one of them.
       operationId: listUpstreams
       responses:
         "200":
@@ -1100,21 +1103,70 @@ paths:
                 $ref: "#/components/schemas/Error"
         default:
           $ref: "#/components/responses/Error"
+    post:
+      tags: [dns]
+      summary: Create a custom upstream group
+      description: |
+        The group gets an ID (`u-` and eight hexadecimal digits) and is
+        published like `PUT dns` (a new AtomDNS configuration generation): its
+        upstreams are queried at once, the first successful answer wins.
+      operationId: createUpstreamGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, upstreams]
+              properties:
+                name:
+                  type: string
+                  description: Not blank, at most 32 characters.
+                upstreams:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: "#/components/schemas/Upstream"
+      responses:
+        "201":
+          description: Created; every group, and the new one's `tag`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tag, groups]
+                properties:
+                  tag:
+                    type: string
+                  groups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UpstreamGroup"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/ApplyConflict"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
   /upstreams/{tag}:
     parameters:
       - name: tag
         in: path
         required: true
-        description: "`domestic`, `foreign` or `foreignecs` in atom's configuration."
+        description: "`domestic`, `foreign`, `foreignecs`, or a custom group's ID."
         schema:
           type: string
     put:
       tags: [dns]
-      summary: Replace one group's upstreams
+      summary: Replace one group's upstreams (and rename a custom group)
       description: |
         At least one entry must be enabled; an empty list restores the
-        configuration's default list. Published like `PUT dns`. The default
-        node resolver follows the domestic group.
+        configuration's default list (a custom group has none: 400). `name`
+        renames a custom group (400 for the configuration's groups). Published
+        like `PUT dns`. The default node resolver follows the domestic group.
       operationId: putUpstreams
       requestBody:
         required: true
@@ -1129,6 +1181,8 @@ paths:
                   type: array
                   items:
                     $ref: "#/components/schemas/Upstream"
+                name:
+                  type: string
       responses:
         "200":
           description: Every group after the change.
@@ -1152,62 +1206,41 @@ paths:
           $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
-
-  /ddns:
-    get:
-      tags: [fixed]
-      summary: The DDNS list
-      description: Names answered by the domestic DNS without any cache, ahead of the rule table.
-      operationId: getDdns
+    delete:
+      tags: [dns]
+      summary: Delete a custom upstream group
+      description: |
+        Refused with 409 (and the IDs as `rules`) while a rule's `dns` names
+        it; 400 for the configuration's groups. Published like `PUT dns`.
+      operationId: deleteUpstreamGroup
       responses:
         "200":
-          description: The entries (`domain:`, `full:`, `keyword:`, `regexp:`; no prefix is `domain:`).
+          description: Every group after the change.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Entries"
-        "404":
-          description: The atom plugin (or its singbox section, for the proxy resources) is not configured.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        default:
-          $ref: "#/components/responses/Error"
-    put:
-      tags: [fixed]
-      summary: Replace the DDNS list
-      description: Blank lines and `#` comments are dropped; an entry of 65536 bytes or more is refused (400).
-      operationId: putDdns
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/Entries"
-      responses:
-        "200":
-          description: The list as stored.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Entries"
+                type: object
+                required: [groups]
+                properties:
+                  groups:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UpstreamGroup"
         "400":
           $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
         "409":
-          description: The list has other sources (another file, inline `exps`); it can be replaced whole only when one `.txt` file holds it.
+          description: A rule names the group, or the publication conflicted (as `PUT dns`).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "500":
-          description: The file could not be written, or it was written but the rebuild failed and the previous list is still in use.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
+
   /rewrite:
     get:
       tags: [fixed]
@@ -2230,6 +2263,18 @@ components:
           $ref: "#/components/schemas/Match"
         action:
           $ref: "#/components/schemas/Action"
+        dns:
+          type: string
+          description: |
+            Direct rules only: the upstream group (`GET upstreams`) the query
+            goes to, the custom ones included. Left out: the domestic group
+            through the original direct path.
+        cache:
+          type: boolean
+          default: true
+          description: |
+            Direct rules only: false sends the query past every cache (a DDNS
+            name). Left out of answers when true.
     Rule:
       type: object
       required: [id, enabled, remark, match, action]
@@ -2244,6 +2289,18 @@ components:
           $ref: "#/components/schemas/Match"
         action:
           $ref: "#/components/schemas/Action"
+        dns:
+          type: string
+          description: |
+            Direct rules only: the upstream group (`GET upstreams`) the query
+            goes to, the custom ones included. Left out: the domestic group
+            through the original direct path.
+        cache:
+          type: boolean
+          default: true
+          description: |
+            Direct rules only: false sends the query past every cache (a DDNS
+            name). Left out of answers when true.
     RuleTable:
       type: object
       required: [version, rules]
@@ -2555,9 +2612,6 @@ components:
         prefer_v4:
           type: boolean
           description: No AAAA answer for a name that has A records.
-        ddns_foreign:
-          type: boolean
-          description: Resolve the DDNS list with the foreign DNS first.
         full_cache:
           type: boolean
           description: The global cache facing the clients.
@@ -2573,7 +2627,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/DnsPatch"
         - type: object
-          required: [core_mode, block_qtypes, block_aaaa, prefer_v4, ddns_foreign, full_cache, lazy_cache, ecs, learning]
+          required: [core_mode, block_qtypes, block_aaaa, prefer_v4, full_cache, lazy_cache, ecs, learning]
     Upstream:
       type: object
       required: [tag, protocol, addr]
@@ -2615,10 +2669,16 @@ components:
           type: integer
     UpstreamGroup:
       type: object
-      required: [tag, customized, upstreams]
+      required: [tag, name, builtin, customized, upstreams]
       properties:
         tag:
           type: string
+          description: "`domestic`, `foreign`, `foreignecs`, or a custom group's `u-` and eight hexadecimal digits."
+        name:
+          type: string
+        builtin:
+          type: boolean
+          description: A group of the configuration (false for a custom group, which can be renamed and deleted).
         customized:
           type: boolean
           description: Set through the API (false is the configuration's default list).

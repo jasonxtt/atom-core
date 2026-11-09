@@ -15,7 +15,7 @@
 //!
 //! Nodes, groups, Final, the sing-box settings, `status` and `apply` are in
 //! [`crate::atom_proxy_api`]; the AtomDNS settings (`dns`, `upstreams`) and
-//! the fixed lists (`ddns`, `rewrite`) in [`crate::atom_dns_api`]. Every
+//! the rewrite rules (`rewrite`) in [`crate::atom_dns_api`]. Every
 //! route is listed in [`ROUTES`], which `docs/api/openapi.yaml` must match.
 //!
 //! Every successful change empties all caches (design §4.5, v0: clear
@@ -70,16 +70,17 @@ pub(crate) fn body<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Reply> 
 /// the management lease). `rules/test` only reads.
 /// `PUT settings` takes the lease itself: a mixed port change reloads the
 /// AtomDNS configuration afterwards, which waits for every lease.
-/// `PUT dns` and `PUT upstreams/{tag}` publish settings themselves, for the
-/// same reason.
+/// `PUT dns` and the upstream group writes (`POST upstreams`, `PUT` and
+/// `DELETE upstreams/{tag}`) publish settings themselves, for the same
+/// reason.
 pub(crate) fn mutates(method: &str, path: &str) -> bool {
     path.strip_prefix(PREFIX).is_some_and(|rest| {
         let rest = rest.trim_end_matches('/');
         let segments: Vec<&str> = rest.split('/').collect();
         matches!(method, "POST" | "PUT" | "DELETE")
             && rest != "rules/test"
-            && !(method == "PUT"
-                && (rest == "settings" || crate::atom_dns_api::applies_settings(&segments)))
+            && !(method == "PUT" && rest == "settings")
+            && !crate::atom_dns_api::applies_settings(method, &segments)
     })
 }
 
@@ -125,8 +126,8 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("PUT", "dns"),
     ("GET", "upstreams"),
     ("PUT", "upstreams/{tag}"),
-    ("GET", "ddns"),
-    ("PUT", "ddns"),
+    ("POST", "upstreams"),
+    ("DELETE", "upstreams/{tag}"),
     ("GET", "rewrite"),
     ("PUT", "rewrite"),
     ("POST", "groups/move"),
@@ -333,6 +334,12 @@ struct RuleInputFields {
     #[serde(rename = "match")]
     matches: crate::atom_rules::Match,
     action: crate::atom_rules::Action,
+    /// Direct only: the upstream group (atom step 6b).
+    #[serde(default)]
+    dns: Option<String>,
+    /// Direct only: false bypasses every cache.
+    #[serde(default = "yes")]
+    cache: bool,
 }
 
 fn yes() -> bool {
@@ -346,6 +353,8 @@ impl From<RuleInputFields> for RuleInput {
             remark: fields.remark,
             matches: fields.matches,
             action: fields.action,
+            dns: fields.dns,
+            cache: fields.cache,
         }
     }
 }

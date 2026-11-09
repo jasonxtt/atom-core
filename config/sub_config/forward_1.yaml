@@ -154,12 +154,3 @@ plugins:
     args:
       - exec: $sequence_local                       #定义: 本文件
       - exec: flow_setter sequence=sequence_local_in upstream=domestic
-
-#DDNS 优先国外：先问国外要真实 IP，失败或 1 秒内没有应答再问国内，不带缓存
-  - tag: prefer_foreign_nocache
-    type: fallback
-    args:
-      primary: foreign                          #主上游组；定义: sub_config/forward_nocn.yaml
-      secondary: domestic                       #备用上游组；定义: sub_config/forward_local.yaml
-      threshold: 1000                           #主上游多少毫秒没有应答就启用备用（程序默认 500）
-      always_standby: false                     #true 时备用与主上游同时发出

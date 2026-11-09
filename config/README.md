@@ -23,7 +23,7 @@ atom 删除了在线更新和配置包，这份配置随程序一起发布，用
 - 新增 `sub_config/atom_rules.yaml`：`atom_rules` 插件（用户规则表）。规则存在 `webinfo/atom_rules.json`，
   自定义规则集存在 `webinfo/atom_rulesets.json` 和 `webinfo/atom_rulesets/<id>-<revision>.txt`，都由 `/api/v1/atom/` 管理，
   这份配置里不放；没有 `atom_rules.json` 时用默认规则表（局域网和私有域名 → 直连，广告 → 屏蔽），第一次修改时才写文件。
-- 主流程 `sequence_6666` 和刷新流程 `sequence_requery`：DDNS 之后执行 `$atom_rules`，按 fast_mark 40（屏蔽，`reject 0`）、
+- 主流程 `sequence_6666` 和刷新流程 `sequence_requery`：系统固定项之后执行 `$atom_rules`，按 fast_mark 40（屏蔽，`reject 0`）、
   41（代理：A/AAAA 走 `$sequence_fakeip_exit`，查询带 65001 SET 组；其他类型问国外）、42（直连：国内 DNS）分派。
   "记忆无 V4/V6"空答和黑名单屏蔽挪到规则表后面，属于原判断。
 - 删除固定的广告屏蔽步骤（fast_mark 5 + `flag block_ads`）和 `block_ads` 开关：广告屏蔽是默认规则表里的一条规则，
@@ -52,3 +52,11 @@ atom 删除了在线更新和配置包，这份配置随程序一起发布，用
   两种模式的分支（fast_mark 30、"指定客户端直连"）。改用规则表的客户端条件，`client_invert` 表示"不在名单内"：
   原来的"名单内客户端不走代理"是"client ∈ 名单 → 直连"，"仅名单内客户端走代理"是"client ∉ 名单 → 直连"。
   不写迁移。
+
+第 6b 步（WebUI 的后端，atom 设计文档第 4、7、8 节）：
+
+- `sub_config/atom_rules.yaml` 的 marks 加 `route: 43`；主流程和刷新流程在 fast_mark 42 之前加一支：fast_mark 43 → `[$atom_direct, exit]`。
+  `atom_direct` 由程序按上游组生成（不在 YAML 里）：规则指定了上游组（`dns`）或关了缓存（`cache: false`）时走它。
+- `sub_config/cache.yaml` 新增 `cache_atom`（规则缓存）。自定义上游组存在 `webinfo/settings.json` 的 `atom_groups`，由程序编译成 aliapi 插件。
+- 删除 DDNS：`ddnslist` 名单和 `rule/ddnslist.txt`、`unified_matcher1` 里的 mark 6、主流程和刷新流程的三支 DDNS 分支、
+  `prefer_foreign_nocache`、`ddns_foreign` 开关。DDNS 写成规则：直连 + 上游组 + 不缓存，放在规则表最前面。
