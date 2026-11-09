@@ -56,7 +56,8 @@ atom 删除了在线更新和配置包，这份配置随程序一起发布，用
 第 6b 步（WebUI 的后端，atom 设计文档第 4、7、8 节）：
 
 - `sub_config/atom_rules.yaml` 的 marks 加 `route: 43`；主流程和刷新流程在 fast_mark 42 之前加一支：fast_mark 43 → `[$atom_direct, exit]`。
-  `atom_direct` 由程序按上游组生成（不在 YAML 里）：规则指定了上游组（`dns`）或关了缓存（`cache: false`）时走它。
+  `atom_direct` 由程序按上游组生成（不在 YAML 里）：规则指定了上游组（`dns`）或关了缓存（`cache: false`）时走它；
+  刷新流程那一支用 `atom_direct_requery`（不经过规则缓存）。`atom_rules` 的 `route_ecs: {foreignecs: $client_ecs}` 让「国外（带 ECS）」的路由先加 ECS。
 - `sub_config/cache.yaml` 新增 `cache_atom`（规则缓存的模板，程序给每个上游组复制一份 `cache_atom_<组>`）。自定义上游组存在 `webinfo/settings.json` 的 `atom_groups`，由程序编译成 aliapi 插件。
 - 删除 DDNS：`ddnslist` 名单和 `rule/ddnslist.txt`、`unified_matcher1` 里的 mark 6、主流程和刷新流程的三支 DDNS 分支、
   `prefer_foreign_nocache`、`ddns_foreign` 开关。DDNS 写成规则：直连 + 上游组 + 不缓存，放在规则表最前面。

@@ -3687,7 +3687,7 @@ fn compile_atom_rules(
     let path = format!("{}.args", plugin.source_path);
     let args = expect_map(&plugin.args, &path, "atom_rules args must be a mapping")?;
     args.reject_unknown(
-        &["marks", "builtin", "mapper", "socks5", "singbox", "routes"],
+        &["marks", "builtin", "mapper", "socks5", "singbox", "routes", "route_ecs"],
         &path,
     )?;
     let marks_path = format!("{path}.marks");

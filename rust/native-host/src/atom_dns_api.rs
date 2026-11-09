@@ -580,6 +580,10 @@ async fn delete_group(control: &RuntimeControl, tag: &str) -> Reply {
     }
     settings.atom_groups.remove(at);
     settings.upstreams.remove(tag);
+    // Its rule cache goes with it; a tuning left behind names no cache.
+    settings
+        .caches
+        .remove(&format!("{}_{tag}", crate::config::atom_routes::CACHE));
     drop(current);
     publish(control, settings, None).await
 }

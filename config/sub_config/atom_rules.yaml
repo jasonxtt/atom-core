@@ -40,6 +40,7 @@ plugins:
   - tag: atom_rules
     type: atom_rules
     args:
+      route_ecs: {foreignecs: $client_ecs}      #规则选「国外（带 ECS）」时先加 ECS，和 sequence_google_node 一样；定义: sub_config/settings.yaml
       marks: {proxy: 41, direct: 42, block: 40, route: 43}   #route：直连规则指定了上游组或关了缓存，交给生成的 $atom_direct
       mapper: unified_matcher1
       builtin: [adguard, geosite_cn, geosite_no_cn, cuscn, cusnocn]

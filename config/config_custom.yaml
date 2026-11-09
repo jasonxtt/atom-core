@@ -191,8 +191,8 @@ plugins:
         exec: $sequence_fakeip_exit             #定义: sub_config/forward_1.yaml
       - matches: fast_mark 41                   #规则：代理，其他类型（MX、TXT 等）问国外 DNS
         exec: [$sequence_google, exit]          #定义: sub_config/forward_1.yaml
-      - matches: fast_mark 43                   #规则：直连，指定了上游组或不缓存：程序按上游组生成的序列（atom_direct，见 settings.json 的上游组）
-        exec: [$atom_direct, exit]
+      - matches: fast_mark 43                   #规则：直连，指定了上游组或不缓存：程序生成的 atom_direct_requery（不经过规则缓存，刷新总是问上游组）
+        exec: [$atom_direct_requery, exit]
       - matches:                                #规则：直连，A/AAAA 问国内 DNS 要真实 IP
         - fast_mark 42
         - qtype 1 28

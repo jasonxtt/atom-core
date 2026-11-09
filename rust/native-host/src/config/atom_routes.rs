@@ -23,6 +23,10 @@ use super::{ConfigError, RawMap, RawNumber, RawPlugin, RawValue};
 
 /// The generated sequence a routed direct rule runs.
 pub(crate) const SEQUENCE: &str = "atom_direct";
+/// The same for the refresh flow (`sequence_requery`): no rule cache, so a
+/// refresh always asks the group (requery's flush list cannot name the
+/// generated caches).
+pub(crate) const REQUERY_SEQUENCE: &str = "atom_direct_requery";
 /// The template of the routed direct rules' caches (declared in the YAML,
 /// optional): each group gets a copy, `cache_atom_<group>`, with its own
 /// dump file; the template itself is not compiled.
@@ -72,12 +76,17 @@ fn map(entries: Vec<(&str, RawValue)>) -> RawValue {
 }
 
 /// A copy of the `cache_atom` template for one group: its own tag and dump
-/// file (`<stem>_<group>.dump` beside the template's).
-fn cache_for(template: &RawPlugin, tag: &str, group: &str) -> RawPlugin {
+/// file (`<stem>_<group>.dump` beside the template's); keyed by ECS too for
+/// a group whose route adds one.
+fn cache_for(template: &RawPlugin, tag: &str, group: &str, ecs: bool) -> RawPlugin {
     let mut plugin = template.clone();
     plugin.tag = tag.to_owned();
     plugin.source_path = format!("{} (for {group})", template.source_path);
     if let RawValue::Map(args) = &mut plugin.args {
+        if ecs {
+            args.entries.retain(|(key, _)| key != "enable_ecs");
+            args.entries.push(("enable_ecs".to_owned(), RawValue::Bool(true)));
+        }
         for (key, value) in &mut args.entries {
             if key == "dump_file" {
                 if let RawValue::String(path) = value {
@@ -154,6 +163,24 @@ pub(super) fn synthesize(
     let Some(rules_at) = definitions.iter().position(|p| p.kind == "atom_rules") else {
         return Ok(());
     };
+    // `route_ecs`: group → `ecs_address` reference (`$client_ecs`); the
+    // group's route adds that ECS before its cache and upstream, as the
+    // YAML's own sequence for the group does (`sequence_google_node`).
+    let mut ecs = Vec::new();
+    if let RawValue::Map(args) = &definitions[rules_at].args {
+        if let Some(value) = args.get("route_ecs") {
+            let path = format!("{}.args.route_ecs", definitions[rules_at].source_path);
+            let RawValue::Map(entries) = value else {
+                return Err(ConfigError::new(path, "route_ecs must be a mapping"));
+            };
+            for (group, reference) in &entries.entries {
+                let RawValue::String(reference) = reference else {
+                    return Err(ConfigError::new(format!("{path}.{group}"), "expected `$tag`"));
+                };
+                ecs.push((group.clone(), reference.clone()));
+            }
+        }
+    }
     let declares_route = match &definitions[rules_at].args {
         RawValue::Map(args) => {
             if args.get("routes").is_some() {
@@ -181,33 +208,42 @@ pub(super) fn synthesize(
         .position(|p| p.tag == CACHE && p.kind == "cache")
         .map(|at| definitions.remove(at));
     let mut steps = Vec::new();
+    let mut requery_steps = Vec::new();
     let mut routes = Vec::new();
     let mut caches = Vec::new();
     for (index, tag) in groups.iter().enumerate() {
         let cached = MARK_BASE + 2 * u32::try_from(index).unwrap_or(u32::MAX / 4);
-        let label = map(vec![
-            ("matches", string(&format!("mark {cached} {}", cached + 1))),
+        let both = format!("mark {cached} {}", cached + 1);
+        let group_ecs = ecs.iter().find(|(group, _)| group == tag).map(|(_, r)| r);
+        let mut prelude = vec![string(&format!(
+            "flow_setter sequence={SEQUENCE} upstream={tag}"
+        ))];
+        if let Some(reference) = group_ecs {
+            prelude.push(string(&format!("ecs {reference}")));
+        }
+        let forward = map(vec![
+            ("matches", string(&both)),
             (
                 "exec",
-                string(&format!("flow_setter sequence={SEQUENCE} upstream={tag}")),
+                RawValue::Sequence(vec![string(&format!("${tag}")), string("cname_remover")]),
             ),
         ]);
+        let label = map(vec![
+            ("matches", string(&both)),
+            ("exec", RawValue::Sequence(prelude)),
+        ]);
+        requery_steps.push(label.clone());
+        requery_steps.push(forward.clone());
         steps.push(label);
         if let Some(template) = &template {
             let cache_tag = format!("{CACHE}_{tag}");
-            caches.push(cache_for(template, &cache_tag, tag));
+            caches.push(cache_for(template, &cache_tag, tag, group_ecs.is_some()));
             steps.push(map(vec![
                 ("matches", string(&format!("mark {cached}"))),
                 ("exec", string(&format!("${cache_tag}"))),
             ]));
         }
-        steps.push(map(vec![
-            ("matches", string(&format!("mark {cached} {}", cached + 1))),
-            (
-                "exec",
-                RawValue::Sequence(vec![string(&format!("${tag}")), string("cname_remover")]),
-            ),
-        ]));
+        steps.push(forward);
         routes.push((tag.clone(), RawValue::Number(RawNumber::Unsigned(u64::from(cached)))));
     }
     definitions.extend(caches);
@@ -228,7 +264,82 @@ pub(super) fn synthesize(
         kind: "sequence".to_owned(),
         args: RawValue::Sequence(steps),
         source_path: format!("generated {SEQUENCE}"),
+        root_dir: root_dir.clone(),
+    });
+    definitions.push(RawPlugin {
+        tag: REQUERY_SEQUENCE.to_owned(),
+        kind: "sequence".to_owned(),
+        args: RawValue::Sequence(requery_steps),
+        source_path: format!("generated {REQUERY_SEQUENCE}"),
         root_dir,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugin(tag: &str, kind: &str, args: RawValue) -> RawPlugin {
+        RawPlugin {
+            tag: tag.to_owned(),
+            kind: kind.to_owned(),
+            args,
+            source_path: format!("$.plugins.{tag}"),
+            root_dir: std::path::PathBuf::from("/tmp"),
+        }
+    }
+
+    fn text(value: &RawValue) -> String {
+        match value {
+            RawValue::String(text) => text.clone(),
+            RawValue::Sequence(items) => items.iter().map(text).collect::<Vec<_>>().join(" | "),
+            RawValue::Map(map) => map
+                .entries
+                .iter()
+                .map(|(key, value)| format!("{key}={}", text(value)))
+                .collect::<Vec<_>>()
+                .join(", "),
+            RawValue::Bool(value) => value.to_string(),
+            RawValue::Number(RawNumber::Unsigned(value)) => value.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn routes_add_ecs_per_group_caches_and_a_cacheless_refresh_sequence() {
+        let empty = || RawValue::Map(RawMap { entries: Vec::new() });
+        let mut definitions = vec![
+            plugin("cache_atom", "cache", map(vec![("dump_file", string("cache/cache_atom.dump"))])),
+            plugin("domestic", "aliapi", empty()),
+            plugin("foreignecs", "aliapi", empty()),
+            plugin("nocnfake", "aliapi", empty()),
+            plugin(
+                "atom_rules",
+                "atom_rules",
+                map(vec![
+                    ("marks", map(vec![("route", RawValue::Number(RawNumber::Unsigned(43)))])),
+                    ("route_ecs", map(vec![("foreignecs", string("$client_ecs"))])),
+                ]),
+            ),
+        ];
+        synthesize(&mut definitions, &Settings::default()).unwrap();
+        let find = |tag: &str| definitions.iter().find(|p| p.tag == tag);
+        assert!(find("cache_atom").is_none(), "the template is not compiled");
+        let ecs_cache = text(&find("cache_atom_foreignecs").unwrap().args);
+        assert!(ecs_cache.contains("dump_file=cache/cache_atom_foreignecs.dump"), "{ecs_cache}");
+        assert!(ecs_cache.contains("enable_ecs=true"), "{ecs_cache}");
+        assert!(!text(&find("cache_atom_domestic").unwrap().args).contains("enable_ecs"));
+        let rules = text(&find("atom_rules").unwrap().args);
+        assert!(rules.contains("routes=domestic=70000, foreignecs=70002"), "{rules}");
+
+        let direct = text(&find(SEQUENCE).unwrap().args);
+        assert!(direct.contains("matches=mark 70002 70003, exec=flow_setter sequence=atom_direct upstream=foreignecs | ecs $client_ecs"), "{direct}");
+        assert!(direct.contains("matches=mark 70002, exec=$cache_atom_foreignecs"), "{direct}");
+        assert!(!direct.contains("mark 70000 70001, exec=flow_setter sequence=atom_direct upstream=domestic | ecs"), "{direct}");
+        let refresh = text(&find(REQUERY_SEQUENCE).unwrap().args);
+        assert!(!refresh.contains("$cache_atom"), "no rule cache when refreshing: {refresh}");
+        assert!(refresh.contains("exec=$foreignecs | cname_remover"), "{refresh}");
+        assert!(!refresh.contains("nocnfake") && !direct.contains("nocnfake"));
+    }
 }
