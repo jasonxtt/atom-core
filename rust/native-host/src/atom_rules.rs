@@ -630,10 +630,15 @@ impl AtomRules {
         builtin: Vec<(String, BuiltinSet)>,
         singbox: Option<crate::atom_singbox::Host>,
     ) -> Result<Self, String> {
-        Self::load_with_routes(root, marks, mapper, socks5, builtin, singbox, BTreeMap::new())
+        Self::load_with_routes(root, marks, mapper, socks5, builtin, singbox, BTreeMap::new(), None)
     }
 
     /// [`Self::load`] with the upstream group routes a direct rule may name.
+    /// `inputs` (a hot-apply candidate) records the state files read
+    /// (`atom_rules.json`, `atom_rulesets.json`, `atom_proxy.json`): a rule or
+    /// proxy write that lands while the candidate compiles makes its
+    /// publication fail, instead of installing tables read before the write.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn load_with_routes(
         root: &Path,
         marks: Marks,
@@ -642,7 +647,25 @@ impl AtomRules {
         builtin: Vec<(String, BuiltinSet)>,
         singbox: Option<crate::atom_singbox::Host>,
         routes: BTreeMap<String, u32>,
+        mut inputs: Option<&mut crate::special_groups::CandidateInputSet>,
     ) -> Result<Self, String> {
+        let mut read = |path: &Path| -> Result<Option<Vec<u8>>, String> {
+            let result = std::fs::read(path);
+            if let Some(inputs) = inputs.as_deref_mut() {
+                match &result {
+                    Ok(bytes) => inputs.record_bytes(path, bytes)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        inputs.record_missing(path)?;
+                    }
+                    Err(_) => {}
+                }
+            }
+            match result {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(format!("{}: {error}", path.display())),
+            }
+        };
         if !routes.is_empty() && marks.route.is_none() {
             return Err("routes 需要 marks.route".to_owned());
         }
@@ -652,29 +675,22 @@ impl AtomRules {
             (0, default_rules(&has))
         } else {
             let path = root.join(RULES_FILE);
-            match std::fs::read(&path) {
-                Ok(bytes) => {
+            match read(&path)? {
+                Some(bytes) => {
                     let file: RulesFile = serde_json::from_slice(&bytes)
                         .map_err(|error| format!("{}: {error}", path.display()))?;
                     (file.version, file.rules)
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    (0, default_rules(&has))
-                }
-                Err(error) => return Err(format!("{}: {error}", path.display())),
+                None => (0, default_rules(&has)),
             }
         };
         let mut rulesets = Vec::new();
         let mut lists = BTreeMap::new();
         if !root.as_os_str().is_empty() {
             let path = root.join(RULESETS_FILE);
-            match std::fs::read(&path) {
-                Ok(bytes) => {
-                    rulesets = serde_json::from_slice(&bytes)
-                        .map_err(|error| format!("{}: {error}", path.display()))?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(format!("{}: {error}", path.display())),
+            if let Some(bytes) = read(&path)? {
+                rulesets = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
             }
             for set in &rulesets {
                 let set: &Ruleset = set;
@@ -723,7 +739,7 @@ impl AtomRules {
             downloads: RefCell::new(BTreeMap::new()),
             next_download: std::cell::Cell::new(0),
             proxy: match singbox {
-                Some(host) => Some(singbox::Proxy::load(root, host)?),
+                Some(host) => Some(singbox::Proxy::load(root, host, inputs)?),
                 None => None,
             },
             busy: std::cell::Cell::new(false),

@@ -51,7 +51,8 @@ plugins:
       dump_file: cache/cache_google.dump
       dump_interval: 21600
 
-#规则缓存：直连规则指定了上游组时用（程序生成的 atom_direct 序列）；规则关了缓存时不经过它
+#规则缓存模板：直连规则指定了上游组时用（程序生成的 atom_direct 序列）。程序给每个上游组复制一份 cache_atom_<组>（转储文件 cache_atom_<组>.dump），
+#这一份本身不编译；规则关了缓存时不经过它们
   - tag: cache_atom
     type: cache
     args:

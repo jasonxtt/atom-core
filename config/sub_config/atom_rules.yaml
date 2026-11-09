@@ -13,7 +13,7 @@
 #   marks.direct 42   直连：国内 DNS
 #   marks.route  43   直连，但规则指定了上游组（dns）或关了缓存（cache: false）：交给程序生成的 $atom_direct。
 #                     上游组是 aliapi 插件（nocnfake 除外）加上 webinfo/settings.json 的自定义组（atom_groups，
-#                     由 POST/PUT/DELETE /api/v1/atom/upstreams 管理）；每组两个数字 mark，带缓存的先过 cache_atom
+#                     由 POST/PUT/DELETE /api/v1/atom/upstreams 管理）；每组两个数字 mark，带缓存的先过这个组自己的 cache_atom_<组>
 #                     （sub_config/cache.yaml）。DDNS 就写成"直连 + 上游组 + 不缓存"的规则，放在最前面。
 # 没命中的查询继续走原国内外判断（国外结果发 CLEAR，由 sing-box 的 route.final 处理）。
 #

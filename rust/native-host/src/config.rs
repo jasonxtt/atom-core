@@ -2463,7 +2463,10 @@ fn compile_definitions(
                 "only one atom_rules plugin may be declared",
             ));
         }
-        let rules = compile_atom_rules(plugin, &catalog, &mapper_marks)?;
+        let rules = {
+            let mut inputs = candidate_inputs.borrow_mut();
+            compile_atom_rules(plugin, &catalog, &mapper_marks, inputs.as_mut())?
+        };
         fixtures.push(atomdns_sequence_core::FixtureSpec::new(
             plugin_fixture_name(&plugin.tag),
             rules.executor(),
@@ -3678,6 +3681,7 @@ fn compile_atom_rules(
     plugin: &RawPlugin,
     catalog: &PluginCatalog<'_>,
     mapper_marks: &[(String, String, u8)],
+    inputs: Option<&mut crate::special_groups::CandidateInputSet>,
 ) -> Result<Rc<crate::atom_rules::AtomRules>, ConfigError> {
     use crate::atom_rules::{AtomRules, BuiltinSet, Marks};
     let path = format!("{}.args", plugin.source_path);
@@ -3780,7 +3784,16 @@ fn compile_atom_rules(
             &plugin.root_dir,
         )?),
     };
-    let rules = AtomRules::load_with_routes(&plugin.root_dir, marks, mapper, socks5, builtin, singbox, routes)
+    let rules = AtomRules::load_with_routes(
+        &plugin.root_dir,
+        marks,
+        mapper,
+        socks5,
+        builtin,
+        singbox,
+        routes,
+        inputs,
+    )
         .map_err(|reason| ConfigError::new(&path, reason))?;
     Ok(Rc::new(rules))
 }

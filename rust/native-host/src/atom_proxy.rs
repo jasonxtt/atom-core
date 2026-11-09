@@ -855,9 +855,25 @@ impl ProxyState {
 /// Loads the state; a missing file is a new installation (not written until
 /// the first change). A file that cannot be read or does not validate stops
 /// the configuration, like the rule table.
-pub(crate) fn load(root: &Path, reserved: &[u16]) -> Result<ProxyState, String> {
+/// Loads the state; `inputs` (a hot-apply candidate) records what was read,
+/// so a write that lands before the candidate is published refuses it.
+pub(crate) fn load(
+    root: &Path,
+    reserved: &[u16],
+    inputs: Option<&mut crate::special_groups::CandidateInputSet>,
+) -> Result<ProxyState, String> {
     let path = root.join(PROXY_FILE);
-    let state = match std::fs::read(&path) {
+    let read = std::fs::read(&path);
+    if let Some(inputs) = inputs {
+        match &read {
+            Ok(bytes) => inputs.record_bytes(&path, bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                inputs.record_missing(&path)?;
+            }
+            Err(_) => {}
+        }
+    }
+    let state = match read {
         Ok(bytes) => serde_json::from_slice::<ProxyState>(&bytes)
             .map_err(|error| format!("{}: {error}", path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProxyState::default(),

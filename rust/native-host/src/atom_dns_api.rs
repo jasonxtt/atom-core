@@ -408,23 +408,35 @@ fn builtin_name(tag: &str) -> &str {
     }
 }
 
+/// The configuration's groups (by tag) first, then the custom groups in the
+/// order they were created.
 fn upstreams_view(config: &CompiledConfig) -> Value {
     let custom = &config.settings.atom_groups;
-    let groups: Vec<Value> = config
+    let view = |tag: &String, entries| {
+        let mine = custom.iter().find(|group| &group.tag == tag);
+        json!({
+            "tag": tag,
+            "name": mine.map_or_else(|| builtin_name(tag), |group| group.name.as_str()),
+            "builtin": mine.is_none(),
+            "customized": config.settings.upstreams.contains_key(tag),
+            "upstreams": entries,
+        })
+    };
+    let mut groups: Vec<Value> = config
         .effective_upstreams
         .iter()
-        .filter(|(tag, _)| tag.as_str() != crate::edns_directive::FAKEIP_UPSTREAM)
-        .map(|(tag, entries)| {
-            let mine = custom.iter().find(|group| &group.tag == tag);
-            json!({
-                "tag": tag,
-                "name": mine.map_or_else(|| builtin_name(tag), |group| group.name.as_str()),
-                "builtin": mine.is_none(),
-                "customized": config.settings.upstreams.contains_key(tag),
-                "upstreams": entries,
-            })
+        .filter(|(tag, _)| {
+            tag.as_str() != crate::edns_directive::FAKEIP_UPSTREAM
+                && !custom.iter().any(|group| &group.tag == *tag)
         })
+        .map(|(tag, entries)| view(tag, entries))
         .collect();
+    groups.extend(custom.iter().filter_map(|group| {
+        config
+            .effective_upstreams
+            .get_key_value(&group.tag)
+            .map(|(tag, entries)| view(tag, entries))
+    }));
     json!({ "groups": groups })
 }
 

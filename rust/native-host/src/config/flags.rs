@@ -235,6 +235,11 @@ pub(super) fn declaration(plugin: &RawPlugin) -> Result<Flag, ConfigError> {
 /// legacy values that could not be used.
 pub(crate) type LegacyNotes = Vec<String>;
 
+/// Flags atom removed from its configuration: a stored value of one is
+/// ignored (and dropped by the next settings write), not a load error.
+/// `ddns_foreign`: atom step 6b made DDNS a rule.
+const RETIRED: &[&str] = &["ddns_foreign"];
+
 /// Overlays the settings (or, before the first migration, the legacy
 /// `rule/switchN.txt` values under `legacy_root`) on the declarations.
 pub(super) fn resolve(
@@ -248,6 +253,9 @@ pub(super) fn resolve(
             for (key, value) in stored {
                 let at = format!("{}:flags.{key}", super::settings::SETTINGS_FILE);
                 let Some(flag) = flags.iter_mut().find(|flag| &flag.key == key) else {
+                    if RETIRED.contains(&key.as_str()) {
+                        continue;
+                    }
                     return Err(ConfigError::new(
                         at,
                         format!("no feature_flag `{key}` in the configuration"),

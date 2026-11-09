@@ -259,18 +259,18 @@ fn intervals_are_seconds_minutes_or_hours() {
 fn the_file_round_trips_and_a_bad_one_stops_loading() {
     let root = std::env::temp_dir().join(format!("atom-proxy-file-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    assert_eq!(load(&root, RESERVED).unwrap(), ProxyState::default());
+    assert_eq!(load(&root, RESERVED, None).unwrap(), ProxyState::default());
     let mut state = ProxyState::default();
     state.add_nodes(vec![node("香港")]);
     state.version = 3;
     save(&root, &state).unwrap();
-    assert_eq!(load(&root, RESERVED).unwrap(), state);
+    assert_eq!(load(&root, RESERVED, None).unwrap(), state);
     std::fs::write(root.join(PROXY_FILE), br#"{"version":1}"#).unwrap();
-    assert!(load(&root, RESERVED).is_err());
+    assert!(load(&root, RESERVED, None).is_err());
     let mut broken = ProxyState::default();
     broken.groups.clear();
     save(&root, &broken).unwrap();
-    assert!(load(&root, RESERVED).unwrap_err().contains("默认代理"));
+    assert!(load(&root, RESERVED, None).unwrap_err().contains("默认代理"));
     let _ = std::fs::remove_dir_all(&root);
 }
 

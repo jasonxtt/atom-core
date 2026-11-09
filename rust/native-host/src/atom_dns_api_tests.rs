@@ -574,3 +574,39 @@ fn a_direct_rule_asks_its_group_with_or_without_the_cache() {
         .expect("restarts");
     assert!(again.config().effective_upstreams.contains_key(&tag));
 }
+
+/// The atom state files are inputs of a hot-apply candidate, so a rule or
+/// proxy write that lands while a settings change compiles refuses that
+/// publication instead of being lost (codex review of step 6b-2a, round 1);
+/// each group has its own rule cache (round 1); a stored value of the
+/// retired `ddns_foreign` flag is ignored, not a load error.
+#[test]
+fn routed_rules_have_per_group_caches_and_state_files_are_inputs() {
+    let host = Host::new("inputs");
+    let (status, created) = host.call(
+        "POST",
+        "upstreams",
+        &json!({"name": "甲", "upstreams": [{"tag": "a", "enabled": true, "protocol": "udp", "addr": "127.0.0.1:15989"}]}),
+    );
+    assert_eq!(status, 201, "{created}");
+    let tag = created["tag"].as_str().unwrap().to_owned();
+    let config = host.host.control().view().config.clone();
+    let inputs = &config.compile_inputs.files;
+    for file in ["webinfo/atom_rules.json", "webinfo/atom_rulesets.json"] {
+        assert!(
+            inputs.keys().any(|path| path.ends_with(file)),
+            "{file} is an input: {inputs:?}"
+        );
+    }
+    let caches: Vec<&str> = config.caches.iter().map(|cache| cache.tag.as_str()).collect();
+    assert!(caches.contains(&"cache_atom_domestic"), "{caches:?}");
+    assert!(caches.contains(&format!("cache_atom_{tag}").as_str()), "{caches:?}");
+    assert!(!caches.contains(&"cache_atom"), "the template is not compiled: {caches:?}");
+
+    let path = host.root.join("webinfo/settings.json");
+    let mut settings = host.settings();
+    settings["flags"] = json!({"ddns_foreign": true});
+    std::fs::write(&path, settings.to_string()).unwrap();
+    crate::HostAssembly::from_config_file_in(&host.root.join("config.yaml"), None)
+        .expect("a stored ddns_foreign is ignored");
+}

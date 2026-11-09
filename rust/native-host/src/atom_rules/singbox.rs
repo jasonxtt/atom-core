@@ -32,11 +32,15 @@ pub(crate) struct Proxy {
 }
 
 impl Proxy {
-    pub(super) fn load(root: &std::path::Path, host: Host) -> Result<Self, String> {
+    pub(super) fn load(
+        root: &std::path::Path,
+        host: Host,
+        inputs: Option<&mut crate::special_groups::CandidateInputSet>,
+    ) -> Result<Self, String> {
         let state = if root.as_os_str().is_empty() {
             ProxyState::default()
         } else {
-            atom_proxy::load(root, &host.reserved_ports())?
+            atom_proxy::load(root, &host.reserved_ports(), inputs)?
         };
         Ok(Self {
             host,

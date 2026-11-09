@@ -23,7 +23,9 @@ use super::{ConfigError, RawMap, RawNumber, RawPlugin, RawValue};
 
 /// The generated sequence a routed direct rule runs.
 pub(crate) const SEQUENCE: &str = "atom_direct";
-/// The cache of routed direct rules (declared in the YAML, optional).
+/// The template of the routed direct rules' caches (declared in the YAML,
+/// optional): each group gets a copy, `cache_atom_<group>`, with its own
+/// dump file; the template itself is not compiled.
 pub(crate) const CACHE: &str = "cache_atom";
 /// The first group's numeric mark; group `i` has `BASE + 2i` (cached) and
 /// `BASE + 2i + 1` (uncached).
@@ -67,6 +69,27 @@ fn map(entries: Vec<(&str, RawValue)>) -> RawValue {
             .map(|(key, value)| (key.to_owned(), value))
             .collect(),
     })
+}
+
+/// A copy of the `cache_atom` template for one group: its own tag and dump
+/// file (`<stem>_<group>.dump` beside the template's).
+fn cache_for(template: &RawPlugin, tag: &str, group: &str) -> RawPlugin {
+    let mut plugin = template.clone();
+    plugin.tag = tag.to_owned();
+    plugin.source_path = format!("{} (for {group})", template.source_path);
+    if let RawValue::Map(args) = &mut plugin.args {
+        for (key, value) in &mut args.entries {
+            if key == "dump_file" {
+                if let RawValue::String(path) = value {
+                    *path = match path.strip_suffix(".dump") {
+                        Some(stem) => format!("{stem}_{group}.dump"),
+                        None => format!("{path}_{group}"),
+                    };
+                }
+            }
+        }
+    }
+    plugin
 }
 
 /// Adds the custom groups' forward plugins and, when `atom_rules` declares
@@ -151,32 +174,48 @@ pub(super) fn synthesize(
         .filter(|p| p.kind == "aliapi" && p.tag != crate::edns_directive::FAKEIP_UPSTREAM)
         .map(|p| p.tag.clone())
         .collect();
-    let cache = definitions.iter().any(|p| p.tag == CACHE && p.kind == "cache");
+    // One rule cache per group, cloned from `cache_atom`: a cached answer
+    // never crosses groups (client rules can send one name to two groups).
+    let template = definitions
+        .iter()
+        .position(|p| p.tag == CACHE && p.kind == "cache")
+        .map(|at| definitions.remove(at));
     let mut steps = Vec::new();
     let mut routes = Vec::new();
+    let mut caches = Vec::new();
     for (index, tag) in groups.iter().enumerate() {
         let cached = MARK_BASE + 2 * u32::try_from(index).unwrap_or(u32::MAX / 4);
-        let forward = RawValue::Sequence(vec![
-            string(&format!("flow_setter sequence={SEQUENCE} upstream={tag}")),
-            string(&format!("${tag}")),
-            string("cname_remover"),
+        let label = map(vec![
+            ("matches", string(&format!("mark {cached} {}", cached + 1))),
+            (
+                "exec",
+                string(&format!("flow_setter sequence={SEQUENCE} upstream={tag}")),
+            ),
         ]);
-        if cache {
+        steps.push(label);
+        if let Some(template) = &template {
+            let cache_tag = format!("{CACHE}_{tag}");
+            caches.push(cache_for(template, &cache_tag, tag));
             steps.push(map(vec![
                 ("matches", string(&format!("mark {cached}"))),
-                ("exec", string(&format!("${CACHE}"))),
+                ("exec", string(&format!("${cache_tag}"))),
             ]));
         }
         steps.push(map(vec![
-            ("matches", string(&format!("mark {cached}"))),
-            ("exec", forward.clone()),
-        ]));
-        steps.push(map(vec![
-            ("matches", string(&format!("mark {}", cached + 1))),
-            ("exec", forward),
+            ("matches", string(&format!("mark {cached} {}", cached + 1))),
+            (
+                "exec",
+                RawValue::Sequence(vec![string(&format!("${tag}")), string("cname_remover")]),
+            ),
         ]));
         routes.push((tag.clone(), RawValue::Number(RawNumber::Unsigned(u64::from(cached)))));
     }
+    definitions.extend(caches);
+    // Removing the template moved the plugins after it.
+    let rules_at = definitions
+        .iter()
+        .position(|p| p.kind == "atom_rules")
+        .unwrap_or(rules_at);
     let root_dir = definitions[rules_at].root_dir.clone();
     if let RawValue::Map(args) = &mut definitions[rules_at].args {
         args.entries.push((
