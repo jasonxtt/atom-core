@@ -358,3 +358,151 @@ fn a_rewrite_with_several_files_is_not_replaced() {
         "full:nas.example 192.0.2.9\n"
     );
 }
+
+/// A DDNS entry the file loader would refuse (one line of 64 KiB or more
+/// fails the whole file at the next start) is refused before anything is
+/// written (codex review of step 6a, round 3).
+#[test]
+fn an_overlong_ddns_entry_is_refused_and_nothing_is_written() {
+    let host = Host::new("ddns-long");
+    let long = format!("keyword:{}", "a".repeat(64 * 1024));
+    let (status, value) = host.call("PUT", "ddns", &json!({"entries": [long]}));
+    assert_eq!(status, 400, "{value}");
+    assert_eq!(
+        std::fs::read_to_string(host.root.join("rule/ddnslist.txt")).unwrap(),
+        "full:home.example\n"
+    );
+}
+
+/// A rebuild that keeps the previous rules is reported, not answered 200:
+/// here the mapper also reads another list whose file became unloadable.
+#[test]
+fn a_ddns_list_the_mapper_cannot_build_is_reported() {
+    let host = Host::new("ddns-bad");
+    let path = host.root.join("config.yaml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "rules: [{tag: ddnslist, mark: 6, output_tag: DDNS}]",
+            "rules: [{tag: ddnslist, mark: 6, output_tag: DDNS}, {tag: other, mark: 7, output_tag: O}]",
+        )
+        .replace(
+            "  - tag: mapper\n",
+            "  - tag: other\n    type: domain_set_light\n    args: {files: [rule/other.txt]}\n  - tag: mapper\n",
+        );
+    std::fs::write(host.root.join("rule/other.txt"), "full:o.example\n").unwrap();
+    std::fs::write(&path, yaml).unwrap();
+    let bad = Host {
+        root: host.root.clone(),
+        host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
+    };
+    std::fs::write(
+        bad.root.join("rule/other.txt"),
+        format!("keyword:{}\n", "a".repeat(64 * 1024)),
+    )
+    .unwrap();
+    let (status, value) = bad.call("PUT", "ddns", &json!({"entries": ["full:new.example"]}));
+    assert_eq!(status, 500, "{value}");
+    assert!(
+        value["error"].as_str().unwrap().contains("没有生效"),
+        "{value}"
+    );
+}
+
+/// A DDNS list with more than its one writable file (another file, or inline
+/// `exps`) cannot be replaced whole (codex review of step 6a, round 3).
+#[test]
+fn a_ddns_list_with_other_sources_is_not_replaced() {
+    for (from, to) in [
+        (
+            "files: [rule/ddnslist.txt]",
+            "files: [rule/ddnslist.txt, rule/more.txt]",
+        ),
+        (
+            "files: [rule/ddnslist.txt]",
+            "files: [rule/ddnslist.txt], exps: ['full:inline.example']",
+        ),
+    ] {
+        let host = Host::new("ddns-more");
+        let path = host.root.join("config.yaml");
+        let yaml = std::fs::read_to_string(&path).unwrap().replace(from, to);
+        std::fs::write(host.root.join("rule/more.txt"), "full:more.example\n").unwrap();
+        std::fs::write(&path, yaml).unwrap();
+        let other = Host {
+            root: host.root.clone(),
+            host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
+        };
+        let (status, value) = other.call("PUT", "ddns", &json!({"entries": []}));
+        assert_eq!(status, 409, "{to}: {value}");
+        assert_eq!(
+            std::fs::read_to_string(other.root.join("rule/ddnslist.txt")).unwrap(),
+            "full:home.example\n"
+        );
+    }
+}
+
+/// atom's own configuration keeps the DDNS list and the rewrite rules in one
+/// file each, so `PUT ddns` and `PUT rewrite` can replace them.
+#[test]
+fn the_shipped_ddns_and_rewrite_plugins_read_one_file() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../config/sub_config/rule_set.yaml"
+    ))
+    .unwrap();
+    let yaml: Value = yaml_serde::from_str(&text).unwrap();
+    let plugin = |tag: &str| {
+        yaml["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|plugin| plugin["tag"] == tag)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {tag}"))
+    };
+    let ddns = plugin("ddnslist");
+    assert_eq!(ddns["type"], "domain_set_light");
+    assert_eq!(ddns["args"]["files"].as_array().unwrap().len(), 1);
+    assert!(ddns["args"].get("exps").is_none());
+    let rewrite = plugin("rewrite");
+    assert_eq!(rewrite["args"]["files"].as_array().unwrap().len(), 1);
+}
+
+/// The required fields of an upstream entry in `openapi.yaml` are what the
+/// handler needs: an entry of exactly them is accepted, one without any of
+/// them is refused.
+#[test]
+fn an_upstream_entry_needs_what_the_document_requires() {
+    let spec: Value = yaml_serde::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/api/openapi.yaml"
+    )))
+    .unwrap();
+    let required: Vec<String> = spec["components"]["schemas"]["Upstream"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| field.as_str().unwrap().to_owned())
+        .collect();
+    let sample = |field: &str| match field {
+        "tag" => json!("sample"),
+        "protocol" => json!("udp"),
+        "addr" => json!("127.0.0.1:15996"),
+        other => panic!("no sample value for the required field {other}"),
+    };
+    let host = Host::new("upstream-schema");
+    let entry = |skip: Option<&str>| {
+        let mut entry = serde_json::Map::new();
+        entry.insert("enabled".into(), json!(true));
+        for field in required.iter().filter(|field| Some(field.as_str()) != skip) {
+            entry.insert(field.clone(), sample(field));
+        }
+        json!({"upstreams": [Value::Object(entry)]})
+    };
+    let (status, value) = host.call("PUT", "upstreams/domestic", &entry(None));
+    assert_eq!(status, 200, "{value}");
+    for field in &required {
+        let (status, value) = host.call("PUT", "upstreams/domestic", &entry(Some(field)));
+        assert_eq!(status, 400, "without {field}: {value}");
+    }
+}

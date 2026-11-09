@@ -128,6 +128,8 @@ pub(crate) struct Provider {
     ip: Option<Rc<IpListHandle>>,
     filtered: RefCell<Option<Rc<Live<Filtered>>>>,
     reload: Cell<Build>,
+    /// Why the latest reload kept the previous rules (`None`: it succeeded).
+    failure: RefCell<Option<String>>,
 }
 
 impl Provider {
@@ -178,6 +180,7 @@ impl Provider {
             ip,
             filtered: RefCell::new(None),
             reload: Cell::new(Build::Idle),
+            failure: RefCell::new(None),
         }
     }
 
@@ -244,6 +247,8 @@ pub(crate) struct MapperSlot {
     spec: MapperSpec,
     live: Rc<Live<ValuedDomainMatcher>>,
     build: Cell<Build>,
+    /// Why the latest rebuild kept the previous matcher (`None`: it succeeded).
+    failure: RefCell<Option<String>>,
 }
 
 impl MapperSlot {
@@ -252,6 +257,7 @@ impl MapperSlot {
             spec,
             live,
             build: Cell::new(Build::Idle),
+            failure: RefCell::new(None),
         }
     }
 }
@@ -519,6 +525,17 @@ impl RuleSources {
             .light
             .clone()
             .ok_or((500, "not a domain_set_light".to_owned()))?;
+        // Other files or inline `exps` would keep their rules (codex review
+        // of step 6a, round 3).
+        if !spec.single_file() {
+            return Err((
+                409,
+                format!(
+                    "{} 的规则不只来自一个 .txt 文件（还有别的文件或内联条目），不能整份替换",
+                    provider.tag
+                ),
+            ));
+        }
         let file = spec
             .writable_file()
             .map(Path::to_path_buf)
@@ -529,6 +546,20 @@ impl RuleSources {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty() && !value.starts_with('#'))
             .collect();
+        // The loader refuses a whole file for one overlong line.
+        if let Some(long) = values
+            .iter()
+            .find(|value| value.len() >= providers::MAX_LINE_BYTES)
+        {
+            return Err((
+                400,
+                format!(
+                    "条目太长（{} 字节，上限 {} 字节）",
+                    long.len(),
+                    providers::MAX_LINE_BYTES - 1
+                ),
+            ));
+        }
         if let Some(reason) = values
             .iter()
             .find_map(|rule| providers::rule_refusal(&provider.tag, rule))
@@ -543,7 +574,14 @@ impl RuleSources {
             Err(error) => return Err((500, error.to_string())),
         }
         drop(guard);
-        changed_and_settled(&self.ctx(), provider).await;
+        changed_and_settled(&self.ctx(), provider)
+            .await
+            .map_err(|error| {
+                (
+                    500,
+                    format!("名单已写入文件，但没有生效（重建失败，仍在用旧规则）: {error}"),
+                )
+            })?;
         Ok(values)
     }
 
@@ -553,12 +591,16 @@ impl RuleSources {
     /// its matchers before this returns. `(sources, updated)`: how many
     /// sources were downloaded and how many of them replaced their file (a
     /// failed download keeps the old file and is logged).
-    pub(crate) async fn refresh(&self, provider: &Rc<Provider>) -> Result<(usize, usize), String> {
+    /// The error is `(HTTP status, reason)`.
+    pub(crate) async fn refresh(
+        &self,
+        provider: &Rc<Provider>,
+    ) -> Result<(usize, usize), (u16, String)> {
         if self.closed.get() {
-            return Err("host is applying configuration".to_owned());
+            return Err((503, "host is applying configuration".to_owned()));
         }
         if provider.manifest.is_none() {
-            return Err("this set has no downloadable sources".to_owned());
+            return Err((400, "this set has no downloadable sources".to_owned()));
         }
         let keys: Vec<String> = {
             let sources = provider.owner().sources.borrow();
@@ -576,7 +618,7 @@ impl RuleSources {
             // wait for it, then download once more.
             while provider.owner().flights.borrow().contains_key(key) {
                 if ctx.cancel.is_cancelled() {
-                    return Err("host is stopping".to_owned());
+                    return Err((503, "host is stopping".to_owned()));
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -585,7 +627,9 @@ impl RuleSources {
             }
         }
         if updated > 0 {
-            changed_and_settled(&ctx, provider).await;
+            changed_and_settled(&ctx, provider)
+                .await
+                .map_err(|error| (500, format!("下载成功，但重建失败，仍在用旧规则: {error}")))?;
         }
         Ok((keys.len(), updated))
     }
@@ -1150,19 +1194,44 @@ async fn changed(ctx: &Ctx, provider: &Rc<Provider>) {
 /// that names it is pending. A rebuild already running when [`changed`]
 /// was called only gets marked dirty there and builds once more with the
 /// files as they are now, so once everything is idle the latest write is
-/// in use (atom: the API answers only then).
-async fn changed_and_settled(ctx: &Ctx, provider: &Rc<Provider>) {
+/// in use (atom: the API answers only then). An error says which rebuild
+/// kept its previous rules (logged too).
+async fn changed_and_settled(ctx: &Ctx, provider: &Rc<Provider>) -> Result<(), String> {
     changed(ctx, provider).await;
+    let dependents: Vec<&Rc<MapperSlot>> = ctx
+        .inner
+        .mappers
+        .iter()
+        .filter(|slot| slot.spec.rules.iter().any(|rule| rule.tag == provider.tag))
+        .collect();
     loop {
         let busy = provider.reload.get() != Build::Idle
-            || ctx.inner.mappers.iter().any(|slot| {
-                slot.build.get() != Build::Idle
-                    && slot.spec.rules.iter().any(|rule| rule.tag == provider.tag)
-            });
-        if !busy || ctx.cancel.is_cancelled() {
-            return;
+            || dependents
+                .iter()
+                .any(|slot| slot.build.get() != Build::Idle);
+        if ctx.cancel.is_cancelled() {
+            return Err("host is stopping".to_owned());
+        }
+        if !busy {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let mut failed: Vec<String> = provider
+        .failure
+        .borrow()
+        .iter()
+        .map(|error| format!("{}: {error}", provider.tag))
+        .collect();
+    for slot in dependents {
+        if let Some(error) = slot.failure.borrow().as_ref() {
+            failed.push(format!("{}: {error}", slot.spec.tag));
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
     }
 }
 
@@ -1232,19 +1301,25 @@ async fn reload_provider(ctx: &Ctx, provider: &Rc<Provider>) {
             if let Some(live) = live {
                 match filtered {
                     Ok(filtered) => drop_off_thread(live.replace(Rc::new(*filtered))).await,
-                    Err(error) => crate::diag::error_line!(
-                        "{}: rebuild failed, keeping the previous rules: {error}",
-                        provider.tag
-                    ),
+                    Err(error) => {
+                        crate::diag::error_line!(
+                            "{}: rebuild failed, keeping the previous rules: {error}",
+                            provider.tag
+                        );
+                        *provider.failure.borrow_mut() = Some(error);
+                        return;
+                    }
                 }
             }
             counts
         }
         Err(error) => {
             crate::diag::error_line!("{}: reload failed: {error}", provider.tag);
+            *provider.failure.borrow_mut() = Some(error.to_string());
             return;
         }
     };
+    *provider.failure.borrow_mut() = None;
     ctx.inner.builds.fetch_add(1, Ordering::SeqCst);
     apply_counts(ctx, provider, counts).await;
 }
@@ -1294,15 +1369,22 @@ async fn rebuild_mapper(ctx: &Ctx, slot: &Rc<MapperSlot>) {
     .await;
     match built {
         Ok(Ok(matcher)) => {
+            *slot.failure.borrow_mut() = None;
             let replaced = slot.live.replace(Rc::new(matcher));
             ctx.inner.builds.fetch_add(1, Ordering::SeqCst);
             drop_off_thread(replaced).await;
         }
-        Ok(Err(error)) => crate::diag::error_line!(
-            "{}: rebuild failed, keeping the previous rules: {error}",
-            slot.spec.tag
-        ),
-        Err(error) => crate::diag::error_line!("{}: rebuild failed: {error}", slot.spec.tag),
+        Ok(Err(error)) => {
+            crate::diag::error_line!(
+                "{}: rebuild failed, keeping the previous rules: {error}",
+                slot.spec.tag
+            );
+            *slot.failure.borrow_mut() = Some(error);
+        }
+        Err(error) => {
+            crate::diag::error_line!("{}: rebuild failed: {error}", slot.spec.tag);
+            *slot.failure.borrow_mut() = Some(error.to_string());
+        }
     }
 }
 

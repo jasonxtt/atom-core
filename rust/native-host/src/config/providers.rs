@@ -32,7 +32,7 @@ use crate::special_groups::CandidateInputSet;
 /// The largest provider file read into memory.
 const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
 /// The reference line scanner rejects a line this long or longer.
-const MAX_LINE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// One rule string and the source name that contributed it.
 pub(crate) struct RuleEntry {
@@ -105,6 +105,13 @@ pub(crate) struct LightSpec {
 impl LightSpec {
     /// The file `/save` and `/post` write: the first configured file, when it
     /// is a `.txt` file (the reference only posts to `.txt`).
+    /// Whether the rules are exactly the writable file's (one `.txt` file,
+    /// no inline `exps`): only then can the list be replaced whole (atom
+    /// `PUT /api/v1/atom/ddns`).
+    pub(crate) fn single_file(&self) -> bool {
+        self.exps.is_empty() && self.files.len() == 1 && self.writable_file().is_some()
+    }
+
     pub(crate) fn writable_file(&self) -> Option<&Path> {
         let (index, file) = self.files.first()?;
         (*index == 0

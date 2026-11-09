@@ -649,7 +649,7 @@ async fn refresh_builtin(config: &CompiledConfig, id: &str) -> Result<Reply, Rep
             200,
             &serde_json::json!({ "id": id, "sources": sources, "updated": updated }),
         )),
-        Err(e) => Err(error(409, e)),
+        Err((status, e)) => Err(error(status, e)),
     }
 }
 

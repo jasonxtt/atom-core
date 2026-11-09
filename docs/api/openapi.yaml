@@ -1168,7 +1168,7 @@ paths:
     put:
       tags: [fixed]
       summary: Replace the DDNS list
-      description: Blank lines and `#` comments are dropped.
+      description: Blank lines and `#` comments are dropped; an entry of 65536 bytes or more is refused (400).
       operationId: putDdns
       requestBody:
         required: true
@@ -1185,8 +1185,18 @@ paths:
                 $ref: "#/components/schemas/Entries"
         "400":
           $ref: "#/components/responses/Error"
+        "409":
+          description: The list has other sources (another file, inline `exps`); it can be replaced whole only when one `.txt` file holds it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
-          $ref: "#/components/responses/Error"
+          description: The file could not be written, or it was written but the rebuild failed and the previous list is still in use.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         default:
           $ref: "#/components/responses/Error"
   /rewrite:
@@ -1797,7 +1807,7 @@ components:
           required: [core_mode, block_qtypes, block_aaaa, prefer_v4, ddns_foreign, full_cache, lazy_cache, ecs, learning]
     Upstream:
       type: object
-      required: [tag, addr]
+      required: [tag, protocol, addr]
       description: One upstream (more fields of AtomDNS's upstream entry are accepted and returned).
       properties:
         tag:
@@ -1808,6 +1818,7 @@ components:
         protocol:
           type: string
           enum: [udp, tcp, tls, dot, https, doh]
+          description: Required even when `addr` has a scheme (the scheme must then match it).
         addr:
           type: string
         dial_addr:
