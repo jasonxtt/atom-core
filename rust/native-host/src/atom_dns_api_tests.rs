@@ -273,16 +273,18 @@ fn the_rewrite_file_is_a_fingerprinted_input() {
     );
 }
 
-/// Two overlapping DDNS replacements: each answers only once the list on
-/// disk is the one the mapper uses (a rebuild already running when the
-/// second one wrote is waited for; codex review of step 6a, round 1).
+/// Two overlapping DDNS replacements: each answers only once its own list
+/// (or a later one) is the one the mapper uses. A rebuild already running
+/// when the second one wrote is waited for (codex review of step 6a, round
+/// 1); the other replacement may write again after a reply settled, while
+/// that reply still empties the caches.
 #[test]
 fn overlapping_ddns_replacements_answer_once_their_list_is_in_use() {
     let host = Host::new("ddns-overlap");
     let control = host.host.control();
     let file = host.root.join("rule/ddnslist.txt");
     host.host.block_on(async {
-        let put = |name: &'static str| {
+        let put = |name: &'static str, other: &'static str| {
             let control = control.clone();
             let file = file.clone();
             async move {
@@ -301,22 +303,21 @@ fn overlapping_ddns_replacements_answer_once_their_list_is_in_use() {
                 .expect("an atom route");
                 assert_eq!(reply.status, 200);
                 let on_disk = std::fs::read_to_string(&file).unwrap();
-                let listed = on_disk.trim().trim_start_matches("full:").to_owned();
                 let mapper = view
                     .config
                     .domain_mappers
                     .iter()
                     .find(|mapper| mapper.tag == "mapper")
                     .unwrap();
-                assert_ne!(
-                    mapper.evaluate(Some(&listed)).fast_flags & (1 << 6),
-                    0,
-                    "{listed} is on disk but not in use when {name} is answered"
+                let own = mapper.evaluate(Some(name)).fast_flags & (1 << 6) != 0;
+                assert!(
+                    own || on_disk.trim() == format!("full:{other}"),
+                    "{name} is answered before its list is in use (on disk: {on_disk:?})"
                 );
             }
         };
-        let first = tokio::task::spawn_local(put("first.example"));
-        let second = tokio::task::spawn_local(put("second.example"));
+        let first = tokio::task::spawn_local(put("first.example", "second.example"));
+        let second = tokio::task::spawn_local(put("second.example", "first.example"));
         first.await.unwrap();
         second.await.unwrap();
     });

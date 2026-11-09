@@ -8,7 +8,8 @@
 //!
 //! Conditions: the name conditions (`domain`, `suffix`, `keyword`, `regex`,
 //! `ruleset`) are one class and the `client` addresses another. Within a
-//! class any entry may match; every class a rule uses must match. A rule
+//! class any entry may match; every class a rule uses must match;
+//! `client_invert` makes the client condition "not in the list". A rule
 //! with a `client` condition can only be direct or block. `ip_cidr` rules
 //! are matched by sing-box (design §4.6): they stand alone (no name or
 //! client condition), take no part in the DNS table, and are compiled into
@@ -81,6 +82,11 @@ pub(crate) struct Match {
     /// Client addresses or prefixes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) client: Vec<String>,
+    /// The `client` condition holds for a client *not* in `client` (atom
+    /// step 6: AtomDNS's `client_routing` modes as rules). Only with
+    /// `client`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) client_invert: bool,
     /// Target IP prefixes (matched by sing-box; a rule with them has no
     /// other condition).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -252,6 +258,8 @@ struct Compiled {
     inline: Option<MixSet>,
     sets: Vec<SetRef>,
     clients: Option<IpPrefixList>,
+    /// `client_invert`: a client outside `clients` matches.
+    invert: bool,
     verdict: Verdict,
     /// The audit label (`domain_set`) and the matched-rule source.
     label: String,
@@ -293,8 +301,12 @@ impl Compiled {
                 return false;
             }
         }
+        // A query without a client (the binding ledger, in-process
+        // queries) meets no client condition, inverted or not.
         match &self.clients {
-            Some(clients) => query.client.is_some_and(|ip| clients.contains(ip)),
+            Some(clients) => query
+                .client
+                .is_some_and(|ip| clients.contains(ip) != self.invert),
             None => true,
         }
     }
@@ -707,6 +719,11 @@ impl AtomRules {
             ..refusal
         };
         let m = &rule.matches;
+        if m.client_invert && m.client.is_empty() {
+            return Err(at(Refusal::invalid(
+                "client_invert 只能和 client 条件一起用",
+            )));
+        }
         if !m.ip_cidr.is_empty() {
             if self.proxy.is_none() {
                 return Err(at(Refusal::invalid(
@@ -801,6 +818,7 @@ impl AtomRules {
             inline,
             sets,
             clients,
+            invert: m.client_invert,
             verdict,
             label: format!("规则:{}", shown.replace('|', "/")),
             source: format!("atom_rule:{}", rule.id),
@@ -1070,9 +1088,9 @@ impl AtomRules {
         Some((hit.index, state.rules.get(hit.index)?.clone()))
     }
 
-    /// What the table decides for `qname_wire` from a client no `client`
-    /// condition names (the binding ledger, [`crate::atom_ledger`]); `None`:
-    /// no rule, the original judgment.
+    /// What the table decides for `qname_wire` without a client, so no
+    /// `client` rule matches, inverted or not (the binding ledger,
+    /// [`crate::atom_ledger`]); `None`: no rule, the original judgment.
     pub(crate) fn decide(&self, qname_wire: &[u8], fast_flags: u64) -> Option<Verdict> {
         let hostname = crate::matchers::wire_name_to_ascii_domain(qname_wire);
         let presentation = crate::config::presentation_name(qname_wire);

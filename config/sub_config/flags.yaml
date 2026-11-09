@@ -95,16 +95,3 @@ plugins:
       kind: bool
       default: true
 
-#原 switch2 + switch12：需要 mosdns 占用 53 端口直面客户端，并正确配置 rule/client_ip.txt
-  - tag: client_routing
-    type: feature_flag
-    args:
-      label: 客户端分流
-      description: 按 client_ip 名单区分客户端：不区分；仅名单内客户端走代理；名单内客户端不走代理。
-      section: client
-      kind: choice
-      options:
-        - {value: none, label: 不区分}
-        - {value: only_listed_proxy, label: 仅名单内客户端走代理}
-        - {value: listed_direct, label: 名单内客户端不走代理}
-      default: none

@@ -304,6 +304,12 @@ fn invalid_rules_are_refused_and_change_nothing() {
         ..Match::default()
     };
     refuse(client, Action::Direct);
+    let invert_alone = Match {
+        suffix: vec!["a.com".to_owned()],
+        client_invert: true,
+        ..Match::default()
+    };
+    assert!(refuse(invert_alone, Action::Direct).contains("client_invert"));
     refuse(suffix(&["a b.com"]), Action::Direct);
     refuse(suffix(&[""]), Action::Direct);
     refuse(suffix(&["例子.cn"]), Action::Direct);
@@ -1087,4 +1093,73 @@ fn answers_have_their_ttls_capped() {
     assert_eq!(ttls(&rules.cap_ttls(&fake).unwrap()), [30]);
     // Without a proxy side nothing is capped.
     assert_eq!(owner(Path::new("")).cap_ttls(&real), None);
+}
+
+/// `client_invert` (atom step 6, AtomDNS's `client_routing` modes as
+/// rules): the client condition holds for a client outside the list; it is
+/// still and-ed with the names, still direct or block only, and a query
+/// without a client (the binding ledger) meets it neither way.
+#[test]
+fn an_inverted_client_condition_matches_the_clients_outside_the_list() {
+    let rules = owner(Path::new(""));
+    let outside = Match {
+        client: vec!["192.168.1.0/24".to_owned()],
+        client_invert: true,
+        ..Match::default()
+    };
+    let (_, rule) = rules
+        .create(
+            input(outside.clone(), Action::Direct),
+            Some(0),
+            Some("r-lan"),
+            None,
+        )
+        .unwrap();
+    assert!(rule.matches.client_invert);
+    let action =
+        |name: &str, client: Option<IpAddr>| rules.test(name, client, 0).map(|(_, r)| r.action);
+    assert_eq!(action("example.com", ip("10.0.0.7")), Some(Action::Direct));
+    assert_eq!(
+        action("example.com", ip("192.168.1.50")),
+        None,
+        "inside the list"
+    );
+    assert_eq!(action("example.com", None), None, "no client");
+    assert_eq!(
+        rules.decide(b"\x07example\x03com\x00", 0),
+        None,
+        "the ledger"
+    );
+    // And-ed with a name condition.
+    let named = Match {
+        suffix: vec!["video.example".to_owned()],
+        client: vec!["10.0.0.7".to_owned()],
+        client_invert: true,
+        ..Match::default()
+    };
+    rules
+        .create(
+            input(named, Action::Block),
+            Some(rules.rules().0),
+            Some(rule.id.as_str()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        action("a.video.example", ip("10.0.0.8")),
+        Some(Action::Block)
+    );
+    assert_eq!(
+        action("other.example", ip("10.0.0.8")),
+        Some(Action::Direct)
+    );
+    // Never proxy.
+    let refused = rules
+        .create(input(outside, proxy("g-x")), None, None, None)
+        .unwrap_err();
+    assert_eq!(refused.status, 400);
+    // The saved form keeps the flag; an unset flag is not written.
+    let saved = serde_json::to_value(&rules.rules().1).unwrap();
+    assert_eq!(saved[1]["match"]["client_invert"], true);
+    assert!(saved[2]["match"].get("client_invert").is_none());
 }

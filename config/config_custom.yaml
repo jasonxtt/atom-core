@@ -14,16 +14,15 @@
 #                                                 直连（国内 DNS）、屏蔽（空应答）；没命中才往下走 → sub_config/atom_rules.yaml
 #                                                 广告屏蔽是规则表里的一条普通规则（默认规则表），不再是固定步骤
 #   7. 记忆无 V4/V6                               直接空应答（以下属于原国内外判断）
-#   8. 指定客户端直连（client_routing）           国内并结束
-#   9. 全局缓存（compat 用 cache_all，safe 用 cache_all_noleak）、域名排行
-#  10. $sequence_listed                           域名在名单里或有学习记录：按 mark 的优先级交给对应的结果序列 → process_listed.yaml
-#  11. $sequence_unlisted_v4 / _v6                不在任何名单里：向上游要真实应答，按应答里的 IP 决定直连或代理 → process_v4.yaml / process_v6.yaml
+#   8. 全局缓存（compat 用 cache_all，safe 用 cache_all_noleak）、域名排行
+#   9. $sequence_listed                           域名在名单里或有学习记录：按 mark 的优先级交给对应的结果序列 → process_listed.yaml
+#  10. $sequence_unlisted_v4 / _v6                不在任何名单里：向上游要真实应答，按应答里的 IP 决定直连或代理 → process_v4.yaml / process_v6.yaml
 #      其他查询类型（MX、TXT、SRV 等）走 $sequence_other：按名单决定问国内还是国外 DNS → process_ot.yaml
 #
-# 「核心运行模式」（flags.yaml 的 core_mode）只影响第 11 步和记忆直连：
+# 「核心运行模式」（flags.yaml 的 core_mode）只影响第 10 步和记忆直连：
 #   兼容模式 compat：列表外域名先问国内 DNS，性能更高。
 #   安全模式 safe  ：列表外域名只问国外 DNS（带 ECS），国外没有结果或失败也不回退国内。
-#   两种模式下，规则表的直连规则、中国域名、DDNS 默认解析、指定直连的客户端、
+#   两种模式下，规则表的直连规则（包括带客户端条件的）、中国域名、DDNS 默认解析、
 #   重写的域名目标，仍然按各自的设置使用国内 DNS——它们是你明确指定的，不属于「列表外」。
 #
 # 文件分工：
@@ -141,19 +140,6 @@ plugins:
         - qtype 28
         - flag block_empty                      #定义: sub_config/flags.yaml
         exec: reject 0
-      - matches:                                #客户端分流「仅名单内客户端走代理」：client_ip.txt 以外的客户端一律直连
-        - flag client_routing=only_listed_proxy #需要本程序占用 53 端口直面客户端；定义: sub_config/flags.yaml
-        - "!client_ip $client_ip"               #定义: sub_config/rule_set.yaml
-        exec: fast_mark 30
-      - matches:                                #客户端分流「名单内客户端不走代理」：client_ip.txt 里的客户端一律直连
-        - flag client_routing=listed_direct     #定义: sub_config/flags.yaml
-        - "client_ip $client_ip"                #定义: sub_config/rule_set.yaml
-        exec: fast_mark 30
-      - matches: fast_mark 30
-        exec:
-          - $sequence_local                     #定义: sub_config/forward_1.yaml
-          - tag_setter 指定客户端直连
-          - exit
       - matches:                                #全局缓存：兼容模式用 cache_all，安全模式用 cache_all_noleak（分开存，切换模式时互不影响）
         - flag core_mode=compat                 #兼容模式；定义: sub_config/flags.yaml
         - flag full_cache                       #缓存开关打开；定义: sub_config/flags.yaml
@@ -242,19 +228,6 @@ plugins:
         exec: [$sequence_local_exit, exit]      #定义: sub_config/forward_1.yaml
       - matches: fast_mark 42                   #规则：直连，其他类型问国内 DNS
         exec: [$sequence_local, exit]           #定义: sub_config/forward_1.yaml
-      - matches:                                #客户端分流「仅名单内客户端走代理」：client_ip.txt 以外的客户端一律直连
-        - flag client_routing=only_listed_proxy #需要本程序占用 53 端口直面客户端；定义: sub_config/flags.yaml
-        - "!client_ip $client_ip"               #定义: sub_config/rule_set.yaml
-        exec: fast_mark 30
-      - matches:                                #客户端分流「名单内客户端不走代理」：client_ip.txt 里的客户端一律直连
-        - flag client_routing=listed_direct     #定义: sub_config/flags.yaml
-        - "client_ip $client_ip"                #定义: sub_config/rule_set.yaml
-        exec: fast_mark 30
-      - matches: fast_mark 30
-        exec:
-          - $sequence_local                     #定义: sub_config/forward_1.yaml
-          - tag_setter 指定客户端直连
-          - exit
       - matches:                                #全局缓存：兼容模式用 cache_all，安全模式用 cache_all_noleak（分开存，切换模式时互不影响）
         - flag core_mode=compat                 #兼容模式；定义: sub_config/flags.yaml
         - flag full_cache                       #缓存开关打开；定义: sub_config/flags.yaml

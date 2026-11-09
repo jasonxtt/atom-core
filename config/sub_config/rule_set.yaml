@@ -42,13 +42,6 @@ plugins:
       proxy: $main_proxy                         #定义: sub_config/settings.yaml
       local_config: "srs/geoipcn.json" 
 
-#需要代理的客户端IP列表
-  - tag: client_ip
-    type: ip_set
-    args:
-      files:
-        - "rule/client_ip.txt"
-
 #国外域名列表
   - tag: geosite_no_cn
     type: sd_set_light    

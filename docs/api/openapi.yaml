@@ -249,7 +249,7 @@ paths:
                   type: string
                 client:
                   type: string
-                  description: The client address the query would come from.
+                  description: The client address the query would come from (without one, no client rule matches, inverted or not).
       responses:
         "200":
           description: "The first matching rule, or `matched: false` (the original judgement decides)."
@@ -1374,9 +1374,10 @@ components:
       description: |
         Conditions of one kind are or-ed; different kinds are and-ed. `domain`,
         `suffix`, `keyword`, `regex` and `ruleset` are one kind (names);
-        `client` is the second. A rule needs one condition. `ip_cidr` stands
-        alone (no other condition) and is matched by sing-box. A rule with
-        `client` cannot proxy (400).
+        `client` is the second (`client_invert` turns it into "not in the
+        list"). A rule needs one condition. `ip_cidr` stands alone (no other
+        condition) and is matched by sing-box. A rule with `client` cannot
+        proxy (400).
       properties:
         domain:
           type: array
@@ -1404,6 +1405,13 @@ components:
           description: Client addresses or prefixes.
           items:
             type: string
+        client_invert:
+          type: boolean
+          default: false
+          description: |
+            The client condition holds for a client *not* in `client` (only
+            with `client`, else 400). A query without a client (the binding
+            ledger) meets no client condition, inverted or not.
         ip_cidr:
           type: array
           items:

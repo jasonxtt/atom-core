@@ -89,7 +89,7 @@ plugins:
           - exit
       - exec: exit
 
-#国内 DNS 要真实 IP，不结束（列表外探测、指定客户端直连、其他查询类型）
+#国内 DNS 要真实 IP，不结束（列表外探测、其他查询类型）
   - tag: sequence_local
     type: sequence
     args:

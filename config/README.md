@@ -48,5 +48,7 @@ atom 删除了在线更新和配置包，这份配置随程序一起发布，用
   默认规则表多两条：代理修正 → 代理到 Final，直连修正 → 直连，排在广告之后、和原来在原判断里的顺序一致。
   `process_listed.yaml` / `process_ot.yaml` 里 13、15 的分支删除（命中的查询已经被规则表处理）。
   插件和 srs 文件保留，`unified_matcher1` 照旧打标；内置规则集可以用 `POST /api/v1/atom/rulesets/{id}/refresh` 重新下载。
-- `client_routing` 开关和 `rule/client_ip.txt` 暂不改动（待定）。规则表排在它前面，所以
-  "名单内客户端不走代理"的客户端查代理修正里的域名，也会被规则表判成代理。
+- 删除"客户端分流"：`client_routing` 开关、`rule_set.yaml` 的 `client_ip`、`rule/client_ip.txt`、主流程和刷新流程里
+  两种模式的分支（fast_mark 30、"指定客户端直连"）。改用规则表的客户端条件，`client_invert` 表示"不在名单内"：
+  原来的"名单内客户端不走代理"是"client ∈ 名单 → 直连"，"仅名单内客户端走代理"是"client ∉ 名单 → 直连"。
+  不写迁移。
