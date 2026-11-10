@@ -93,6 +93,12 @@
 
 v0.5.0 起 `config.url` 指向 file 仓库（此前指向 Release 资产）；已发布的 v0.4.x 与 v0.5.0 的清单仍指向各自 Release 里的包，不受影响。
 
+## v0.6.6 升级须知
+
+- 编辑 DoH 上游时，在 `DoH (HTTPS)` 表单中使用「使用 HTTP/3」开关。已有 `h3://` 或 `enable_http3: true` 的条目会显示为开启。
+- 手动关闭 HTTP/3 时，`h3://` 地址切回 `https://`，保留主机、路径和查询参数。
+- 配置 schema 仍为 7。在线更新会同步替换已安装的主界面。
+
 ## v0.6.5 升级须知
 
 - 上游支持 DoH over HTTP/3（`h3://` 或 `https://` 配合 `enable_http3: true`）与 DoQ（`quic://` 或 `doq://`）。可在 YAML 或 WebUI 配置，使用 UDP 直连并默认校验证书。普通 `https://` 继续使用 HTTP/1.1 或 HTTP/2。
