@@ -93,6 +93,13 @@
 
 v0.5.0 起 `config.url` 指向 file 仓库（此前指向 Release 资产）；已发布的 v0.4.x 与 v0.5.0 的清单仍指向各自 Release 里的包，不受影响。
 
+## v0.6.5 升级须知
+
+- 上游支持 DoH over HTTP/3（`h3://` 或 `https://` 配合 `enable_http3: true`）与 DoQ（`quic://` 或 `doq://`）。可在 YAML 或 WebUI 配置，使用 UDP 直连并默认校验证书。普通 `https://` 继续使用 HTTP/1.1 或 HTTP/2。
+- WebUI 增加可选的毛玻璃外观和浏览器本地背景。
+- 配置 schema 仍为 7。在线更新替换程序和已安装的 WebUI。全新安装包内含本版 WebUI。
+- 降级前，先从 YAML 和已保存的上游设置中移除 DoH3 和 DoQ 条目或改用旧版支持的协议。
+
 ## v0.6.4 升级须知（2026-11-06；配置 schema 7：默认只监听 53 与 API，安全模式不再回退国内）
 
 - **配置 schema 7，有新配置包**：在线更新会一并替换配置包管理的 `config_custom.yaml` 与 `sub_config/*.yaml`，并删除 `sub_config/for_singbox.yaml`；更新失败会自动回滚。改过这些文件的，更新前先在「系统管理」导出一份配置备份（Docker 版会把旧文件备份到 `backup/container-schema-…/`）。

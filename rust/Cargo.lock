@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "atomdns-native-host"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "atomdns-cache-core",
  "atomdns-dns-core",
