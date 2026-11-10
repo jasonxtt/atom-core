@@ -705,6 +705,43 @@ fn assert_doq_fatal_error_replaces_connection(mode: FirstStreamMode, expected: &
 }
 
 #[test]
+fn blackholed_shared_handshake_expires_after_the_first_caller_leaves() {
+    let set = FixtureSet::generate();
+    let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let upstream = upstream(&set, blackhole.local_addr().unwrap());
+    block_on(async {
+        let query = query_wire(0x3000);
+        let context = ExchangeContext::new(
+            Instant::now() + Duration::from_millis(250),
+            TransportCancellation::new(),
+        );
+        let error = upstream
+            .exchange(ExchangeRequest::new(&query).unwrap(), context)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            SecureError::Transport(UpstreamError::DeadlineExceeded(SideEffectState::NotSent))
+        );
+        assert_eq!(
+            upstream.entry_count(),
+            1,
+            "caller timeout preserves shared work"
+        );
+        timeout(TEST_TIMEOUT, async {
+            while upstream.entry_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("shared handshake expires and drains independently");
+        upstream.close().await;
+    });
+    blackhole.set_nonblocking(true).unwrap();
+    assert!(blackhole.recv(&mut [0; 2048]).is_ok());
+}
+
+#[test]
 fn doq_initialization_failure_returns_connect_and_removes_failed_generation() {
     let set = FixtureSet::generate();
     let server = DoqServer::start(&set, 1, FirstStreamMode::Normal);

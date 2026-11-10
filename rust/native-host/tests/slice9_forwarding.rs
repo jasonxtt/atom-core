@@ -7,7 +7,7 @@ fn quic_forward_config_preserves_service_and_dial_addresses() {
     for (addr, flag, transport, port, service) in [
         (
             "h3://dns.example/resolve?x=1",
-            "",
+            ", enable_http3: false",
             Transport::Quic,
             443,
             "https://dns.example/resolve?x=1",
@@ -657,6 +657,13 @@ fn secure_yaml(scheme: &str, dial: std::net::SocketAddr) -> String {
 }
 
 async fn query_host(host: &atomdns_native_host::HostAssembly) -> Vec<u8> {
+    query_host_repeated(host, 1).await.pop().unwrap()
+}
+
+async fn query_host_repeated(
+    host: &atomdns_native_host::HostAssembly,
+    count: usize,
+) -> Vec<Vec<u8>> {
     use atomdns_native_host::UdpServer;
     use atomdns_upstream_core::TransportCancellation;
     use std::time::Duration;
@@ -668,19 +675,23 @@ async fn query_host(host: &atomdns_native_host::HostAssembly) -> Vec<u8> {
     let shutdown = TransportCancellation::new();
     let service = tokio::task::spawn_local(server.serve(shutdown.clone()));
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    client.send_to(&query(), listen).await.unwrap();
-    let mut response = [0; 512];
-    let length = tokio::time::timeout(Duration::from_secs(3), client.recv(&mut response))
-        .await
-        .unwrap()
-        .unwrap();
+    let mut responses = Vec::new();
+    for _ in 0..count {
+        client.send_to(&query(), listen).await.unwrap();
+        let mut response = [0; 512];
+        let length = tokio::time::timeout(Duration::from_secs(3), client.recv(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        responses.push(response[..length].to_vec());
+    }
     shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(3), service)
+    tokio::time::timeout(Duration::from_secs(5), service)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    response[..length].to_vec()
+    responses
 }
 
 async fn serve_dot(listener: std::net::TcpListener, config: std::sync::Arc<rustls::ServerConfig>) {
@@ -815,7 +826,7 @@ fn blackholed_quic_handshake_does_not_hold_host_shutdown() {
     for addr in ["h3://dns.example/dns-query", "quic://dns.example"] {
         // An open socket that never replies ensures Quinn cannot fail early
         // from an ICMP unreachable. The listener shutdown in query_host
-        // must still complete before its three-second timeout.
+        // must still complete within the shutdown test budget.
         let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let dial = blackhole.local_addr().unwrap();
         let host = HostAssembly::from_yaml(&yaml(
@@ -860,16 +871,8 @@ fn native_quic_forwarding_verifies_tls_and_preserves_dns_id_and_audit_transport(
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         socket.set_nonblocking(true).unwrap();
         let dial = socket.local_addr().unwrap();
-        let source = yaml(
-            &format!("        - {{tag: secure, addr: '{addr}', dial_addr: '{dial}'{flag}}}\n"),
-            "",
-            "$upstream",
-        );
-        let source = if flag.is_empty() {
-            source
-        } else {
-            source.replace("type: forward", "type: aliapi")
-        };
+        let branched = !flag.is_empty();
+        let source = quic_fixture_yaml(addr, flag, dial, branched);
         let host = HostAssembly::with_options(
             compile_yaml(&source).unwrap(),
             HostOptions::default().with_tls_roots(root_store(&fixture)),
@@ -891,13 +894,14 @@ fn native_quic_forwarding_verifies_tls_and_preserves_dns_id_and_audit_transport(
                 endpoint,
                 expected == UpstreamTransport::H3,
             ));
-            let response = query_host(&host).await;
-            assert_eq!(&response[..2], &query()[..2]);
-            assert_eq!(
-                atomdns_dns_core::observe_answer_addresses(&response).unwrap(),
-                ["192.0.2.19".parse::<std::net::IpAddr>().unwrap()],
-                "addr={addr}, wire={response:02x?}",
-            );
+            for response in query_host_repeated(&host, 1 + usize::from(branched)).await {
+                assert_eq!(&response[..2], &query()[..2]);
+                assert_eq!(
+                    atomdns_dns_core::observe_answer_addresses(&response).unwrap(),
+                    ["192.0.2.19".parse::<std::net::IpAddr>().unwrap()],
+                    "addr={addr}, wire={response:02x?}",
+                );
+            }
             tokio::time::timeout(Duration::from_secs(3), fixture)
                 .await
                 .unwrap()
@@ -908,11 +912,66 @@ fn native_quic_forwarding_verifies_tls_and_preserves_dns_id_and_audit_transport(
         let selected = diagnostics.selected.as_ref().unwrap();
         assert_eq!(selected.transport, expected);
         assert_eq!(selected.peer, dial);
-        assert_eq!(
-            diagnostics.attempts[0].outcome,
-            UpstreamAttemptOutcome::Response
-        );
+        let attempt = diagnostics
+            .attempts
+            .iter()
+            .find(|attempt| attempt.entry == "secure")
+            .unwrap();
+        assert_eq!(attempt.outcome, UpstreamAttemptOutcome::Response);
+        assert_eq!(attempt.transport, Some(expected));
+        if branched {
+            assert!(selected.branch_id.is_some_and(|id| id != 0));
+            assert!(
+                diagnostics
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.entry == "silent")
+            );
+            assert_eq!(
+                snapshot.records[1].cache_status,
+                atomdns_native_host::CacheStatus::Hit
+            );
+            let warm = snapshot.records[1].upstream_diagnostics.as_ref().unwrap();
+            assert!(warm.attempts.is_empty());
+            assert_eq!(warm.selected.as_ref().unwrap().transport, expected);
+        }
     }
+}
+
+fn quic_fixture_yaml(addr: &str, flag: &str, dial: std::net::SocketAddr, branched: bool) -> String {
+    use std::fmt::Write as _;
+
+    let mut entries =
+        format!("        - {{tag: secure, addr: '{addr}', dial_addr: '{dial}'{flag}}}\n");
+    if !branched {
+        return yaml(&entries, "", "$upstream");
+    }
+    // Exercise both branch response origin and concurrent winner selection.
+    writeln!(entries, "        - {{tag: silent, addr: 'udp://{dial}'}}").unwrap();
+    yaml(&entries, "      concurrent: 2\n", "$upstream")
+        .replace("type: forward", "type: aliapi")
+        .replace(
+            "  - tag: entry\n",
+            r"  - tag: cached
+    type: cache
+    args: {size: 64}
+  - tag: backup
+    type: sequence
+    args: [{exec: 'reject 2'}]
+  - tag: choice
+    type: fallback
+    args: {primary: '$upstream', secondary: '$backup', threshold: 500}
+  - tag: entry
+",
+        )
+        .replace(
+            "      - exec: '$upstream'\n",
+            r"      - exec: $cached
+      - matches: has_resp
+        exec: accept
+      - exec: $choice
+",
+        )
 }
 
 async fn serve_doh_h1(

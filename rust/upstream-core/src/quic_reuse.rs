@@ -181,6 +181,9 @@ pub const MAX_CONNECTIONS_PER_OWNER: usize = 8;
 /// There is no background reaper and no timer: expiry is evaluated under the
 /// owner-map lock by [`QuicReuseOwner::maintain`] and by the admission scan.
 pub const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+// Bound a single shared initialization, even if individual callers have
+// shorter deadlines or the peer keeps an incomplete connection active.
+const QUIC_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The complete DoQ stream bound shared with the one-shot protocol.
 const MAX_DOQ_MESSAGE: usize = 65_537;
@@ -1853,6 +1856,7 @@ async fn connect_quic(
     tls: &TlsPolicy,
     alpn: &[u8],
     cancellation: &TransportCancellation,
+    deadline: tokio::time::Instant,
 ) -> Result<(quinn::Endpoint, quinn::Connection), UpstreamError> {
     let rustls_config = tls
         .client_config_with_alpn(&[alpn])
@@ -1873,6 +1877,8 @@ async fn connect_quic(
     let connection = tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(UpstreamError::Closed(SideEffectState::NotSent)),
+        () = tokio::time::sleep_until(deadline) =>
+            Err(UpstreamError::DeadlineExceeded(SideEffectState::NotSent)),
         result = connecting => result.map_err(|_| UpstreamError::Connect),
     };
     match connection {
@@ -1897,6 +1903,7 @@ async fn build_doq_connection(
         tls,
         DOQ_ALPN,
         cancellation,
+        tokio::time::Instant::now() + QUIC_INITIALIZATION_TIMEOUT,
     )
     .await?;
     Ok(DoqConnection {
@@ -1914,12 +1921,14 @@ async fn build_doh3_connection(
     tls: &TlsPolicy,
     cancellation: &TransportCancellation,
 ) -> Result<Doh3Connection, UpstreamError> {
+    let deadline = tokio::time::Instant::now() + QUIC_INITIALIZATION_TIMEOUT;
     let (client, connection) = connect_quic(
         endpoint.dial(),
         endpoint.identity(),
         tls,
         H3_ALPN,
         cancellation,
+        deadline,
     )
     .await?;
     let h3_connection = h3_quinn::Connection::new(connection.clone());
@@ -1930,6 +1939,8 @@ async fn build_doh3_connection(
     let parts = tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(UpstreamError::Closed(SideEffectState::NotSent)),
+        () = tokio::time::sleep_until(deadline) =>
+            Err(UpstreamError::DeadlineExceeded(SideEffectState::NotSent)),
         result = builder.build::<_, _, crate::quic::H3Body>(h3_connection) =>
             result.map_err(|_| UpstreamError::Connect),
     };

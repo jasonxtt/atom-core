@@ -63,6 +63,8 @@
 `addr` 使用域名时，必须同时提供 `dial_addr` 或 `bootstrap`，否则配置检查不通过。
 DoH3 和 DoQ 通过 UDP 直连，默认校验证书。指定 `dial_addr` 时仍使用 `addr` 的主机名校验证书。
 `h3://` 和 `https://` 配合 `enable_http3: true` 等价，均固定使用 HTTP/3。
+`h3://` 即使显式设置 `enable_http3: false` 也使用 HTTP/3。
+共享 QUIC 握手和 HTTP/3 初始化共用 5 秒期限，超时后关闭连接并等待排空。每笔查询仍受自己的查询超时限制。
 
 ## aliapi
 
@@ -73,6 +75,8 @@ DoH3 和 DoQ 通过 UDP 直连，默认校验证书。指定 `dial_addr` 时仍�
 | `proxy` | 插件 | 引用一个 [`socks5_proxy`](/plugins/settings-objects)，如 `proxy: $main_proxy` |
 | `use_proxy` | 上游项 | 该上游经 `proxy` 连接，适用于 TCP、DoT 和使用 HTTP/1.1 或 HTTP/2 的 DoH |
 | `show_when` | 插件 | 仅影响 WebUI：满足条件时才显示该上游组，写法同 `matches`，如 `flag dns_mode=fakeip` |
+
+同一组混用代理和 QUIC 直连时，使用组级 `proxy` 引用，并只给需要代理的 TCP 类条目设置 `use_proxy: true`。组级字面量 `socks5` 会被继承，因此该组无法加入 QUIC 条目。
 
 ```yaml
 - tag: foreign

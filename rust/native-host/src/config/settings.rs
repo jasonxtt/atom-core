@@ -1026,6 +1026,12 @@ fn resolve_items(
             if uses {
                 return refuse("use_proxy", reason);
             }
+            if !proxies.plugin_socks5.is_empty() {
+                return refuse(
+                    "socks5",
+                    "HTTP/3 and DoQ cannot inherit the group's literal socks5 address; use a group proxy reference and opt in only on TCP-based entries",
+                );
+            }
         }
         entries.push(entry);
     }
@@ -1647,6 +1653,15 @@ plugins:
     args: {entry: entry, listen: '127.0.0.1:5300'}
 "#;
         super::super::compile_yaml(yaml).expect("group proxy is optional for QUIC entries");
+        super::super::compile_yaml(&yaml.replace("addr: \"\"", "addr: '192.0.2.1:1080'"))
+            .expect("QUIC entries need no opt-out from a group proxy reference");
+        let error = super::super::compile_yaml(
+            &yaml.replace("proxy: $main_proxy\n", "socks5: '192.0.2.1:1080'\n"),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("group's literal socks5 address"), "{error}");
         for (from, to, field) in [
             (
                 "h3://192.0.2.53/dns-query'}",

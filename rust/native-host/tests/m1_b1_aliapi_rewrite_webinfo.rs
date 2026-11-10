@@ -705,7 +705,7 @@ fn aliapi_rejects_what_it_cannot_honor_instead_of_dropping_it() {
     assert!(compile_error(&one("          enable_http3: true\n")).contains("enable_http3"));
     assert!(
         compile_error("      socks5: '192.0.2.1:1080'\n      upstreams:\n        - addr: 'quic://192.0.2.53'\n")
-            .contains("SOCKS5 is unsupported")
+            .contains("group's literal socks5 address")
     );
     assert!(
         compile_error("      upstreams:\n        - addr: \"dns.example\"\n")

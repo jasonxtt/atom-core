@@ -360,7 +360,7 @@ mod tests {
         for bytes in [
             br#"{"version":2,"entry":"peer","peer":null,"transport":"udp"}"#.as_slice(),
             br#"{"version":1,"entry":"","peer":null,"transport":"udp"}"#,
-            br#"{"version":1,"entry":"peer","peer":null,"transport":"quic"}"#,
+            br#"{"version":1,"entry":"peer","peer":null,"transport":"unknown"}"#,
             br#"{"version":1,"entry":"peer","entry":"other","peer":null,"transport":"udp"}"#,
         ] {
             assert!(decode_origin(bytes, ORIGIN_FIELD).is_err());
@@ -382,6 +382,52 @@ mod tests {
             "duplicate origin fields rejected"
         );
     }
+
+    #[test]
+    fn quic_origin_field_is_exclusive_and_legacy_readers_can_skip_it() {
+        let udp = br#"{"version":1,"entry":"peer","peer":null,"transport":"udp"}"#;
+        let quic = br#"{"version":1,"entry":"peer","peer":null,"transport":"quic"}"#;
+        assert!(decode_origin(quic, ORIGIN_FIELD).is_err());
+        assert!(decode_origin(udp, QUIC_ORIGIN_FIELD).is_err());
+
+        let origin = atomdns_sequence_core::ResponseOrigin {
+            identity: std::sync::Arc::from("peer"),
+            peer: None,
+            transport: Some("quic"),
+        };
+        let item = NativeSnapshotEntry {
+            attachment: Some(atomdns_cache_core::NativeAttachment::new(origin)),
+            key: vec![1],
+            response: vec![2, 3],
+            domain_set: vec![],
+            times: [0; 3],
+            wall_times: Some([1, 2, 3]),
+        };
+        let mut entry = encode_entry(&item).unwrap();
+        // Project the encoded protobuf with the previous decoder's field
+        // cutoff. Its unknown-field skip must leave the DNS response intact.
+        let mut input = Cursor {
+            bytes: &entry,
+            pos: 0,
+        };
+        let mut legacy = Vec::new();
+        while input.pos < entry.len() {
+            let start = input.pos;
+            let tag = input.integer().unwrap();
+            input.skip(tag & 7).unwrap();
+            if tag >> 3 <= ORIGIN_FIELD {
+                legacy.extend_from_slice(&entry[start..input.pos]);
+            }
+        }
+        assert!(legacy.len() < entry.len());
+        let decoded = decode_entry(&legacy, &mut 0).unwrap();
+        assert_eq!(decoded.response, item.response);
+        assert!(decoded.attachment.is_none());
+
+        field(&mut entry, ORIGIN_FIELD, udp);
+        assert!(decode_entry(&entry, &mut 0).is_err());
+    }
+
     #[test]
     fn stream_owned_and_entry_limits_apply_before_any_merge() {
         let mut writer = GzBuilder::new()
