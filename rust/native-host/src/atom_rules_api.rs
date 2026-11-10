@@ -126,6 +126,8 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("PUT", "dns"),
     ("GET", "upstreams"),
     ("PUT", "upstreams/{tag}"),
+    ("GET", "catalog"),
+    ("POST", "catalog/sync"),
     ("POST", "upstreams"),
     ("DELETE", "upstreams/{tag}"),
     ("GET", "rewrite"),
@@ -256,10 +258,13 @@ pub(crate) async fn handle(
     }
     let reply = match (method, segments.as_slice()) {
         ("GET", ["rules"]) => return Some(list_rules(rules)),
-        ("POST", ["rules"]) => create_rule(rules, request_body).await,
+        ("POST", ["rules"]) => create_rule(rules, request_body, shutdown).await,
         ("POST", ["rules", "move"]) => move_rule(rules, request_body).await,
         ("POST", ["rules", "test"]) => return Some(test_rule(config, rules, request_body)),
-        ("PUT", ["rules", id]) => update_rule(rules, id, request_body).await,
+        ("PUT", ["rules", id]) => update_rule(rules, id, request_body, shutdown).await,
+        ("GET", ["catalog"]) => return Some(list_catalog(rules, query)),
+        // Not a rule change: no cache flush, no ledger pass.
+        ("POST", ["catalog", "sync"]) => return Some(sync_catalog(rules).await),
         ("DELETE", ["rules", id]) => delete_rule(rules, id, query).await,
         ("GET", ["rulesets"]) => return Some(list_rulesets(config, rules)),
         ("GET", ["rulesets", id]) => return Some(show_ruleset(config, rules, id)),
@@ -273,7 +278,9 @@ pub(crate) async fn handle(
             refresh_builtin(config, id).await
         }
         ("POST", ["rulesets", id, "refresh"]) => refresh_ruleset(rules, id, shutdown).await,
-        (_, ["rules" | "rulesets", ..]) => return Some(error(405, "method not allowed")),
+        (_, ["rules" | "rulesets" | "catalog", ..]) => {
+            return Some(error(405, "method not allowed"));
+        }
         _ => {
             return Some(
                 crate::atom_proxy_api::handle(
@@ -305,6 +312,95 @@ pub(crate) async fn handle(
         }
         Err(reply) => reply,
     })
+}
+
+/// `GET catalog?q=&limit=`: the catalog entries whose name contains `q`
+/// (case-insensitive), at most `limit` (default 50, at most 500).
+fn list_catalog(rules: &AtomRules, query: Option<&str>) -> Reply {
+    let mut q = String::new();
+    let mut limit = 50usize;
+    for pair in query.unwrap_or("").split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = percent_decode(value);
+        match key {
+            "q" => q = value.trim().to_lowercase(),
+            "limit" => match value.parse::<usize>() {
+                Ok(n) if (1..=500).contains(&n) => limit = n,
+                _ => return error(400, "limit 是 1 到 500"),
+            },
+            _ => return error(400, format!("不认识的参数 `{key}`")),
+        }
+    }
+    let catalog = rules.catalog();
+    let matching: Vec<_> = catalog
+        .entries()
+        .into_iter()
+        .filter(|entry| q.is_empty() || entry.name.to_lowercase().contains(&q))
+        .collect();
+    let total = matching.len();
+    let entries: Vec<serde_json::Value> = matching
+        .into_iter()
+        .take(limit)
+        .map(|entry| {
+            let mut value = serde_json::to_value(&entry).unwrap_or_default();
+            // In use: a rule names it, so its set (counts, update time) exists.
+            if let Some(set) = rules.ruleset(&entry.id) {
+                value["ruleset"] = ruleset_view(&set);
+            }
+            value
+        })
+        .collect();
+    json(
+        200,
+        &serde_json::json!({
+            "updated_at": catalog.updated_at,
+            "size": catalog.len(),
+            "total": total,
+            "entries": entries,
+        }),
+    )
+}
+
+/// A query value: `+` is a space, `%XX` a byte.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |at: usize| {
+            bytes
+                .get(at)
+                .and_then(|b| char::from(*b).to_digit(16))
+                .and_then(|d| u8::try_from(d).ok())
+        };
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                if let (Some(high), Some(low)) = (hex(i + 1), hex(i + 2)) {
+                    out.push(high * 16 + low);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+            }
+            byte => out.push(byte),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `POST catalog/sync`: reads the index from GitHub now.
+async fn sync_catalog(rules: &AtomRules) -> Reply {
+    match crate::atom_catalog::sync(rules.root(), &rules.socks5, crate::atom_rules::now()).await {
+        Ok(catalog) => {
+            let view =
+                serde_json::json!({ "updated_at": catalog.updated_at, "size": catalog.len() });
+            rules.set_catalog(catalog);
+            json(200, &view)
+        }
+        Err(e) => error(502, e),
+    }
 }
 
 fn list_rules(rules: &AtomRules) -> Reply {
@@ -366,29 +462,96 @@ struct Replace {
     version: Option<u64>,
 }
 
-async fn create_rule(rules: &AtomRules, bytes: &[u8]) -> Result<Reply, Reply> {
+async fn create_rule(
+    rules: &AtomRules,
+    bytes: &[u8],
+    shutdown: &TransportCancellation,
+) -> Result<Reply, Reply> {
     let create: Create = body(bytes)?;
-    let (next, (version, rule)) = rules
+    ensure_catalog(rules, &create.rule.matches, shutdown).await?;
+    let planned = rules
         .plan_create(
             create.rule.into(),
             create.version,
             create.before_id.as_deref(),
             create.after_id.as_deref(),
         )
-        .map_err(|e| refusal(&e))?;
-    rules.commit_rules(next).await.map_err(|e| refusal(&e))?;
+        .map_err(|e| refusal(&e));
+    let committed = match planned {
+        Ok((next, done)) => rules
+            .commit_rules(next)
+            .await
+            .map(|()| done)
+            .map_err(|e| refusal(&e)),
+        Err(reply) => Err(reply),
+    };
+    // A refused rule leaves no catalog set it created behind.
+    drop_unused_catalog(rules);
+    let (version, rule) = committed?;
     Ok(json(
         201,
         &serde_json::json!({ "version": version, "rule": rule }),
     ))
 }
 
-async fn update_rule(rules: &AtomRules, id: &str, bytes: &[u8]) -> Result<Reply, Reply> {
+/// The catalog entries `matches` names that have no ruleset yet are created
+/// and downloaded first; a failed download removes the set again and the
+/// rule is not saved (502).
+async fn ensure_catalog(
+    rules: &AtomRules,
+    matches: &crate::atom_rules::Match,
+    shutdown: &TransportCancellation,
+) -> Result<(), Reply> {
+    let missing: Vec<String> = matches
+        .ruleset
+        .iter()
+        .chain(&matches.ip_ruleset)
+        .filter(|id| crate::atom_catalog::is_catalog_id(id) && rules.ruleset(id).is_none())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for id in missing {
+        let set = rules.create_catalog_ruleset(&id).map_err(|e| refusal(&e))?;
+        let reply = download(rules, &set, shutdown).await;
+        if reply.status != 200 {
+            let _ = rules.delete_ruleset(&id);
+            return Err(reply);
+        }
+    }
+    Ok(())
+}
+
+/// After a rule change: the catalog rulesets no rule names any more go.
+fn drop_unused_catalog(rules: &AtomRules) {
+    for id in rules.unused_catalog_rulesets() {
+        if let Err(e) = rules.delete_ruleset(&id) {
+            crate::diag::error_line!("atom_rules: removing unused catalog ruleset {id}: {}", e.message);
+        }
+    }
+}
+
+async fn update_rule(
+    rules: &AtomRules,
+    id: &str,
+    bytes: &[u8],
+    shutdown: &TransportCancellation,
+) -> Result<Reply, Reply> {
     let replace: Replace = body(bytes)?;
-    let (next, (version, rule)) = rules
+    ensure_catalog(rules, &replace.rule.matches, shutdown).await?;
+    let planned = rules
         .plan_update(id, replace.rule.into(), replace.version)
-        .map_err(|e| refusal(&e))?;
-    rules.commit_rules(next).await.map_err(|e| refusal(&e))?;
+        .map_err(|e| refusal(&e));
+    let committed = match planned {
+        Ok((next, done)) => rules
+            .commit_rules(next)
+            .await
+            .map(|()| done)
+            .map_err(|e| refusal(&e)),
+        Err(reply) => Err(reply),
+    };
+    drop_unused_catalog(rules);
+    let (version, rule) = committed?;
     Ok(json(
         200,
         &serde_json::json!({ "version": version, "rule": rule }),
@@ -399,6 +562,7 @@ async fn delete_rule(rules: &AtomRules, id: &str, query: Option<&str>) -> Result
     let version = query_version(query)?;
     let (next, version) = rules.plan_delete(id, version).map_err(|e| refusal(&e))?;
     rules.commit_rules(next).await.map_err(|e| refusal(&e))?;
+    drop_unused_catalog(rules);
     Ok(json(200, &serde_json::json!({ "version": version })))
 }
 
@@ -563,16 +727,14 @@ fn ruleset_body(bytes: &[u8]) -> Result<RulesetBody, Reply> {
     })
 }
 
-async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancellation) -> Reply {
-    let Source::Remote {
-        url,
-        format,
-        category,
-    } = set.source.clone()
-    else {
-        return error(400, "本地规则集不需要刷新");
-    };
-    let ticket = rules.begin_download(&set.id);
+/// Downloads and converts one file (the conversion on the blocking pool).
+async fn fetch_converted(
+    rules: &AtomRules,
+    url: String,
+    format: String,
+    category: String,
+    shutdown: &TransportCancellation,
+) -> Result<crate::atom_rules::Converted, String> {
     let fetched = crate::rule_download::fetch(
         crate::rule_download::Fetch {
             url: &url,
@@ -584,13 +746,62 @@ async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancella
         shutdown,
     )
     .await;
-    let converted = match fetched {
+    match fetched {
         Ok(bytes) => tokio::task::spawn_blocking(move || {
             crate::atom_rules::convert_download(&bytes, &format, &category, &url)
         })
         .await
         .unwrap_or_else(|e| Err(format!("conversion failed: {e}"))),
         Err(e) => Err(format!("下载失败: {e}")),
+    }
+}
+
+/// A catalog entry's files, merged: MetaCubeX's names and prefixes come in
+/// two files, blackmatrix7's in one. Any file failing fails the whole set.
+async fn fetch_catalog(
+    rules: &AtomRules,
+    id: &str,
+    shutdown: &TransportCancellation,
+) -> Result<crate::atom_rules::Converted, String> {
+    let entry = rules
+        .catalog()
+        .find(id)
+        .ok_or_else(|| format!("规则源 `{id}` 不在目录里"))?;
+    let mut merged: Option<crate::atom_rules::Converted> = None;
+    for (url, format) in crate::atom_catalog::urls(&entry) {
+        let part = fetch_converted(rules, url, format.to_owned(), String::new(), shutdown).await?;
+        merged = Some(match merged {
+            None => part,
+            Some(mut all) => {
+                all.entries.extend(part.entries);
+                all.ips.extend(part.ips);
+                for (kind, count) in part.skipped {
+                    *all.skipped.entry(kind).or_default() += count;
+                }
+                all.list = crate::atom_rules::build_list(&all.entries)?;
+                all
+            }
+        });
+    }
+    merged.ok_or_else(|| format!("规则源 `{id}` 没有文件"))
+}
+
+async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancellation) -> Reply {
+    let ticket;
+    let converted = match set.source.clone() {
+        Source::Remote {
+            url,
+            format,
+            category,
+        } => {
+            ticket = rules.begin_download(&set.id);
+            fetch_converted(rules, url, format, category, shutdown).await
+        }
+        Source::Catalog => {
+            ticket = rules.begin_download(&set.id);
+            fetch_catalog(rules, &set.id, shutdown).await
+        }
+        Source::Local => return error(400, "本地规则集不需要刷新"),
     };
     let failed = converted.as_ref().err().cloned();
     let before = rules.current_ip_rules();

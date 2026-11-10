@@ -450,6 +450,86 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /catalog:
+    get:
+      tags: [rulesets]
+      summary: Search the rule-source catalog (MetaCubeX, blackmatrix7)
+      description: |
+        Entries a rule can name directly in `ruleset` (names) and
+        `ip_ruleset` (IP prefixes), without creating a ruleset: `meta:<name>`
+        (MetaCubeX meta-rules-dat, `sing` branch: `geo/geosite/<name>.srs`,
+        `geo/geoip/<name>.srs`) and `bm7:<name>` (blackmatrix7 ios_rule_script,
+        `rule/Clash/<name>/<name>.list`). A rule write naming one that has no
+        ruleset yet creates it (source `catalog`) and downloads it first (502
+        when that fails; the rule is not saved); it is removed when no rule
+        names it. An entry in use carries its `ruleset`.
+      operationId: listCatalog
+      parameters:
+        - name: q
+          in: query
+          description: Part of the name (case-insensitive).
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: 1 to 500 (default 50).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          description: Matching entries, MetaCubeX first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated_at, size, total, entries]
+                properties:
+                  updated_at:
+                    type: integer
+                    description: Unix seconds the index was made.
+                  size:
+                    type: integer
+                  total:
+                    type: integer
+                    description: Matching entries (before `limit`).
+                  entries:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CatalogEntry"
+        "400":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /catalog/sync:
+    post:
+      tags: [rulesets]
+      summary: Read the catalog index from GitHub now (through `main_proxy`)
+      operationId: syncCatalog
+      responses:
+        "200":
+          description: The new index.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated_at, size]
+                properties:
+                  updated_at:
+                    type: integer
+                  size:
+                    type: integer
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "502":
+          description: GitHub did not answer; the old index stays.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          $ref: "#/components/responses/Error"
   /nodes:
     get:
       tags: [nodes]
@@ -2394,6 +2474,27 @@ components:
               description: "`domain:`, `full:`, `keyword:`, `regexp:`; no prefix is `domain:`."
               items:
                 type: string
+    CatalogEntry:
+      type: object
+      required: [id, provider, name, names, ips]
+      properties:
+        id:
+          type: string
+        provider:
+          type: string
+          enum: [meta, bm7]
+        name:
+          type: string
+        names:
+          type: boolean
+          nullable: true
+          description: Whether it has names (null for blackmatrix7 until downloaded).
+        ips:
+          type: boolean
+          nullable: true
+          description: Whether it has IP prefixes (null for blackmatrix7 until downloaded).
+        ruleset:
+          $ref: "#/components/schemas/Ruleset"
     Ruleset:
       type: object
       required: [id, name, type, rule_count, updated_at, revision]
@@ -2404,7 +2505,8 @@ components:
           type: string
         type:
           type: string
-          enum: [remote, local]
+          enum: [remote, local, catalog]
+          description: "`catalog`: a catalog entry a rule names (its `id` is the entry's), managed by atom."
         url:
           type: string
         format:

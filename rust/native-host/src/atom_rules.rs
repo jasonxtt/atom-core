@@ -198,6 +198,10 @@ pub(crate) enum Source {
     },
     /// A list edited through the API.
     Local,
+    /// A rule-source catalog entry (atom step 6b, [`crate::atom_catalog`]):
+    /// the set's ID is the entry's (`meta:<name>`, `bm7:<name>`). Created
+    /// when a rule first names it, removed when no rule does.
+    Catalog,
 }
 
 fn format_default() -> String {
@@ -429,6 +433,8 @@ pub(crate) struct AtomRules {
     /// The upstream groups a direct rule may name, with their numeric marks
     /// (`atom_routes`; the uncached one is the next number).
     routes: BTreeMap<String, u32>,
+    /// The rule-source catalog's index.
+    catalog: RefCell<crate::atom_catalog::Catalog>,
 }
 
 /// The default table of a new installation (design §4.4). Each rule after
@@ -798,6 +804,7 @@ impl AtomRules {
             },
             busy: std::cell::Cell::new(false),
             routes,
+            catalog: RefCell::new(crate::atom_catalog::Catalog::load(root)),
         };
         let table = {
             let state = rules_owner.state.borrow();
@@ -1359,7 +1366,72 @@ impl AtomRules {
         Ok(())
     }
 
+    /// The configuration root (empty for an in-memory compile).
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The rule-source catalog's index.
+    pub(crate) fn catalog(&self) -> std::cell::Ref<'_, crate::atom_catalog::Catalog> {
+        self.catalog.borrow()
+    }
+
+    pub(crate) fn set_catalog(&self, catalog: crate::atom_catalog::Catalog) {
+        *self.catalog.borrow_mut() = catalog;
+    }
+
+    /// The managed ruleset of catalog entry `id`, created empty (revision 0)
+    /// until its download is stored.
+    pub(crate) fn create_catalog_ruleset(&self, id: &str) -> Result<Ruleset, Refusal> {
+        let entry = self
+            .catalog()
+            .find(id)
+            .ok_or_else(|| Refusal::invalid(format!("规则源 `{id}` 不在目录里")))?;
+        let mut next = self.state.borrow().clone();
+        if let Some(set) = next.rulesets.iter().find(|set| set.id == id) {
+            return Ok(set.clone());
+        }
+        let provider = if entry.provider == "meta" { "MetaCubeX" } else { "blackmatrix7" };
+        let set = Ruleset {
+            id: id.to_owned(),
+            name: format!("{provider} · {}", entry.name),
+            source: Source::Catalog,
+            rule_count: 0,
+            updated_at: 0,
+            last_error: String::new(),
+            revision: 0,
+            ip_count: 0,
+            skipped: BTreeMap::new(),
+        };
+        next.rulesets.push(set.clone());
+        next.lists.insert(id.to_owned(), Rc::new(MixSetBuilder::new().finish()));
+        self.commit(next, false, true)?;
+        Ok(set)
+    }
+
+    /// The catalog rulesets no rule names.
+    pub(crate) fn unused_catalog_rulesets(&self) -> Vec<String> {
+        let state = self.state.borrow();
+        state
+            .rulesets
+            .iter()
+            .filter(|set| matches!(set.source, Source::Catalog))
+            .filter(|set| {
+                !state.rules.iter().any(|rule| {
+                    let m = &rule.matches;
+                    m.ruleset.iter().chain(&m.ip_ruleset).any(|id| id == &set.id)
+                })
+            })
+            .map(|set| set.id.clone())
+            .collect()
+    }
+
     fn check_source(source: &Source) -> Result<(), Refusal> {
+        if matches!(source, Source::Catalog) {
+            return Err(Refusal::invalid(
+                "目录里的规则源不用新建：规则引用它（meta:<名字>、bm7:<名字>）时自动创建",
+            ));
+        }
         if let Source::Remote {
             url,
             format,
@@ -1440,6 +1512,9 @@ impl AtomRules {
             .position(|set| set.id == id)
             .ok_or_else(|| Refusal::new(404, format!("规则集 `{id}` 不存在")))?;
         let mut set = next.rulesets[at].clone();
+        if matches!(set.source, Source::Catalog) {
+            return Err(Refusal::invalid("目录里的规则源不能修改（只能刷新）"));
+        }
         if let Some(name) = name {
             if name.trim().is_empty() {
                 return Err(Refusal::invalid("规则集需要 name"));
@@ -1454,7 +1529,7 @@ impl AtomRules {
             set.source = source;
         }
         if let Some(entries) = entries {
-            if matches!(set.source, Source::Remote { .. }) {
+            if !matches!(set.source, Source::Local) {
                 return Err(Refusal::invalid(
                     "远程规则集的内容来自下载，不能直接给 rules",
                 ));

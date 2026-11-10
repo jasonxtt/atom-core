@@ -1201,3 +1201,70 @@ fn a_ruleset_ip_part_reaches_sing_box_when_downloaded() {
     );
     assert_eq!(status, 400, "{refused}");
 }
+
+/// The catalog: listing and search; a rule that names an entry uses its
+/// managed ruleset; such a set cannot be edited or created by hand, and it
+/// goes with the last rule naming it (atom step 6b).
+#[test]
+fn catalog_entries_become_managed_rulesets_while_rules_name_them() {
+    let api = Api::new("catalog");
+    let rules = api.assembly.config().local.atom_rules.clone().unwrap();
+    rules.set_catalog(crate::atom_catalog::Catalog {
+        updated_at: 7,
+        meta: crate::atom_catalog::Meta {
+            geosite: vec!["netflix".into()],
+            geoip: vec!["netflix".into(), "telegram".into()],
+        },
+        bm7: vec!["Telegram".into()],
+    });
+    let (status, listed) = api.call("GET", "/api/v1/atom/catalog?q=TELE", "");
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!((&listed["size"], &listed["total"]), (&serde_json::json!(3), &serde_json::json!(2)));
+    let ids: Vec<&str> = listed["entries"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["meta:telegram", "bm7:Telegram"]);
+    assert_eq!(listed["entries"][0]["names"], false);
+    assert_eq!(api.call("GET", "/api/v1/atom/catalog?limit=0", "").0, 400);
+    assert_eq!(api.call("GET", "/api/v1/atom/catalog?nope=1", "").0, 400);
+
+    // Not in the catalog: 400, nothing created.
+    let (status, value) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"ruleset": ["bm7:Nope"]}, "action": {"type": "direct"}}"#,
+    );
+    assert_eq!(status, 400, "{value}");
+    assert!(rules.ruleset("bm7:Nope").is_none());
+
+    // An entry already downloaded is used as it is.
+    let set = rules.create_catalog_ruleset("bm7:Telegram").unwrap();
+    assert_eq!(set.name, "blackmatrix7 · Telegram");
+    let converted = crate::atom_rules::convert_download(b"DOMAIN-SUFFIX,t.me\n", "text", "", "x.list");
+    rules
+        .store_download(&set.id, &set.source, rules.begin_download(&set.id), converted)
+        .unwrap();
+    let (status, created) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"ruleset": ["bm7:Telegram"]}, "action": {"type": "block"}}"#,
+    );
+    assert_eq!(status, 201, "{created}");
+    let rule = created["rule"]["id"].as_str().unwrap().to_owned();
+    let (_, listed) = api.call("GET", "/api/v1/atom/catalog?q=Telegram", "");
+    assert_eq!(listed["entries"][1]["ruleset"]["rule_count"], 1, "{listed}");
+    assert_eq!(
+        api.call("PUT", "/api/v1/atom/rulesets/bm7:Telegram", r#"{"name": "x"}"#).0,
+        400
+    );
+    assert_eq!(
+        api.call("POST", "/api/v1/atom/rulesets", r#"{"name": "x", "type": "catalog"}"#).0,
+        400
+    );
+    assert_eq!(
+        api.call("DELETE", "/api/v1/atom/rulesets/bm7:Telegram", "").0,
+        409,
+        "in use"
+    );
+    let (status, _) = api.call("DELETE", &format!("/api/v1/atom/rules/{rule}"), "");
+    assert_eq!(status, 200);
+    assert!(rules.ruleset("bm7:Telegram").is_none(), "the last rule took its set along");
+}
