@@ -30,7 +30,7 @@ export function nativeUpstreamProtocol(upstream) {
 }
 
 export function nativeUpstreamProtocolFields(protocol, addr) {
-  if (protocol === 'h3' && addr.startsWith('https://')) {
+  if (protocol === 'h3' && (addr.startsWith('https://') || !addr.includes('://'))) {
     return { protocol: 'https', addr, enable_http3: true }
   }
   return { protocol, addr }

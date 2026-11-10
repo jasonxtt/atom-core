@@ -64,6 +64,7 @@
 DoH3 和 DoQ 通过 UDP 直连，默认校验证书。指定 `dial_addr` 时仍使用 `addr` 的主机名校验证书。
 `h3://` 和 `https://` 配合 `enable_http3: true` 等价，均固定使用 HTTP/3。
 `h3://` 即使显式设置 `enable_http3: false` 也使用 HTTP/3。
+在 WebUI 的上游编辑窗口中，协议选 `DoH (HTTPS)`，再打开「使用 HTTP/3」。
 共享 QUIC 握手和 HTTP/3 初始化共用 5 秒期限，超时后关闭连接并等待排空。每笔查询仍受自己的查询超时限制。
 
 ## aliapi

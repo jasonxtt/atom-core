@@ -22,16 +22,17 @@ const PROTOCOLS = [
   { value: 'tcp', label: 'TCP' },
   { value: 'tls', label: 'DoT (TLS)' },
   { value: 'https', label: 'DoH (HTTPS)' },
-  { value: 'h3', label: 'DoH (HTTP/3)' },
   { value: 'quic', label: 'DoQ (QUIC)' }
 ]
 
 const supported = computed(() => new Set((props.capabilities?.upstream_protocols || []).map(normalizeProtocol)))
 const protocols = computed(() => PROTOCOLS.filter((item) => supported.value.has(item.value)))
 const entry = props.entry || {}
+const entryProtocol = nativeUpstreamProtocol(entry)
 const form = reactive({
   tag: String(entry.tag || ''),
-  protocol: nativeUpstreamProtocol(entry) || protocols.value[0]?.value || '',
+  protocol: entryProtocol === 'h3' ? 'https' : entryProtocol || protocols.value[0]?.value || '',
+  http3: entryProtocol === 'h3',
   addr: String(entry.addr || ''),
   dial_addr: String(entry.dial_addr || ''),
   use_socks_proxy: Boolean(entry.use_socks_proxy),
@@ -40,8 +41,19 @@ const form = reactive({
   bootstrap_version: Number(entry.bootstrap_version || 0),
   upstream_query_timeout: Number(entry.upstream_query_timeout || 0)
 })
-const showProxy = computed(() => props.proxySwitch && protocolUsesProxy(form.protocol))
-const showTls = computed(() => ['tls', 'https', 'h3', 'quic'].includes(form.protocol))
+const showHttp3 = computed(() => form.protocol === 'https' && supported.value.has('h3'))
+const useHttp3 = computed(() => showHttp3.value && (form.http3 || form.addr.trimStart().startsWith('h3://')))
+const effectiveProtocol = computed(() => useHttp3.value ? 'h3' : form.protocol)
+const showProxy = computed(() => props.proxySwitch && protocolUsesProxy(effectiveProtocol.value))
+const showTls = computed(() => ['tls', 'https', 'quic'].includes(form.protocol))
+
+function setHttp3(enabled) {
+  form.http3 = enabled
+  if (!enabled) {
+    // Explicitly turning HTTP/3 off also clears the scheme that forces it.
+    form.addr = form.addr.replace(/^(\s*)h3:\/\//, '$1https://')
+  }
+}
 
 function save() {
   const tag = form.tag.trim()
@@ -51,13 +63,13 @@ function save() {
   if (!addr) return setError('上游地址不能为空')
   emit('save', {
     tag,
-    ...nativeUpstreamProtocolFields(form.protocol, addr),
+    ...nativeUpstreamProtocolFields(effectiveProtocol.value, addr),
     dial_addr: form.dial_addr.trim(),
     bootstrap: form.bootstrap.trim(),
     bootstrap_version: Number(form.bootstrap_version) || 0,
     upstream_query_timeout: Math.max(0, Math.trunc(Number(form.upstream_query_timeout) || 0)),
     insecure_skip_verify: showTls.value ? Boolean(form.insecure_skip_verify) : false,
-    ...(props.proxySwitch ? { use_socks_proxy: nativeProxyFlag(form.protocol, form.use_socks_proxy) } : {})
+    ...(props.proxySwitch ? { use_socks_proxy: nativeProxyFlag(effectiveProtocol.value, form.use_socks_proxy) } : {})
   })
 }
 </script>
@@ -79,6 +91,13 @@ function save() {
           <select v-model="form.protocol">
             <option v-for="item in protocols" :key="item.value" :value="item.value">{{ item.label }}</option>
           </select>
+          <template v-if="showHttp3">
+            <label for="upstream-http3">使用 HTTP/3</label>
+            <div>
+              <label class="switch-inline"><input id="upstream-http3" type="checkbox" :checked="useHttp3" @change="setHttp3($event.target.checked)" /><span>{{ useHttp3 ? '开启' : '关闭' }}</span></label>
+              <small class="muted">HTTP/3 通过 UDP 直连。</small>
+            </div>
+          </template>
           <label>地址</label>
           <input v-model="form.addr" placeholder="例如 https://dns.example/dns-query 或 192.0.2.1" />
           <label>拨号地址</label>
