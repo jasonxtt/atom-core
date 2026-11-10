@@ -345,8 +345,14 @@ paths:
           $ref: "#/components/responses/Error"
     put:
       tags: [rulesets]
-      summary: Rename, change the source, or replace a local list
-      description: Any of `name`, the source (`type` with its fields) and `rules` (local rulesets only).
+      summary: Rename, change the source, or replace a local list; a builtin set's address
+      description: |
+        A custom ruleset: any of `name`, the source (`type` with its fields)
+        and `rules` (local rulesets only); a catalog set cannot be changed
+        (400). A builtin set: only `{url}`, the download address of its one
+        source (409 for a set with several, such as `adguard`; 400 for one
+        without), downloaded at once (502 when that fails, the address is
+        kept and the old list stays).
       operationId: updateRuleset
       requestBody:
         required: true
@@ -376,9 +382,17 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Ruleset"
+                oneOf:
+                  - $ref: "#/components/schemas/Ruleset"
+                  - $ref: "#/components/schemas/BuiltinRuleset"
         "400":
           $ref: "#/components/responses/Error"
+        "502":
+          description: A builtin set's new address was saved but its download failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/Error"
         "409":
@@ -387,8 +401,20 @@ paths:
           $ref: "#/components/responses/Error"
     delete:
       tags: [rulesets]
-      summary: Delete a custom ruleset
-      description: Refused with 409 (and the referencing rules' IDs as `rules`) while a rule references it.
+      summary: Delete a custom ruleset or a builtin set
+      description: |
+        Refused with 409 (and the referencing rules' IDs as `rules`) while a
+        rule names it, unless `confirm=true`: it then leaves those rules first
+        (a rule left without a name or IP condition is deleted, since a client
+        condition alone would match every name). The builtin sets the
+        original judgement needs (`geosite_cn`, `geosite_no_cn`, `geoip_cn`)
+        cannot be deleted (400); a deleted builtin set leaves the list and
+        rules cannot name it (`webinfo/atom_builtin.json`).
+      parameters:
+        - name: confirm
+          in: query
+          schema:
+            type: boolean
       operationId: deleteRuleset
       responses:
         "200":
@@ -397,10 +423,12 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [deleted]
+                required: [deleted, rules_version]
                 properties:
                   deleted:
                     type: string
+                  rules_version:
+                    $ref: "#/components/schemas/Version"
         "404":
           $ref: "#/components/responses/Error"
         "409":
@@ -2432,11 +2460,23 @@ components:
           description: No rule matched; the original judgement decides.
     BuiltinRuleset:
       type: object
-      required: [id, name, type, refreshable]
+      required: [id, name, type, refreshable, required, usable]
       properties:
         id:
           type: string
-          description: "`adguard`, `geosite_cn`, `geosite_no_cn`, `cuscn`, `cusnocn` in atom's configuration."
+          description: "`adguard`, `geosite_cn`, `geosite_no_cn`, `cuscn`, `cusnocn`, and the IP set `geoip_cn`, in atom's configuration."
+        required:
+          type: boolean
+          description: The original judgement needs it (no deletion).
+        usable:
+          type: boolean
+          description: Rules may name it (false for the IP sets).
+        url:
+          type: string
+          description: The download address, for a set with one source.
+        updated:
+          type: string
+          description: The last download (RFC 3339).
         name:
           type: string
         type:

@@ -44,6 +44,7 @@ plugins:
       marks: {proxy: 41, direct: 42, block: 40, route: 43}   #route：直连规则指定了上游组或关了缓存，交给生成的 $atom_direct
       mapper: unified_matcher1
       builtin: [adguard, geosite_cn, geosite_no_cn, cuscn, cusnocn]
+      ip_builtin: [geoip_cn]                    #规则集页面显示、可刷新和改地址的 IP 名单（原判断用），规则不能引用
       proxy: $main_proxy                        #下载远程规则集用的代理；定义: sub_config/settings.yaml
       singbox:
         binary: /usr/local/bin/sing-box

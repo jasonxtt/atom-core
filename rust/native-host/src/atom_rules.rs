@@ -32,7 +32,7 @@
 //! or the new table, never a mix, and DNS is not interrupted.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -54,6 +54,17 @@ pub(crate) use singbox::{last_apply, last_nft};
 pub(crate) const RULES_FILE: &str = "webinfo/atom_rules.json";
 pub(crate) const RULESETS_FILE: &str = "webinfo/atom_rulesets.json";
 pub(crate) const RULESET_DIR: &str = "webinfo/atom_rulesets";
+/// The builtin sets the user removed (atom step 6b): `{"removed": [...]}`.
+pub(crate) const BUILTIN_FILE: &str = "webinfo/atom_builtin.json";
+/// The builtin sets the original judgement needs: never removed.
+pub(crate) const REQUIRED_BUILTIN: &[&str] = &["geosite_cn", "geosite_no_cn", "geoip_cn"];
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuiltinFile {
+    #[serde(default)]
+    removed: BTreeSet<String>,
+}
 /// The most entries one rule's inline conditions or one local list may hold.
 const MAX_LIST_RULES: usize = crate::rule_formats::MAX_RULES;
 /// sing-box trims the tag; a short, printable tag keeps the option small.
@@ -435,6 +446,14 @@ pub(crate) struct AtomRules {
     routes: BTreeMap<String, u32>,
     /// The rule-source catalog's index.
     catalog: RefCell<crate::atom_catalog::Catalog>,
+    /// Builtin IP sets shown and maintained (refresh, address) but not
+    /// named by rules (`args.ip_builtin`: `geoip_cn`).
+    ip_builtin: RefCell<Vec<String>>,
+    /// The builtin sets the user removed ([`BUILTIN_FILE`]).
+    removed: RefCell<BTreeSet<String>>,
+    /// Stops the daily ruleset refresh of this configuration
+    /// (`atom_rules_api::spawn_updates`).
+    updates: RefCell<Option<atomdns_upstream_core::TransportCancellation>>,
 }
 
 /// The default table of a new installation (design §4.4). Each rule after
@@ -723,7 +742,24 @@ impl AtomRules {
         if !routes.is_empty() && marks.route.is_none() {
             return Err("routes 需要 marks.route".to_owned());
         }
-        let names: Vec<String> = builtin.iter().map(|(name, _)| name.clone()).collect();
+        let removed: BTreeSet<String> = if root.as_os_str().is_empty() {
+            BTreeSet::new()
+        } else {
+            let path = root.join(BUILTIN_FILE);
+            match read(&path)? {
+                Some(bytes) => {
+                    serde_json::from_slice::<BuiltinFile>(&bytes)
+                        .map_err(|error| format!("{}: {error}", path.display()))?
+                        .removed
+                }
+                None => BTreeSet::new(),
+            }
+        };
+        let names: Vec<String> = builtin
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| !removed.contains(name))
+            .collect();
         let has = |name: &str| names.iter().any(|have| have == name);
         let (version, rules) = if root.as_os_str().is_empty() {
             (0, default_rules(&has))
@@ -805,6 +841,9 @@ impl AtomRules {
             busy: std::cell::Cell::new(false),
             routes,
             catalog: RefCell::new(crate::atom_catalog::Catalog::load(root)),
+            ip_builtin: RefCell::new(Vec::new()),
+            removed: RefCell::new(removed),
+            updates: RefCell::new(None),
         };
         let table = {
             let state = rules_owner.state.borrow();
@@ -862,6 +901,9 @@ impl AtomRules {
     }
 
     fn builtin(&self, name: &str) -> Option<&BuiltinSet> {
+        if self.removed.borrow().contains(name) {
+            return None;
+        }
         self.builtin
             .iter()
             .find(|(builtin, _)| builtin == name)
@@ -1292,8 +1334,113 @@ impl AtomRules {
 
     // ---- rulesets -------------------------------------------------------
 
+    /// The builtin sets rules may name (the removed ones left out).
     pub(crate) fn builtin_names(&self) -> Vec<String> {
-        self.builtin.iter().map(|(name, _)| name.clone()).collect()
+        let removed = self.removed.borrow();
+        self.builtin
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| !removed.contains(name))
+            .collect()
+    }
+
+    /// Every builtin set the rulesets page shows: those rules may name, then
+    /// the IP sets (`ip_builtin`).
+    pub(crate) fn listed_builtins(&self) -> Vec<String> {
+        let mut names = self.builtin_names();
+        let removed = self.removed.borrow();
+        names.extend(
+            self.ip_builtin
+                .borrow()
+                .iter()
+                .filter(|name| !removed.contains(*name))
+                .cloned(),
+        );
+        names
+    }
+
+    pub(crate) fn set_ip_builtin(&self, names: Vec<String>) {
+        *self.ip_builtin.borrow_mut() = names;
+    }
+
+    /// Removes a builtin set no rule names any more: recorded in
+    /// [`BUILTIN_FILE`], it leaves the rulesets page and rules cannot name it.
+    pub(crate) fn remove_builtin(&self, name: &str) -> Result<(), Refusal> {
+        if REQUIRED_BUILTIN.contains(&name) {
+            return Err(Refusal::invalid(format!(
+                "内置规则集 `{name}` 是分流必需的，不能删除"
+            )));
+        }
+        let users = self.rules_naming(name);
+        if !users.is_empty() {
+            return Err(Refusal {
+                rules: users,
+                ..Refusal::new(409, format!("规则集 `{name}` 还被规则引用，请先修改这些规则"))
+            });
+        }
+        let mut removed = self.removed.borrow().clone();
+        removed.insert(name.to_owned());
+        if !self.root.as_os_str().is_empty() {
+            let mut bytes = serde_json::to_vec_pretty(&BuiltinFile { removed: removed.clone() })
+                .map_err(|error| Refusal::new(500, error.to_string()))?;
+            bytes.push(b'\n');
+            crate::runtime_snapshot::write_durably(&self.root.join(BUILTIN_FILE), &bytes)
+                .map_err(|error| Refusal::new(500, format!("保存失败: {error}")))?;
+        }
+        *self.removed.borrow_mut() = removed;
+        Ok(())
+    }
+
+    /// The rules naming ruleset `id` in `ruleset` or `ip_ruleset`.
+    pub(crate) fn rules_naming(&self, id: &str) -> Vec<String> {
+        self.state
+            .borrow()
+            .rules
+            .iter()
+            .filter(|rule| {
+                let m = &rule.matches;
+                m.ruleset.iter().chain(&m.ip_ruleset).any(|name| name == id)
+            })
+            .map(|rule| rule.id.clone())
+            .collect()
+    }
+
+    /// The table without ruleset `id` (a confirmed deletion): it leaves every
+    /// rule naming it, and a rule left without any name or IP condition goes
+    /// (a client condition alone would widen it to every name). `None` when
+    /// no rule names it.
+    pub(crate) fn plan_without_ruleset(&self, id: &str) -> Option<State> {
+        let mut next = self.state.borrow().clone();
+        let mut changed = false;
+        next.rules.retain_mut(|rule| {
+            let m = &mut rule.matches;
+            let had = m.ruleset.len() + m.ip_ruleset.len();
+            m.ruleset.retain(|name| name != id);
+            m.ip_ruleset.retain(|name| name != id);
+            if m.ruleset.len() + m.ip_ruleset.len() == had {
+                return true;
+            }
+            changed = true;
+            m.has_name() || m.has_ip()
+        });
+        if !changed {
+            return None;
+        }
+        next.version += 1;
+        Some(next)
+    }
+
+    /// Stops the daily refresh, when it runs.
+    pub(crate) fn stop_updates(&self) {
+        if let Some(cancel) = self.updates.borrow_mut().take() {
+            cancel.cancel();
+        }
+    }
+
+    pub(crate) fn set_updates(&self, cancel: atomdns_upstream_core::TransportCancellation) {
+        if let Some(old) = self.updates.borrow_mut().replace(cancel) {
+            old.cancel();
+        }
     }
 
     pub(crate) fn rulesets(&self) -> Vec<Ruleset> {

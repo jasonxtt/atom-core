@@ -548,6 +548,56 @@ impl RuleSources {
     }
 }
 
+impl RuleSources {
+    /// The download address of a provider's one source (atom builtin sets).
+    pub(crate) fn source_url(&self, provider: &Provider) -> Option<(String, Option<String>)> {
+        let sources = provider.manifest.as_ref()?.sources.borrow();
+        match sources.as_slice() {
+            [entry] => Some((entry.url.clone(), entry.last_updated.clone())),
+            _ => None,
+        }
+    }
+
+    /// Points a provider's one source at `url` (atom: `PUT rulesets/{id}`
+    /// of a builtin set), saves the manifest, then downloads it like
+    /// [`Self::refresh`]. A provider with several sources is refused (409).
+    pub(crate) async fn set_url(
+        &self,
+        provider: &Rc<Provider>,
+        url: &str,
+    ) -> Result<(usize, usize), (u16, String)> {
+        if self.closed.get() {
+            return Err((503, "host is applying configuration".to_owned()));
+        }
+        let parsed = url::Url::parse(url).map_err(|e| (400, format!("url 无效: {e}")))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err((400, "url 只支持 http 和 https".to_owned()));
+        }
+        let Some(owner) = provider.manifest.as_ref() else {
+            return Err((400, "this set has no downloadable sources".to_owned()));
+        };
+        {
+            let _guard = provider.mutate.lock().await;
+            let mut sources = owner.sources.borrow().clone();
+            let [entry] = sources.as_mut_slice() else {
+                return Err((
+                    409,
+                    format!("{} 有 {} 个来源，不能整体改地址", provider.tag, sources.len()),
+                ));
+            };
+            if entry.url == url {
+                drop(_guard);
+                return self.refresh(provider).await;
+            }
+            url.clone_into(&mut entry.url);
+            save_manifest(provider, sources, "保存来源失败")
+                .await
+                .map_err(|_| (500, "保存来源失败".to_owned()))?;
+        }
+        self.refresh(provider).await
+    }
+}
+
 // ----- JSON views ------------------------------------------------------------
 
 #[derive(Serialize)]

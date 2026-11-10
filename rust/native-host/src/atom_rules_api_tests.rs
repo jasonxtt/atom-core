@@ -394,3 +394,72 @@ fn rulesets_and_cache_flush() {
     let (status, _) = api.call("POST", "/api/v1/atom/rulesets", r#"{"name": "x"}"#);
     assert_eq!(status, 400, "type is required");
 }
+
+/// Builtin sets (atom step 6b): one the original judgement needs cannot go;
+/// another goes once no rule names it, or with `confirm=true`, which takes
+/// it out of the rules first (a rule left with only a client condition goes
+/// too). The removal survives a reload. An `ip_builtin` set is listed but
+/// not usable in rules.
+#[test]
+fn builtin_sets_are_removed_and_confirmed_deletions_edit_the_rules() {
+    let yaml = YAML
+        .replace(
+            "  - tag: domestic\n",
+            "  - tag: geosite_cn\n    type: domain_set\n    args: {exps: ['full:cn.example']}\n  - tag: ips\n    type: domain_set\n    args: {exps: ['full:ip.example']}\n  - tag: domestic\n",
+        )
+        .replace(
+            "      builtin: [blocked]\n",
+            "      builtin: [blocked, geosite_cn]\n      ip_builtin: [ips]\n",
+        );
+    let api = Api::with_yaml("builtin-remove", &yaml);
+    let (_, sets) = api.call("GET", "/api/v1/atom/rulesets", "");
+    let view = |id: &str| sets.as_array().unwrap().iter().find(|s| s["id"] == id).cloned().unwrap();
+    assert_eq!((&view("blocked")["required"], &view("blocked")["usable"]), (&serde_json::json!(false), &serde_json::json!(true)));
+    assert_eq!(view("geosite_cn")["required"], true);
+    assert_eq!(view("ips")["usable"], false);
+    let (status, _) = api.call("POST", "/api/v1/atom/rules", r#"{"match": {"ruleset": ["ips"]}, "action": {"type": "block"}}"#);
+    assert_eq!(status, 400, "an IP builtin is not for rules");
+    assert_eq!(api.call("DELETE", "/api/v1/atom/rulesets/geosite_cn", "").0, 400);
+    assert_eq!(
+        api.call("PUT", "/api/v1/atom/rulesets/blocked", r#"{"url": "https://example.com/x.txt"}"#).0,
+        400,
+        "a domain_set has no download address"
+    );
+
+    let rule = |body: &str| {
+        let (status, value) = api.call("POST", "/api/v1/atom/rules", body);
+        assert_eq!(status, 201, "{value}");
+        value["rule"]["id"].as_str().unwrap().to_owned()
+    };
+    let only = rule(r#"{"match": {"ruleset": ["blocked"]}, "action": {"type": "block"}}"#);
+    let with_name = rule(r#"{"match": {"ruleset": ["blocked"], "suffix": ["a.example"]}, "action": {"type": "block"}}"#);
+    let with_client = rule(r#"{"match": {"ruleset": ["blocked"], "client": ["192.168.1.9"]}, "action": {"type": "direct"}}"#);
+    let (status, refused) = api.call("DELETE", "/api/v1/atom/rulesets/blocked", "");
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["rules"].as_array().unwrap().len(), 3);
+    let (status, deleted) = api.call("DELETE", "/api/v1/atom/rulesets/blocked?confirm=true", "");
+    assert_eq!(status, 200, "{deleted}");
+    let (_, table) = api.call("GET", "/api/v1/atom/rules", "");
+    let ids: Vec<&str> = table["rules"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert!(!ids.contains(&only.as_str()) && !ids.contains(&with_client.as_str()), "{table}");
+    let kept = table["rules"].as_array().unwrap().iter().find(|r| r["id"] == with_name.as_str()).unwrap();
+    assert_eq!(kept["match"], serde_json::json!({"suffix": ["a.example"]}));
+    let (_, sets) = api.call("GET", "/api/v1/atom/rulesets", "");
+    assert!(sets.as_array().unwrap().iter().all(|s| s["id"] != "blocked"), "{sets}");
+    assert_eq!(
+        api.call("POST", "/api/v1/atom/rules", r#"{"match": {"ruleset": ["blocked"]}, "action": {"type": "block"}}"#).0,
+        400
+    );
+    let again = crate::config::compile_yaml_with_base(&yaml, &api.root).expect("reloads");
+    let rules = again.local.atom_rules.as_deref().unwrap();
+    assert!(!rules.builtin_names().contains(&"blocked".to_owned()), "the removal is saved");
+
+    // A custom set, confirmed: the same edit of the rules.
+    let (status, local) = api.call("POST", "/api/v1/atom/rulesets", r#"{"name": "名单", "type": "local", "rules": ["b.example"]}"#);
+    assert_eq!(status, 201, "{local}");
+    let id = local["id"].as_str().unwrap().to_owned();
+    rule(&format!(r#"{{"match": {{"ruleset": ["{id}"]}}, "action": {{"type": "direct"}}}}"#));
+    assert_eq!(api.call("DELETE", &format!("/api/v1/atom/rulesets/{id}"), "").0, 409);
+    assert_eq!(api.call("DELETE", &format!("/api/v1/atom/rulesets/{id}?confirm=true"), "").0, 200);
+    assert_eq!(api.call("GET", &format!("/api/v1/atom/rulesets/{id}"), "").0, 404);
+}

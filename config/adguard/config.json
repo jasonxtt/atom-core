@@ -4,7 +4,7 @@
     "name": "httpdns",
     "url": "https://raw.githubusercontent.com/yyysuo/firetv/refs/heads/master/httpdns.txt",
     "enabled": true,
-    "auto_update": false,
+    "auto_update": true,
     "update_interval_hours": 24,
     "rule_count": 95,
     "last_updated": "2026-03-24T13:10:52.253656114+08:00"

@@ -164,19 +164,102 @@ fn builtin_label(name: &str) -> &str {
         "geosite_no_cn" => "非中国域名（geolocation-!cn）",
         "cuscn" => "国内修正（geolocation-!cn 里的国内域名）",
         "cusnocn" => "国外修正（geosite-cn 里的国外域名）",
+        "geoip_cn" => "中国 IP（geoip-cn）",
         other => other,
     }
 }
 
-fn builtin_view(config: &CompiledConfig, name: &str) -> serde_json::Value {
-    serde_json::json!({
+/// A builtin set: `refreshable`, its download address (`url`, a set with one
+/// source) and last update (`updated`, RFC 3339), whether the original
+/// judgement needs it (`required`: no deletion) and whether rules may name
+/// it (`usable`: not for the IP sets).
+fn builtin_view(config: &CompiledConfig, rules: &AtomRules, name: &str) -> serde_json::Value {
+    let provider = config.rule_sources.provider(name);
+    let mut value = serde_json::json!({
         "id": name,
         "name": builtin_label(name),
         "type": "builtin",
-        "refreshable": config.rule_sources.provider(name).is_some_and(|provider| {
+        "refreshable": provider.as_ref().is_some_and(|provider| {
             !matches!(provider.kind, crate::rule_sources::Kind::Light)
         }),
-    })
+        "required": crate::atom_rules::REQUIRED_BUILTIN.contains(&name),
+        "usable": rules.builtin_names().iter().any(|n| n == name),
+    });
+    if let Some((url, updated)) = provider
+        .as_ref()
+        .and_then(|provider| config.rule_sources.source_url(provider))
+    {
+        value["url"] = url.into();
+        if let Some(updated) = updated {
+            value["updated"] = updated.into();
+        }
+    }
+    value
+}
+
+/// `PUT rulesets/{id}` of a builtin set: `{url}`, the download address of
+/// its one source; downloaded at once (like `refresh`).
+async fn set_builtin_url(
+    config: &CompiledConfig,
+    rules: &AtomRules,
+    id: &str,
+    bytes: &[u8],
+) -> Result<Reply, Reply> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Put {
+        url: String,
+    }
+    let put: Put = body(bytes)?;
+    let provider = config
+        .rule_sources
+        .provider(id)
+        .filter(|provider| !matches!(provider.kind, crate::rule_sources::Kind::Light))
+        .ok_or_else(|| error(400, format!("内置规则集 `{id}` 没有可改的下载地址")))?;
+    match config.rule_sources.set_url(&provider, put.url.trim()).await {
+        Ok((sources, updated)) if sources > 0 && updated == 0 => Err(error(
+            502,
+            format!("地址已保存，但没有下载成功（见日志），`{id}` 的列表保持不变"),
+        )),
+        Ok(_) => Ok(json(200, &builtin_view(config, rules, id))),
+        Err((status, e)) => Err(error(status, e)),
+    }
+}
+
+/// `DELETE rulesets/{id}[?confirm=true]`: a custom set, or a builtin one the
+/// original judgement does not need. While rules name it: 409 with their
+/// IDs; with `confirm=true` it leaves those rules first (a rule left
+/// without a name or IP condition goes).
+async fn delete_any_ruleset(
+    rules: &AtomRules,
+    id: &str,
+    query: Option<&str>,
+) -> Result<Reply, Reply> {
+    let builtin = rules.listed_builtins().iter().any(|name| name == id);
+    if !builtin && rules.ruleset(id).is_none() {
+        return Err(error(404, format!("规则集 `{id}` 不存在")));
+    }
+    if builtin && crate::atom_rules::REQUIRED_BUILTIN.contains(&id) {
+        return Err(error(400, format!("内置规则集 `{id}` 是分流必需的，不能删除")));
+    }
+    let confirm = query.is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| matches!(pair, "confirm" | "confirm=true" | "confirm=1"))
+    });
+    if confirm {
+        if let Some(next) = rules.plan_without_ruleset(id) {
+            rules.commit_rules(next).await.map_err(|e| refusal(&e))?;
+        }
+    }
+    let removed = if builtin {
+        rules.remove_builtin(id)
+    } else {
+        rules.delete_ruleset(id)
+    };
+    removed.map_err(|e| refusal(&e))?;
+    drop_unused_catalog(rules);
+    Ok(json(200, &serde_json::json!({ "deleted": id, "rules_version": rules.rules().0 })))
 }
 
 pub(crate) fn query_version(query: Option<&str>) -> Result<Option<u64>, Reply> {
@@ -269,12 +352,12 @@ pub(crate) async fn handle(
         ("GET", ["rulesets"]) => return Some(list_rulesets(config, rules)),
         ("GET", ["rulesets", id]) => return Some(show_ruleset(config, rules, id)),
         ("POST", ["rulesets"]) => create_ruleset(rules, request_body, shutdown).await,
+        ("PUT", ["rulesets", id]) if rules.listed_builtins().iter().any(|n| n == id) => {
+            set_builtin_url(config, rules, id, request_body).await
+        }
         ("PUT", ["rulesets", id]) => update_ruleset(rules, id, request_body),
-        ("DELETE", ["rulesets", id]) => match rules.delete_ruleset(id) {
-            Ok(()) => Ok(json(200, &serde_json::json!({ "deleted": id }))),
-            Err(e) => Err(refusal(&e)),
-        },
-        ("POST", ["rulesets", id, "refresh"]) if rules.builtin_names().iter().any(|n| n == id) => {
+        ("DELETE", ["rulesets", id]) => delete_any_ruleset(rules, id, query).await,
+        ("POST", ["rulesets", id, "refresh"]) if rules.listed_builtins().iter().any(|n| n == id) => {
             refresh_builtin(config, id).await
         }
         ("POST", ["rulesets", id, "refresh"]) => refresh_ruleset(rules, id, shutdown).await,
@@ -400,6 +483,92 @@ async fn sync_catalog(rules: &AtomRules) -> Reply {
             json(200, &view)
         }
         Err(e) => error(502, e),
+    }
+}
+
+const UPDATE_AGE: i64 = 24 * 3600;
+const UPDATE_FIRST: Duration = Duration::from_secs(300);
+const UPDATE_CHECK: Duration = Duration::from_secs(3600);
+
+/// Starts the daily refresh of this configuration's remote and catalog
+/// rulesets and of the catalog index (atom step 6b): five minutes after it
+/// starts serving, then every hour, whatever is a day old is downloaded
+/// again. Each download holds the management lease, like an API write, so it
+/// never runs into a configuration publication; it stops when a newer
+/// configuration takes over (`AtomRules::stop_updates`).
+pub(crate) fn spawn_updates(rules: &std::rc::Rc<AtomRules>, api: &crate::local_url::LocalApi) {
+    if rules.root().as_os_str().is_empty() {
+        return;
+    }
+    let cancel = TransportCancellation::new();
+    rules.set_updates(cancel.clone());
+    let rules = std::rc::Rc::clone(rules);
+    let control = api.control.clone();
+    tokio::task::spawn_local(async move {
+        let mut wait = UPDATE_FIRST;
+        loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                () = tokio::time::sleep(wait) => {}
+            }
+            wait = UPDATE_CHECK;
+            update_round(&rules, &control, &cancel).await;
+        }
+    });
+}
+
+async fn update_round(
+    rules: &AtomRules,
+    control: &crate::runtime_snapshot::RuntimeControlWeak,
+    cancel: &TransportCancellation,
+) {
+    let now = crate::atom_rules::now();
+    let due: Vec<Ruleset> = rules
+        .rulesets()
+        .into_iter()
+        .filter(|set| !matches!(set.source, Source::Local) && now - set.updated_at >= UPDATE_AGE)
+        .collect();
+    let catalog_due = now - rules.catalog().updated_at >= UPDATE_AGE;
+    for set in due {
+        let Some(control) = control.upgrade() else {
+            return;
+        };
+        // A publication is running: this set waits for the next round.
+        let Ok(lease) = control.begin_management_mutation() else {
+            continue;
+        };
+        if cancel.is_cancelled() {
+            return;
+        }
+        let reply = download(rules, &set, cancel).await;
+        if reply.status == 200 {
+            let view = control.view();
+            if let Err(e) = flush_caches(&view.config, &view.cache).await {
+                crate::diag::error_line!("atom_rules: daily update of {}: flushing caches: {e}", set.id);
+            }
+            crate::atom_ledger::resync(&view.config, rules, "rulesets").await;
+        } else {
+            crate::diag::warn_line!(
+                "atom_rules: daily update of {} failed: {}",
+                set.id,
+                String::from_utf8_lossy(&reply.body).trim()
+            );
+        }
+        drop(lease);
+    }
+    if catalog_due && !cancel.is_cancelled() {
+        let Some(control) = control.upgrade() else {
+            return;
+        };
+        let Ok(lease) = control.begin_management_mutation() else {
+            return;
+        };
+        match crate::atom_catalog::sync(rules.root(), &rules.socks5, now).await {
+            Ok(catalog) => rules.set_catalog(catalog),
+            Err(e) => crate::diag::warn_line!("atom_rules: daily catalog sync failed: {e}"),
+        }
+        drop(lease);
     }
 }
 
@@ -658,9 +827,9 @@ fn ruleset_view(set: &Ruleset) -> serde_json::Value {
 
 fn list_rulesets(config: &CompiledConfig, rules: &AtomRules) -> Reply {
     let mut list: Vec<serde_json::Value> = rules
-        .builtin_names()
+        .listed_builtins()
         .iter()
-        .map(|name| builtin_view(config, name))
+        .map(|name| builtin_view(config, rules, name))
         .collect();
     list.extend(rules.rulesets().iter().map(ruleset_view));
     json(200, &serde_json::Value::Array(list))
@@ -668,8 +837,8 @@ fn list_rulesets(config: &CompiledConfig, rules: &AtomRules) -> Reply {
 
 fn show_ruleset(config: &CompiledConfig, rules: &AtomRules, id: &str) -> Reply {
     let Some(set) = rules.ruleset(id) else {
-        return if rules.builtin_names().iter().any(|name| name == id) {
-            json(200, &builtin_view(config, id))
+        return if rules.listed_builtins().iter().any(|name| name == id) {
+            json(200, &builtin_view(config, rules, id))
         } else {
             error(404, format!("规则集 `{id}` 不存在"))
         };

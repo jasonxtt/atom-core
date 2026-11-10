@@ -418,6 +418,7 @@ impl LocalPlugins {
         }
         if let Some(rules) = &self.atom_rules {
             rules.start();
+            crate::atom_rules_api::spawn_updates(rules, api);
         }
     }
 
@@ -443,6 +444,9 @@ impl LocalPlugins {
         for learner in &self.learners {
             learner.runtime.fence();
         }
+        if let Some(rules) = &self.atom_rules {
+            rules.stop_updates();
+        }
     }
 
     /// Stops every `domain_output` writer and saves once more.
@@ -455,6 +459,9 @@ impl LocalPlugins {
         }
         for learner in &self.learners {
             learner.runtime.close().await;
+        }
+        if let Some(rules) = &self.atom_rules {
+            rules.stop_updates();
         }
     }
 }
@@ -3697,7 +3704,9 @@ fn compile_atom_rules(
     let path = format!("{}.args", plugin.source_path);
     let args = expect_map(&plugin.args, &path, "atom_rules args must be a mapping")?;
     args.reject_unknown(
-        &["marks", "builtin", "mapper", "socks5", "singbox", "routes", "route_ecs"],
+        &[
+            "marks", "builtin", "ip_builtin", "mapper", "socks5", "singbox", "routes", "route_ecs",
+        ],
         &path,
     )?;
     let marks_path = format!("{path}.marks");
@@ -3794,6 +3803,22 @@ fn compile_atom_rules(
             &plugin.root_dir,
         )?),
     };
+    // `ip_builtin`: IP sets the rulesets page shows and maintains (atom step
+    // 6b: `geoip_cn`); rules do not name them.
+    let mut ip_builtin = Vec::new();
+    if let Some(value) = args.get("ip_builtin") {
+        let list_path = format!("{path}.ip_builtin");
+        for (index, item) in expect_sequence(value, &list_path)?.iter().enumerate() {
+            let name = expect_string(item, &format!("{list_path}[{index}]"))?;
+            if catalog.kind_of(&name).is_none() {
+                return Err(ConfigError::new(
+                    format!("{list_path}[{index}]"),
+                    format!("no plugin `{name}` in the configuration"),
+                ));
+            }
+            ip_builtin.push(name);
+        }
+    }
     let rules = AtomRules::load_with_routes(
         &plugin.root_dir,
         marks,
@@ -3804,6 +3829,7 @@ fn compile_atom_rules(
         routes,
         inputs,
     )
+    .inspect(|rules| rules.set_ip_builtin(ip_builtin))
         .map_err(|reason| ConfigError::new(&path, reason))?;
     Ok(Rc::new(rules))
 }
