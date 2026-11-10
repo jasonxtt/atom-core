@@ -89,13 +89,22 @@ pub(crate) struct Match {
     /// `client`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) client_invert: bool,
-    /// Target IP prefixes (matched by sing-box; a rule with them has no
-    /// other condition).
+    /// Target IP prefixes (matched by sing-box).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) ip_cidr: Vec<String>,
+    /// Rulesets whose IP part the rule uses (matched by sing-box, atom step
+    /// 6b): `ruleset` takes a set's names, `ip_ruleset` its IP prefixes, both
+    /// together the whole set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ip_ruleset: Vec<String>,
 }
 
 impl Match {
+    /// Conditions sing-box matches (target IP prefixes).
+    fn has_ip(&self) -> bool {
+        !(self.ip_cidr.is_empty() && self.ip_ruleset.is_empty())
+    }
+
     fn has_name(&self) -> bool {
         !(self.domain.is_empty()
             && self.suffix.is_empty()
@@ -215,6 +224,19 @@ pub(crate) struct Ruleset {
     /// the list is empty and there is no file.
     #[serde(default)]
     pub(crate) revision: u64,
+    /// The IP prefixes of the list (a download's IP-CIDR entries), in
+    /// `<id>-<revision>.ip.txt`; what `ip_ruleset` takes (atom step 6b).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) ip_count: usize,
+    /// The last download's entries no rule can use, by kind (IP-ASN,
+    /// PROCESS-NAME, ...).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) skipped: BTreeMap<String, u64>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// A builtin set the configuration offers to rules by name.
@@ -377,6 +399,8 @@ pub(crate) struct State {
     rules: Vec<Rule>,
     rulesets: Vec<Ruleset>,
     lists: BTreeMap<String, Rc<MixSet>>,
+    /// The IP prefixes of the rulesets that have some.
+    ip_lists: BTreeMap<String, Rc<Vec<String>>>,
 }
 
 /// The rule table of one compiled configuration.
@@ -509,6 +533,10 @@ fn read_list(path: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
+fn ip_path(root: &Path, id: &str, revision: u64) -> PathBuf {
+    root.join(RULESET_DIR).join(format!("{id}-{revision}.ip.txt"))
+}
+
 fn list_path(root: &Path, id: &str, revision: u64) -> PathBuf {
     root.join(RULESET_DIR).join(format!("{id}-{revision}.txt"))
 }
@@ -601,19 +629,39 @@ fn ip_entry(value: &str) -> Result<String, Refusal> {
 }
 
 /// The enabled `ip_cidr` rules of `rules`, in order: what sing-box matches.
-pub(crate) fn ip_rules(rules: &[Rule]) -> Vec<crate::atom_singbox::IpRule> {
-    rules
+/// The IP rules sing-box matches, in table order: every enabled rule with
+/// an IP part (its `ip_cidr` and the IP prefixes of its `ip_ruleset`).
+pub(crate) fn ip_rules(state: &State) -> Vec<crate::atom_singbox::IpRule> {
+    state
+        .rules
         .iter()
-        .filter(|rule| rule.enabled && !rule.matches.ip_cidr.is_empty())
-        .map(|rule| crate::atom_singbox::IpRule {
-            cidrs: rule
+        .filter(|rule| rule.enabled && rule.matches.has_ip())
+        .map(|rule| {
+            let mut cidrs: Vec<String> = Vec::new();
+            let from_sets = rule
+                .matches
+                .ip_ruleset
+                .iter()
+                .filter_map(|id| state.ip_lists.get(id))
+                .flat_map(|list| list.iter().cloned());
+            for cidr in rule
                 .matches
                 .ip_cidr
                 .iter()
                 .filter_map(|value| ip_entry(value).ok())
-                .collect(),
-            action: rule.action.clone(),
+                .chain(from_sets)
+            {
+                if !cidrs.contains(&cidr) {
+                    cidrs.push(cidr);
+                }
+            }
+            crate::atom_singbox::IpRule {
+                cidrs,
+                action: rule.action.clone(),
+            }
         })
+        // A rule whose sets have no prefix (yet) adds no sing-box rule.
+        .filter(|rule| !rule.cidrs.is_empty())
         .collect()
 }
 
@@ -686,6 +734,7 @@ impl AtomRules {
         };
         let mut rulesets = Vec::new();
         let mut lists = BTreeMap::new();
+        let mut ip_lists = BTreeMap::new();
         if !root.as_os_str().is_empty() {
             let path = root.join(RULESETS_FILE);
             if let Some(bytes) = read(&path)? {
@@ -721,6 +770,10 @@ impl AtomRules {
                         .map_err(|error| format!("{}: {error}", file.display()))?
                 };
                 lists.insert(set.id.clone(), Rc::new(list));
+                if set.ip_count > 0 {
+                    let file = ip_path(root, &set.id, set.revision);
+                    ip_lists.insert(set.id.clone(), Rc::new(read_list(&file)?));
+                }
             }
         }
         let rules_owner = Self {
@@ -734,6 +787,7 @@ impl AtomRules {
                 rules,
                 rulesets,
                 lists,
+                ip_lists,
             }),
             table: Live::new(Table::default()),
             downloads: RefCell::new(BTreeMap::new()),
@@ -828,15 +882,18 @@ impl AtomRules {
                 "client_invert 只能和 client 条件一起用",
             )));
         }
-        if !m.ip_cidr.is_empty() {
+        // The IP part (`ip_cidr`, `ip_ruleset`) is matched by sing-box; beside
+        // name conditions it is the same rule (atom step 6b): the names here,
+        // the prefixes there, one action.
+        if m.has_ip() {
             if self.proxy.is_none() {
                 return Err(at(Refusal::invalid(
-                    "ip_cidr 条件由 sing-box 匹配，需要配置里的 singbox 段",
+                    "ip_cidr、ip_ruleset 条件由 sing-box 匹配，需要配置里的 singbox 段",
                 )));
             }
-            if m.has_name() || !m.client.is_empty() {
+            if !m.client.is_empty() {
                 return Err(at(Refusal::invalid(
-                    "ip_cidr 规则只能单独使用，不能再带域名或 client 条件",
+                    "带 client 条件的规则不能有 IP 部分（ip_cidr、ip_ruleset）：客户端名单在 AtomDNS，sing-box 判断不了",
                 )));
             }
             if m.ip_cidr.len() > MAX_LIST_RULES {
@@ -847,10 +904,19 @@ impl AtomRules {
             for value in &m.ip_cidr {
                 ip_entry(value).map_err(at)?;
             }
+            for id in &m.ip_ruleset {
+                if !state.rulesets.iter().any(|set| &set.id == id) {
+                    return Err(at(Refusal::invalid(format!(
+                        "ip_ruleset 的规则集 `{id}` 不存在"
+                    ))));
+                }
+            }
             if let Action::Proxy { group_id } = &rule.action {
                 validate_group(group_id, proxy).map_err(at)?;
             }
-            return Ok(None);
+            if !m.has_name() {
+                return Ok(None);
+            }
         }
         if !m.has_name() && m.client.is_empty() {
             return Err(at(Refusal::invalid("规则至少要有一个匹配条件")));
@@ -953,7 +1019,10 @@ impl AtomRules {
         if self.busy.get() {
             return Err(singbox::busy());
         }
-        if self.proxy.is_some() && ip_rules(&next.rules) != ip_rules(&self.state.borrow().rules) {
+        // A rule change of the IP rules applies sing-box first
+        // (`commit_rules`). A ruleset change (a download, an edit) is saved
+        // here and sing-box follows it ([`Self::follow_ip_rules`]).
+        if rules && self.proxy.is_some() && ip_rules(&next) != ip_rules(&self.state.borrow()) {
             return Err(Refusal::new(
                 500,
                 "内部错误：改动 IP 规则需要先应用 sing-box 配置",
@@ -1248,6 +1317,7 @@ impl AtomRules {
     fn remove_list(&self, id: &str, revision: u64) {
         if !self.root.as_os_str().is_empty() && revision != 0 {
             let _ = std::fs::remove_file(list_path(&self.root, id, revision));
+            let _ = std::fs::remove_file(ip_path(&self.root, id, revision));
         }
     }
 
@@ -1264,15 +1334,22 @@ impl AtomRules {
         old: u64,
         new: u64,
         entries: &[String],
+        ips: &[String],
     ) -> Result<(), Refusal> {
         if !self.root.as_os_str().is_empty() {
-            let mut text = entries.join("\n");
-            text.push('\n');
-            crate::runtime_snapshot::write_durably(
-                &list_path(&self.root, id, new),
-                text.as_bytes(),
-            )
-            .map_err(|error| Refusal::new(500, format!("保存失败: {error}")))?;
+            let write = |path: PathBuf, lines: &[String]| {
+                let mut text = lines.join("\n");
+                text.push('\n');
+                crate::runtime_snapshot::write_durably(&path, text.as_bytes())
+                    .map_err(|error| Refusal::new(500, format!("保存失败: {error}")))
+            };
+            write(list_path(&self.root, id, new), entries)?;
+            if !ips.is_empty() {
+                if let Err(refusal) = write(ip_path(&self.root, id, new), ips) {
+                    self.remove_list(id, new);
+                    return Err(refusal);
+                }
+            }
         }
         if let Err(refusal) = self.commit(next, false, true) {
             self.remove_list(id, new);
@@ -1335,11 +1412,13 @@ impl AtomRules {
             updated_at: if entries.is_empty() { 0 } else { now() },
             last_error: String::new(),
             revision: u64::from(local),
+            ip_count: 0,
+            skipped: BTreeMap::new(),
         };
         next.rulesets.push(set.clone());
         next.lists.insert(id.clone(), Rc::new(list));
         if local {
-            self.commit_list(next, &id, 0, 1, &entries)?;
+            self.commit_list(next, &id, 0, 1, &entries, &[])?;
         } else {
             self.commit(next, false, true)?;
         }
@@ -1387,7 +1466,7 @@ impl AtomRules {
             set.updated_at = now();
             next.lists.insert(id.to_owned(), Rc::new(list));
             next.rulesets[at] = set.clone();
-            self.commit_list(next, id, old, set.revision, &entries)?;
+            self.commit_list(next, id, old, set.revision, &entries, &[])?;
             return Ok(set);
         }
         next.rulesets[at] = set.clone();
@@ -1406,7 +1485,10 @@ impl AtomRules {
         let users: Vec<String> = next
             .rules
             .iter()
-            .filter(|rule| rule.matches.ruleset.iter().any(|name| name == id))
+            .filter(|rule| {
+                let m = &rule.matches;
+                m.ruleset.iter().chain(&m.ip_ruleset).any(|name| name == id)
+            })
             .map(|rule| rule.id.clone())
             .collect();
         if !users.is_empty() {
@@ -1417,6 +1499,7 @@ impl AtomRules {
         }
         let revision = next.rulesets.remove(at).revision;
         next.lists.remove(id);
+        next.ip_lists.remove(id);
         self.commit(next, false, true)?;
         self.downloads.borrow_mut().remove(id);
         self.remove_list(id, revision);
@@ -1443,7 +1526,7 @@ impl AtomRules {
         id: &str,
         source: &Source,
         ticket: u64,
-        result: Result<(Vec<String>, MixSet), String>,
+        result: Result<Converted, String>,
     ) -> Result<Ruleset, Refusal> {
         if self.downloads.borrow().get(id) != Some(&ticket) {
             return Err(Refusal::new(
@@ -1465,15 +1548,30 @@ impl AtomRules {
             ));
         }
         match result {
-            Ok((entries, list)) => {
+            Ok(converted) => {
                 let old = set.revision;
                 set.revision = old + 1;
-                set.rule_count = entries.len();
+                set.rule_count = converted.entries.len();
+                set.ip_count = converted.ips.len();
+                set.skipped = converted.skipped;
                 set.updated_at = now();
                 set.last_error.clear();
-                next.lists.insert(id.to_owned(), Rc::new(list));
+                next.lists.insert(id.to_owned(), Rc::new(converted.list));
+                if converted.ips.is_empty() {
+                    next.ip_lists.remove(id);
+                } else {
+                    next.ip_lists
+                        .insert(id.to_owned(), Rc::new(converted.ips.clone()));
+                }
                 next.rulesets[at] = set.clone();
-                self.commit_list(next, id, old, set.revision, &entries)?;
+                self.commit_list(
+                    next,
+                    id,
+                    old,
+                    set.revision,
+                    &converted.entries,
+                    &converted.ips,
+                )?;
             }
             Err(error) => {
                 set.last_error = error;
@@ -1485,24 +1583,45 @@ impl AtomRules {
     }
 }
 
-/// Converts a downloaded list to local list entries (blocking work).
+/// A downloaded list as rules use it: its names (local list entries and
+/// their matcher), its IP prefixes (canonical `address/bits`), and what no
+/// rule can use, by kind.
+pub(crate) struct Converted {
+    pub(crate) entries: Vec<String>,
+    pub(crate) list: MixSet,
+    pub(crate) ips: Vec<String>,
+    pub(crate) skipped: BTreeMap<String, u64>,
+}
+
+/// Converts a downloaded list (blocking work): names and IP prefixes; an
+/// SRS file gives either (a geosite or a geoip set).
 pub(crate) fn convert_download(
     bytes: &[u8],
     format: &str,
     category: &str,
     url: &str,
-) -> Result<(Vec<String>, MixSet), String> {
+) -> Result<Converted, String> {
     use crate::rule_formats::Format;
     let format =
         crate::rule_formats::resolve(Format::parse(format).unwrap_or(Format::Auto), bytes, url);
-    let entries = match format {
+    let mut skipped = BTreeMap::new();
+    let (entries, prefixes) = match format {
         Format::Srs => {
-            atomdns_matcher_core::decode_domain_srs(bytes, true)
-                .map_err(|error| format!("无效的 SRS 数据: {error}"))?
-                .rules
+            let names = atomdns_matcher_core::decode_domain_srs(bytes, true)
+                .map(|srs| srs.rules)
+                .unwrap_or_default();
+            let ips = atomdns_matcher_core::decode_ip_srs(bytes)
+                .map(|srs| srs.prefixes)
+                .unwrap_or_default();
+            if names.is_empty() && ips.is_empty() {
+                // The decoder's error says what is wrong with the file.
+                atomdns_matcher_core::decode_domain_srs(bytes, true)
+                    .map_err(|error| format!("无效的 SRS 数据: {error}"))?;
+            }
+            (names, ips)
         }
         Format::Dat | Format::Mrs => {
-            crate::rule_binary::parse(
+            let names = crate::rule_binary::parse(
                 bytes,
                 format == Format::Dat,
                 category,
@@ -1510,19 +1629,38 @@ pub(crate) fn convert_download(
                 true,
             )
             .map_err(|error| format!("无效的 {} 数据: {error}", format.as_str()))?
-            .domains
+            .domains;
+            (names, Vec::new())
         }
         _ => {
-            crate::rule_formats::parse(bytes, format, true)
-                .map_err(|error| format!("无效的 {} 数据: {error}", format.as_str()))?
-                .domains
+            let parsed = crate::rule_formats::parse(bytes, format, true)
+                .map_err(|error| format!("无效的 {} 数据: {error}", format.as_str()))?;
+            skipped = parsed.skipped.counts();
+            (parsed.domains, parsed.ips)
         }
     };
-    if entries.is_empty() {
-        return Err("下载内容里没有可用的域名规则".to_owned());
+    let mut ips: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (address, bits) in prefixes {
+        if let Ok(canonical) = ip_entry(&format!("{address}/{bits}")) {
+            if seen.insert(canonical.clone()) {
+                ips.push(canonical);
+            }
+        }
+    }
+    if entries.is_empty() && ips.is_empty() {
+        return Err("下载内容里没有可用的域名或 IP 规则".to_owned());
+    }
+    if ips.len() > MAX_LIST_RULES {
+        return Err(format!("IP 条目超过 {MAX_LIST_RULES}"));
     }
     let list = build_list(&entries)?;
-    Ok((entries, list))
+    Ok(Converted {
+        entries,
+        list,
+        ips,
+        skipped,
+    })
 }
 
 struct RulesExecutor {

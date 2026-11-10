@@ -2187,9 +2187,11 @@ components:
         Conditions of one kind are or-ed; different kinds are and-ed. `domain`,
         `suffix`, `keyword`, `regex` and `ruleset` are one kind (names);
         `client` is the second (`client_invert` turns it into "not in the
-        list"). A rule needs one condition. `ip_cidr` stands alone (no other
-        condition) and is matched by sing-box. A rule with `client` cannot
-        proxy (400).
+        list"). A rule needs one condition. The IP part (`ip_cidr`,
+        `ip_ruleset`) is matched by sing-box with the same action; beside name
+        conditions the rule matches either (the names in DNS, the prefixes in
+        sing-box). A rule with `client` cannot proxy and cannot have an IP
+        part (400).
       properties:
         domain:
           type: array
@@ -2226,6 +2228,13 @@ components:
             ledger) meets no client condition, inverted or not.
         ip_cidr:
           type: array
+          items:
+            type: string
+        ip_ruleset:
+          type: array
+          description: |
+            Rulesets whose IP prefixes the rule takes (`ruleset` takes their
+            names; both: the whole set). A set without prefixes adds nothing.
           items:
             type: string
     Action:
@@ -2411,6 +2420,14 @@ components:
           type: string
         revision:
           type: integer
+        ip_count:
+          type: integer
+          description: IP prefixes of the list (what `ip_ruleset` takes); left out when 0.
+        skipped:
+          type: object
+          description: The last download's entries no rule can use, by kind (`IP-ASN`, `PROCESS-NAME`, ...); left out when none.
+          additionalProperties:
+            type: integer
     RulesetWithRules:
       allOf:
         - $ref: "#/components/schemas/Ruleset"
@@ -2704,7 +2721,7 @@ components:
           type: integer
         trigger:
           type: string
-          enum: [nodes, groups, final, settings, rules, apply, startup]
+          enum: [nodes, groups, final, settings, rules, rulesets, apply, startup]
         ok:
           type: boolean
         changed:

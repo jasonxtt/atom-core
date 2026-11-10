@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{AtomRules, Refusal, Rule, State, ip_rules, now};
+use super::{AtomRules, Refusal, State, ip_rules, now};
 use crate::atom_proxy::{self, FINAL, ProxyState};
 use crate::atom_singbox::{self as sb, ApplyError, ApplyGuard, Host, NftSets};
 
@@ -264,7 +264,7 @@ impl AtomRules {
         &self,
         host: &Host,
         state: &ProxyState,
-        rules: &[Rule],
+        rules: &State,
         secret: &str,
     ) -> Result<Vec<u8>, Refusal> {
         sb::generate(
@@ -292,7 +292,7 @@ impl AtomRules {
             .unwrap_or_else(|| {
                 NftSets::of(
                     &proxy.state.borrow().settings.fakeip_range,
-                    &ip_rules(&self.state.borrow().rules),
+                    &ip_rules(&self.state.borrow()),
                 )
             });
         Some((proxy.host.clone(), sets))
@@ -338,7 +338,7 @@ impl AtomRules {
         let live = sb::read_live(&proxy.host)?;
         let secret = sb::secret_of(&live)?;
         let state = proxy.state.borrow().clone();
-        let rules = self.state.borrow().rules.clone();
+        let rules = self.state.borrow().clone();
         Some(
             self.generate(&proxy.host, &state, &rules, &secret)
                 .is_ok_and(|bytes| bytes == live),
@@ -394,9 +394,30 @@ impl AtomRules {
         Ok(next)
     }
 
+    /// The IP rules of the current state (`GET status`, and the before
+    /// side of [`Self::follow_ip_rules`]).
+    pub(crate) fn current_ip_rules(&self) -> Vec<crate::atom_singbox::IpRule> {
+        ip_rules(&self.state.borrow())
+    }
+
+    /// After a ruleset change (a download, an edit) is saved: when the IP
+    /// rules differ from `before`, sing-box is applied again (trigger
+    /// `rulesets`) so it matches the prefixes the rules now take. A failure
+    /// keeps the saved change; sing-box keeps the old prefixes (`in_sync`
+    /// false) until the next application.
+    pub(crate) async fn follow_ip_rules(
+        &self,
+        before: &[crate::atom_singbox::IpRule],
+    ) -> Result<(), Refusal> {
+        if self.proxy.is_none() || ip_rules(&self.state.borrow()) == before {
+            return Ok(());
+        }
+        self.transact(None, None, "rulesets").await
+    }
+
     /// Commits a rules change: through sing-box when its IP rules differ.
     pub(crate) async fn commit_rules(&self, next: State) -> Result<(), Refusal> {
-        if self.proxy.is_none() || ip_rules(&next.rules) == ip_rules(&self.state.borrow().rules) {
+        if self.proxy.is_none() || ip_rules(&next) == ip_rules(&self.state.borrow()) {
             return self.commit(next, true, false);
         }
         self.transact(Some(next), None, "rules").await
@@ -427,7 +448,7 @@ impl AtomRules {
             Some(secret) => {
                 live.as_deref()
                     == Some(
-                        self.generate(&host, &next_proxy, &next_rules.rules, &secret)?
+                        self.generate(&host, &next_proxy, &next_rules, &secret)?
                             .as_slice(),
                     )
             }
@@ -438,7 +459,7 @@ impl AtomRules {
         let exclusive = if applied {
             let exclusive = self.exclusive()?;
             let secret = sb::new_secret();
-            let bytes = self.generate(&host, &next_proxy, &next_rules.rules, &secret)?;
+            let bytes = self.generate(&host, &next_proxy, &next_rules, &secret)?;
             let result = run_apply(
                 Arc::clone(&exclusive.guard),
                 host.clone(),
@@ -622,7 +643,7 @@ impl AtomRules {
                 .ok_or_else(|| Refusal::new(409, "sing-box 还没有应用过配置"))?;
             let secret = sb::secret_of(&live)
                 .ok_or_else(|| Refusal::new(409, "sing-box 配置里没有 Clash API 密钥"))?;
-            let rules = self.state.borrow().rules.clone();
+            let rules = self.state.borrow().clone();
             let current = owner.state.borrow().clone();
             let in_step = self.generate(&host, &current, &rules, &secret)? == live;
             let file = if in_step {
@@ -743,7 +764,7 @@ impl AtomRules {
         let exclusive = self.exclusive()?;
         let secret = sb::new_secret();
         let state = owner.state.borrow().clone();
-        let rules = self.state.borrow().rules.clone();
+        let rules = self.state.borrow().clone();
         let bytes = self.generate(&owner.host, &state, &rules, &secret)?;
         let chosen = (selections(&state), selections(&state));
         let result = run_apply(
@@ -791,7 +812,7 @@ impl AtomRules {
         }
         let secret = sb::new_secret();
         let state = owner.state.borrow().clone();
-        let rules = self.state.borrow().rules.clone();
+        let rules = self.state.borrow().clone();
         let bytes = match self.generate(&owner.host, &state, &rules, &secret) {
             Ok(bytes) => bytes,
             Err(refusal) => {

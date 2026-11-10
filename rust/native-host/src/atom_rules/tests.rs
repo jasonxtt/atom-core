@@ -468,7 +468,7 @@ fn remote_downloads_are_converted_and_failures_recorded() {
     assert_eq!(hit(&rules, "api.openai.com"), Some(proxy("g-ai")));
     assert!(convert_download(b"\n# nothing\n", "text", "", "x.txt").is_err());
     let text = convert_download(b"a.com\nfull:b.com\n", "text", "", "x.txt").unwrap();
-    assert_eq!(text.0.len(), 2);
+    assert_eq!(text.entries.len(), 2);
     let _ = std::fs::remove_dir_all(&root);
 }
 

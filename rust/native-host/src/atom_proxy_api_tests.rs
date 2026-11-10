@@ -184,15 +184,17 @@ fn import_groups_rules_and_ip_rules_reach_sing_box() {
         "a DNS-only rule does not touch sing-box"
     );
 
-    // An IP rule becomes a sing-box route rule; mixing it with names is 400.
+    // An IP rule becomes a sing-box route rule; with a client condition it
+    // is 400 (the client list is AtomDNS's; names beside it are fine since
+    // step 6b).
     let (status, refused) = api.call(
         "POST",
         "/api/v1/atom/rules",
-        r#"{"match": {"ip_cidr": ["91.108.4.0/22"], "suffix": ["t.me"]}, "action": {"type": "direct"}}"#,
+        r#"{"match": {"ip_cidr": ["91.108.4.0/22"], "client": ["192.168.1.0/24"]}, "action": {"type": "direct"}}"#,
     );
     assert_eq!(status, 400);
     assert!(
-        refused["error"].as_str().unwrap().contains("单独"),
+        refused["error"].as_str().unwrap().contains("client"),
         "{refused}"
     );
     let (status, rule) = api.call(
@@ -1128,4 +1130,74 @@ fn the_openapi_document_matches_the_routes() {
     // The audit root itself is no audit route: the atom API's JSON 404.
     let (status, value) = api.call("GET", "/api/v1/atom/audit", "");
     assert_eq!((status, value["error"].is_string()), (404, true));
+}
+
+/// A rule takes a ruleset's names (`ruleset`) and its IP prefixes
+/// (`ip_ruleset`) in one rule (atom step 6b). A download that brings new
+/// prefixes is saved and sing-box follows it (trigger `rulesets`); a set
+/// that `ip_ruleset` names cannot be deleted.
+#[test]
+fn a_ruleset_ip_part_reaches_sing_box_when_downloaded() {
+    let api = Api::new("ip-ruleset");
+    let (status, created) = api.call(
+        "POST",
+        "/api/v1/atom/rulesets",
+        r#"{"name": "Telegram", "type": "remote", "url": "http://127.0.0.1:9/Telegram.list"}"#,
+    );
+    assert_eq!(status, 502, "created, first download failed: {created}");
+    let id = created["id"].as_str().unwrap().to_owned();
+    let (status, rule) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        &format!(r#"{{"match": {{"ruleset": ["{id}"], "ip_ruleset": ["{id}"]}}, "action": {{"type": "proxy", "group_id": "final"}}}}"#),
+    );
+    assert_eq!(status, 201, "{rule}");
+    let reloads = api.fake.reload_count();
+
+    let rules = api.assembly.config().local.atom_rules.clone().unwrap();
+    let before = rules.current_ip_rules();
+    let set = rules.ruleset(&id).unwrap();
+    let converted = crate::atom_rules::convert_download(
+        b"DOMAIN-SUFFIX,t.me\nIP-CIDR,91.108.4.1/22,no-resolve\nIP-CIDR6,2001:b28:f23d::/48\nIP-ASN,62041\nPROCESS-NAME,Telegram\n",
+        "auto",
+        "",
+        "Telegram.list",
+    );
+    let stored = rules
+        .store_download(&id, &set.source, rules.begin_download(&id), converted)
+        .unwrap();
+    assert_eq!((stored.rule_count, stored.ip_count), (1, 2));
+    assert_eq!(stored.skipped.values().sum::<u64>(), 2, "{:?}", stored.skipped);
+    api.assembly
+        .block_on(rules.follow_ip_rules(&before))
+        .unwrap();
+    assert_eq!(api.fake.reload_count(), reloads + 1, "sing-box followed the prefixes");
+    let routes = api.live()["route"]["rules"].clone();
+    assert!(
+        routes.as_array().unwrap().iter().any(|rule| rule
+            == &serde_json::json!({"ip_cidr": ["91.108.4.0/22", "2001:b28:f23d::/48"], "action": "route", "outbound": "final"})),
+        "{routes}"
+    );
+    let (_, apply) = api.call("GET", "/api/v1/atom/apply", "");
+    assert_eq!(apply["last_apply"]["trigger"], "rulesets", "{apply}");
+    // The same prefixes again: nothing to apply.
+    api.assembly
+        .block_on(rules.follow_ip_rules(&rules.current_ip_rules()))
+        .unwrap();
+    assert_eq!(api.fake.reload_count(), reloads + 1);
+
+    let (status, refused) = api.call("DELETE", &format!("/api/v1/atom/rulesets/{id}"), "");
+    assert_eq!(status, 409, "{refused}");
+    let (status, refused) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        &format!(r#"{{"match": {{"ip_ruleset": ["{id}"], "client": ["192.168.1.2"]}}, "action": {{"type": "direct"}}}}"#),
+    );
+    assert_eq!(status, 400, "{refused}");
+    let (status, refused) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"ip_ruleset": ["rs-nope"]}, "action": {"type": "direct"}}"#,
+    );
+    assert_eq!(status, 400, "{refused}");
 }

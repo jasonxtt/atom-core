@@ -158,6 +158,14 @@ impl Skipped {
         self.0.values().sum()
     }
 
+    /// The counts by reason (atom: kept with a downloaded ruleset).
+    pub(crate) fn counts(&self) -> std::collections::BTreeMap<String, u64> {
+        self.0
+            .iter()
+            .map(|(reason, count)| ((*reason).to_owned(), *count))
+            .collect()
+    }
+
     /// `reason=count, …` for the download log.
     pub(crate) fn summary(&self) -> String {
         let parts: Vec<String> = self

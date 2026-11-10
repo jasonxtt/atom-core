@@ -593,7 +593,22 @@ async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancella
         Err(e) => Err(format!("下载失败: {e}")),
     };
     let failed = converted.as_ref().err().cloned();
+    let before = rules.current_ip_rules();
     match rules.store_download(&set.id, &set.source, ticket, converted) {
+        // New IP prefixes of a set a rule's `ip_ruleset` takes: sing-box
+        // follows (atom step 6b). The download is saved either way.
+        Ok(set) if failed.is_none() => match rules.follow_ip_rules(&before).await {
+            Ok(()) => json(200, &ruleset_view(&set)),
+            Err(e) => {
+                let mut value = ruleset_view(&set);
+                value["error"] = format!(
+                    "规则集已更新，但 sing-box 没能换上新的 IP 网段（仍用旧的，下次应用时补上）: {}",
+                    e.message
+                )
+                .into();
+                json(502, &value)
+            }
+        },
         // The set is kept with `last_error`; the caller sees the failure.
         Ok(set) => match failed {
             None => json(200, &ruleset_view(&set)),
