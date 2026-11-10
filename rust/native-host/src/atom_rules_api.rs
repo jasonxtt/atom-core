@@ -541,14 +541,15 @@ async fn update_round(
         if cancel.is_cancelled() {
             return;
         }
-        let reply = download(rules, &set, cancel).await;
-        if reply.status == 200 {
+        let (reply, installed) = download(rules, &set, cancel).await;
+        if installed {
             let view = control.view();
             if let Err(e) = flush_caches(&view.config, &view.cache).await {
                 crate::diag::error_line!("atom_rules: daily update of {}: flushing caches: {e}", set.id);
             }
             crate::atom_ledger::resync(&view.config, rules, "rulesets").await;
-        } else {
+        }
+        if reply.status != 200 {
             crate::diag::warn_line!(
                 "atom_rules: daily update of {} failed: {}",
                 set.id,
@@ -637,7 +638,13 @@ async fn create_rule(
     shutdown: &TransportCancellation,
 ) -> Result<Reply, Reply> {
     let create: Create = body(bytes)?;
-    ensure_catalog(rules, &create.rule.matches, shutdown).await?;
+    let pins = match ensure_catalog(rules, &create.rule.matches, shutdown).await {
+        Ok(pins) => pins,
+        Err(reply) => {
+            drop_unused_catalog(rules);
+            return Err(reply);
+        }
+    };
     let planned = rules
         .plan_create(
             create.rule.into(),
@@ -655,6 +662,7 @@ async fn create_rule(
         Err(reply) => Err(reply),
     };
     // A refused rule leaves no catalog set it created behind.
+    drop(pins);
     drop_unused_catalog(rules);
     let (version, rule) = committed?;
     Ok(json(
@@ -663,32 +671,56 @@ async fn create_rule(
     ))
 }
 
-/// The catalog entries `matches` names that have no ruleset yet are created
-/// and downloaded first; a failed download removes the set again and the
-/// rule is not saved (502).
-async fn ensure_catalog(
-    rules: &AtomRules,
+/// The catalog sets a request names, pinned (not removed as unused) until
+/// it ends.
+struct CatalogPins<'a> {
+    rules: &'a AtomRules,
+    ids: Vec<String>,
+}
+
+impl Drop for CatalogPins<'_> {
+    fn drop(&mut self) {
+        self.rules.unpin_catalog(&self.ids);
+    }
+}
+
+/// Every catalog entry `matches` names gets a set whose first download
+/// succeeded before the rule is saved: one initialization per ID at a time
+/// (a second request waits for the first and uses its result), and the sets
+/// stay pinned until the caller drops the result. A failed download fails
+/// the request (502); the caller then removes what no rule names.
+async fn ensure_catalog<'a>(
+    rules: &'a AtomRules,
     matches: &crate::atom_rules::Match,
     shutdown: &TransportCancellation,
-) -> Result<(), Reply> {
-    let missing: Vec<String> = matches
+) -> Result<CatalogPins<'a>, Reply> {
+    let ids: Vec<String> = matches
         .ruleset
         .iter()
         .chain(&matches.ip_ruleset)
-        .filter(|id| crate::atom_catalog::is_catalog_id(id) && rules.ruleset(id).is_none())
+        .filter(|id| crate::atom_catalog::is_catalog_id(id))
         .cloned()
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    for id in missing {
-        let set = rules.create_catalog_ruleset(&id).map_err(|e| refusal(&e))?;
-        let reply = download(rules, &set, shutdown).await;
-        if reply.status != 200 {
-            let _ = rules.delete_ruleset(&id);
+    rules.pin_catalog(&ids);
+    let pins = CatalogPins { rules, ids };
+    for id in &pins.ids {
+        let lock = rules.catalog_lock(id);
+        let _initializing = lock.lock().await;
+        if rules.ruleset(id).is_some_and(|set| set.revision > 0) {
+            continue;
+        }
+        let set = match rules.ruleset(id) {
+            Some(set) => set,
+            None => rules.create_catalog_ruleset(id).map_err(|e| refusal(&e))?,
+        };
+        let (reply, installed) = download(rules, &set, shutdown).await;
+        if !installed {
             return Err(reply);
         }
     }
-    Ok(())
+    Ok(pins)
 }
 
 /// After a rule change: the catalog rulesets no rule names any more go.
@@ -707,7 +739,13 @@ async fn update_rule(
     shutdown: &TransportCancellation,
 ) -> Result<Reply, Reply> {
     let replace: Replace = body(bytes)?;
-    ensure_catalog(rules, &replace.rule.matches, shutdown).await?;
+    let pins = match ensure_catalog(rules, &replace.rule.matches, shutdown).await {
+        Ok(pins) => pins,
+        Err(reply) => {
+            drop_unused_catalog(rules);
+            return Err(reply);
+        }
+    };
     let planned = rules
         .plan_update(id, replace.rule.into(), replace.version)
         .map_err(|e| refusal(&e));
@@ -719,6 +757,7 @@ async fn update_rule(
             .map_err(|e| refusal(&e)),
         Err(reply) => Err(reply),
     };
+    drop(pins);
     drop_unused_catalog(rules);
     let (version, rule) = committed?;
     Ok(json(
@@ -955,7 +994,14 @@ async fn fetch_catalog(
     merged.ok_or_else(|| format!("规则源 `{id}` 没有文件"))
 }
 
-async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancellation) -> Reply {
+/// Downloads a remote or catalog set again. `.1`: a new list was saved (and
+/// so the caches and the ledger must follow), even when sing-box then failed
+/// to take its IP prefixes (the reply is 502 then).
+async fn download(
+    rules: &AtomRules,
+    set: &Ruleset,
+    shutdown: &TransportCancellation,
+) -> (Reply, bool) {
     let ticket;
     let converted = match set.source.clone() {
         Source::Remote {
@@ -970,7 +1016,7 @@ async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancella
             ticket = rules.begin_download(&set.id);
             fetch_catalog(rules, &set.id, shutdown).await
         }
-        Source::Local => return error(400, "本地规则集不需要刷新"),
+        Source::Local => return (error(400, "本地规则集不需要刷新"), false),
     };
     let failed = converted.as_ref().err().cloned();
     let before = rules.current_ip_rules();
@@ -978,7 +1024,7 @@ async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancella
         // New IP prefixes of a set a rule's `ip_ruleset` takes: sing-box
         // follows (atom step 6b). The download is saved either way.
         Ok(set) if failed.is_none() => match rules.follow_ip_rules(&before).await {
-            Ok(()) => json(200, &ruleset_view(&set)),
+            Ok(()) => (json(200, &ruleset_view(&set)), true),
             Err(e) => {
                 let mut value = ruleset_view(&set);
                 value["error"] = format!(
@@ -986,19 +1032,16 @@ async fn download(rules: &AtomRules, set: &Ruleset, shutdown: &TransportCancella
                     e.message
                 )
                 .into();
-                json(502, &value)
+                (json(502, &value), true)
             }
         },
         // The set is kept with `last_error`; the caller sees the failure.
-        Ok(set) => match failed {
-            None => json(200, &ruleset_view(&set)),
-            Some(message) => {
-                let mut value = ruleset_view(&set);
-                value["error"] = message.into();
-                json(502, &value)
-            }
-        },
-        Err(e) => refusal(&e),
+        Ok(set) => {
+            let mut value = ruleset_view(&set);
+            value["error"] = failed.unwrap_or_default().into();
+            (json(502, &value), false)
+        }
+        Err(e) => (refusal(&e), false),
     }
 }
 
@@ -1024,7 +1067,7 @@ async fn create_ruleset(
     }
     // A remote set is created even when its first download fails; the
     // reply then carries the reason (`error`, status 502) and `last_error`.
-    let reply = download(rules, &set, shutdown).await;
+    let (reply, _) = download(rules, &set, shutdown).await;
     Ok(if reply.status == 200 {
         Reply {
             status: 201,
@@ -1051,11 +1094,11 @@ async fn refresh_ruleset(
     let Some(set) = rules.ruleset(id) else {
         return Err(error(404, format!("规则集 `{id}` 不存在")));
     };
-    let reply = download(rules, &set, shutdown).await;
-    if reply.status == 200 {
-        Ok(reply)
-    } else {
-        Err(reply)
+    // A saved list goes the success way (caches, ledger) whatever sing-box
+    // said; the reply keeps its status.
+    match download(rules, &set, shutdown).await {
+        (reply, true) => Ok(reply),
+        (reply, false) => Err(reply),
     }
 }
 

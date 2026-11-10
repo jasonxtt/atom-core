@@ -376,6 +376,40 @@ pub fn decode_ip_srs(bytes: &[u8]) -> Result<IpSrs, SrsError> {
     Ok(out)
 }
 
+/// The names and the IP prefixes of an SRS file, read in one pass.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MixedSrs {
+    pub rules: Vec<String>,
+    pub prefixes: Vec<(IpAddr, u8)>,
+    /// `false` when decoding stopped before the declared rules were read.
+    pub complete: bool,
+}
+
+/// Reads every name item (domain, keyword, regex) and IP-CIDR item of an SRS
+/// file in one pass. The single-kind decoders stop a rule at an item of the
+/// other kind without reading it, which can misread the rules after it; a
+/// rule set that carries both (a catalog list) needs this one.
+pub fn decode_srs(bytes: &[u8], enable_regexp: bool) -> Result<MixedSrs, SrsError> {
+    let (mut body, count) = open(bytes)?;
+    let mut out = MixedSrs::default();
+    for _ in 0..count {
+        let (rules, prefixes) = (&mut out.rules, &mut out.prefixes);
+        if read_rule(&mut body, &mut |item, body| {
+            if item == ITEM_IPCIDR {
+                ip_item(item, body, prefixes)
+            } else {
+                domain_item(item, body, enable_regexp, rules)
+            }
+        })
+        .is_err()
+        {
+            return Ok(out);
+        }
+    }
+    out.complete = true;
+    Ok(out)
+}
+
 /// What an item reader tells the rule loop.
 enum Next {
     Continue,
@@ -922,6 +956,19 @@ mod tests {
     }
 
     /// An SRS holding one rule made of `item` bytes.
+    #[test]
+    fn a_mixed_file_gives_names_and_prefixes() {
+        // 2 rules: keyword ["ad", "bb"]; IP-CIDR 10.0.0.0 - 10.0.0.255.
+        let mut body = vec![2, 0, ITEM_KEYWORD, 2, 2, b'a', b'd', 2, b'b', b'b', ITEM_FINAL];
+        body.extend([0, ITEM_IPCIDR, 1]);
+        body.extend(1u64.to_be_bytes());
+        body.extend([4, 10, 0, 0, 0, 4, 10, 0, 0, 255, ITEM_FINAL]);
+        let got = decode_srs(&srs(&body), true).unwrap();
+        assert_eq!(got.rules, ["keyword:ad", "keyword:bb"]);
+        assert_eq!(got.prefixes, [("10.0.0.0".parse().unwrap(), 24)]);
+        assert!(got.complete);
+    }
+
     fn one_rule(items: &[u8]) -> Vec<u8> {
         let mut body = vec![1, 0];
         body.extend_from_slice(items);

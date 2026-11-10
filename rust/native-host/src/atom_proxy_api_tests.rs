@@ -1267,4 +1267,21 @@ fn catalog_entries_become_managed_rulesets_while_rules_name_them() {
     let (status, _) = api.call("DELETE", &format!("/api/v1/atom/rules/{rule}"), "");
     assert_eq!(status, 200);
     assert!(rules.ruleset("bm7:Telegram").is_none(), "the last rule took its set along");
+
+    // A set another request is initializing (pinned) survives the cleanup
+    // after an unrelated rule write (codex review of step 6b-2b, round 1).
+    let pinned = vec!["meta:netflix".to_owned()];
+    rules.create_catalog_ruleset("meta:netflix").unwrap();
+    rules.pin_catalog(&pinned);
+    let (status, other) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"suffix": ["x.example"]}, "action": {"type": "block"}}"#,
+    );
+    assert_eq!(status, 201, "{other}");
+    assert!(rules.ruleset("meta:netflix").is_some(), "pinned: kept");
+    rules.unpin_catalog(&pinned);
+    let other = other["rule"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(api.call("DELETE", &format!("/api/v1/atom/rules/{other}"), "").0, 200);
+    assert!(rules.ruleset("meta:netflix").is_none(), "unpinned and unused: gone");
 }

@@ -454,6 +454,12 @@ pub(crate) struct AtomRules {
     /// Stops the daily ruleset refresh of this configuration
     /// (`atom_rules_api::spawn_updates`).
     updates: RefCell<Option<atomdns_upstream_core::TransportCancellation>>,
+    /// One initialization (create and first download) of a catalog set at a
+    /// time, per ID.
+    catalog_locks: RefCell<BTreeMap<String, Rc<tokio::sync::Mutex<()>>>>,
+    /// Catalog sets a request is initializing or about to name: not removed
+    /// as unused meanwhile (`atom_rules_api::ensure_catalog`).
+    catalog_pins: RefCell<BTreeMap<String, usize>>,
 }
 
 /// The default table of a new installation (design §4.4). Each rule after
@@ -844,6 +850,8 @@ impl AtomRules {
             ip_builtin: RefCell::new(Vec::new()),
             removed: RefCell::new(removed),
             updates: RefCell::new(None),
+            catalog_locks: RefCell::new(BTreeMap::new()),
+            catalog_pins: RefCell::new(BTreeMap::new()),
         };
         let table = {
             let state = rules_owner.state.borrow();
@@ -1556,13 +1564,43 @@ impl AtomRules {
         Ok(set)
     }
 
-    /// The catalog rulesets no rule names.
+    /// The lock that serializes the initialization of catalog set `id`.
+    pub(crate) fn catalog_lock(&self, id: &str) -> Rc<tokio::sync::Mutex<()>> {
+        Rc::clone(
+            self.catalog_locks
+                .borrow_mut()
+                .entry(id.to_owned())
+                .or_default(),
+        )
+    }
+
+    pub(crate) fn pin_catalog(&self, ids: &[String]) {
+        let mut pins = self.catalog_pins.borrow_mut();
+        for id in ids {
+            *pins.entry(id.clone()).or_default() += 1;
+        }
+    }
+
+    pub(crate) fn unpin_catalog(&self, ids: &[String]) {
+        let mut pins = self.catalog_pins.borrow_mut();
+        for id in ids {
+            if let Some(count) = pins.get_mut(id) {
+                *count -= 1;
+                if *count == 0 {
+                    pins.remove(id);
+                }
+            }
+        }
+    }
+
+    /// The catalog rulesets no rule names and no request has pinned.
     pub(crate) fn unused_catalog_rulesets(&self) -> Vec<String> {
         let state = self.state.borrow();
+        let pins = self.catalog_pins.borrow();
         state
             .rulesets
             .iter()
-            .filter(|set| matches!(set.source, Source::Catalog))
+            .filter(|set| matches!(set.source, Source::Catalog) && !pins.contains_key(&set.id))
             .filter(|set| {
                 !state.rules.iter().any(|rule| {
                     let m = &rule.matches;
@@ -1829,18 +1867,10 @@ pub(crate) fn convert_download(
     let mut skipped = BTreeMap::new();
     let (entries, prefixes) = match format {
         Format::Srs => {
-            let names = atomdns_matcher_core::decode_domain_srs(bytes, true)
-                .map(|srs| srs.rules)
-                .unwrap_or_default();
-            let ips = atomdns_matcher_core::decode_ip_srs(bytes)
-                .map(|srs| srs.prefixes)
-                .unwrap_or_default();
-            if names.is_empty() && ips.is_empty() {
-                // The decoder's error says what is wrong with the file.
-                atomdns_matcher_core::decode_domain_srs(bytes, true)
-                    .map_err(|error| format!("无效的 SRS 数据: {error}"))?;
-            }
-            (names, ips)
+            // One pass over both kinds (a rule set may carry names and prefixes).
+            let srs = atomdns_matcher_core::decode_srs(bytes, true)
+                .map_err(|error| format!("无效的 SRS 数据: {error}"))?;
+            (srs.rules, srs.prefixes)
         }
         Format::Dat | Format::Mrs => {
             let names = crate::rule_binary::parse(
