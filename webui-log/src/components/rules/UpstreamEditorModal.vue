@@ -1,5 +1,6 @@
 <script setup>
 import { computed, reactive } from 'vue'
+import { nativeUpstreamProtocol, nativeUpstreamProtocolFields, normalizeProtocol } from '../../api/nativeManagement'
 import { nativeProxyFlag, protocolUsesProxy } from '../../utils/nativeSettings'
 import { setError } from '../../utils/notice'
 import AppIcon from '../AppIcon.vue'
@@ -20,17 +21,17 @@ const PROTOCOLS = [
   { value: 'udp', label: 'UDP' },
   { value: 'tcp', label: 'TCP' },
   { value: 'tls', label: 'DoT (TLS)' },
-  { value: 'https', label: 'DoH (HTTPS)' }
+  { value: 'https', label: 'DoH (HTTPS)' },
+  { value: 'h3', label: 'DoH (HTTP/3)' },
+  { value: 'quic', label: 'DoQ (QUIC)' }
 ]
-const alias = { dot: 'tls', doh: 'https' }
-const normalize = (value) => alias[String(value || '').trim().toLowerCase()] || String(value || '').trim().toLowerCase()
 
-const supported = computed(() => new Set((props.capabilities?.upstream_protocols || []).map(normalize)))
+const supported = computed(() => new Set((props.capabilities?.upstream_protocols || []).map(normalizeProtocol)))
 const protocols = computed(() => PROTOCOLS.filter((item) => supported.value.has(item.value)))
 const entry = props.entry || {}
 const form = reactive({
   tag: String(entry.tag || ''),
-  protocol: normalize(entry.protocol) || protocols.value[0]?.value || '',
+  protocol: nativeUpstreamProtocol(entry) || protocols.value[0]?.value || '',
   addr: String(entry.addr || ''),
   dial_addr: String(entry.dial_addr || ''),
   use_socks_proxy: Boolean(entry.use_socks_proxy),
@@ -40,17 +41,17 @@ const form = reactive({
   upstream_query_timeout: Number(entry.upstream_query_timeout || 0)
 })
 const showProxy = computed(() => props.proxySwitch && protocolUsesProxy(form.protocol))
-const showTls = computed(() => ['tls', 'https'].includes(form.protocol))
+const showTls = computed(() => ['tls', 'https', 'h3', 'quic'].includes(form.protocol))
 
 function save() {
   const tag = form.tag.trim()
   if (!tag) return setError('上游标识不能为空')
   if (!protocols.value.some((item) => item.value === form.protocol)) return setError('所选协议当前不支持')
-  if (!form.addr.trim()) return setError('上游地址不能为空')
+  const addr = form.addr.trim()
+  if (!addr) return setError('上游地址不能为空')
   emit('save', {
     tag,
-    protocol: form.protocol,
-    addr: form.addr.trim(),
+    ...nativeUpstreamProtocolFields(form.protocol, addr),
     dial_addr: form.dial_addr.trim(),
     bootstrap: form.bootstrap.trim(),
     bootstrap_version: Number(form.bootstrap_version) || 0,

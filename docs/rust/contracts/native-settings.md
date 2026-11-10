@@ -13,7 +13,7 @@ both, and hot apply of a change. The reference host's `upstream_overrides.json`,
 - tag: client_ecs
   type: ecs_address         # args.addr: an IP, optionally /mask (the mask is ignored, as in quick `ecs`)
 ```
-An empty `socks5_proxy` address is the "no proxy" state (the reference's empty global `socks5`): everything that references it connects directly, `use_proxy: true` included, and the overrides page shows `socks5: ""`. `ecs_address` always needs an address.
+An empty `socks5_proxy` address is the "no proxy" state (the reference's empty global `socks5`). Proxy-capable entries that reference it connect directly, and the overrides page shows `socks5: ""`. `ecs_address` always needs an address.
 Both are non-executable (`exec: $main_proxy` is an error). References are `$tag` strings; an unknown tag or a tag of the wrong kind is a load error naming the YAML path.
 
 - `aliapi`: plugin `proxy: $main_proxy` is the default proxy of entries that say `use_proxy: true` (default false); an entry may instead say `proxy: $other`. `use_proxy` without a plugin
@@ -35,9 +35,10 @@ Both are non-executable (`exec: $main_proxy` is an error). References are `$tag`
 Addresses and switches store only differences from YAML. A non-empty upstream-list save always retains `upstreams.<tag>`, even when the entries equal YAML: its presence records UI/API management. Only an explicit empty-list save removes that group override and restores the YAML list and concurrency (sections omitted when empty; keys sorted; two-space indent; trailing newline).
 `flags` (`{"<key>": true|false|"<option>"}`) is the one section kept when empty: its presence records the one-time migration of the schema-2 switch files, and every save (any route, the migration) keeps it unchanged unless it is the flag route itself. `upstreams.<tag>` replaces that `aliapi`'s whole YAML list (only `enabled`
 entries compile; `concurrent = min(enabled count, 20)` for settings-managed lists; all entries disabled is an error). Groups without a stored list retain their YAML `concurrent`, bounded by the existing 1..20 limit and available upstream count. This applies identically on startup and hot apply, including settings-generated special groups. Entry fields are the WebUI's: `tag`, `enabled`, `protocol`
-(`udp|tcp|tls|https`, aliases `dot|doh`), `addr` (a scheme-less address gets the protocol's scheme), `dial_addr`, `upstream_query_timeout` (ms), `insecure_skip_verify`, `bootstrap`,
-`bootstrap_version`, `use_proxy` (the reference's `use_socks_proxy` is accepted on input). Refused with a reason: `protocol: aliapi` / signed-API fields, a literal `socks5`,
-`so_mark`, `bind_to_device`, `enable_pipeline`, `enable_http3`, positive `idle_timeout`, `quic`, unknown fields.
+(`udp|tcp|tls|https|h3|quic`, aliases `dot|doh|doq`), `addr` (a scheme-less address gets the protocol's scheme), `dial_addr`, `upstream_query_timeout` (ms), `insecure_skip_verify`, `bootstrap`,
+`bootstrap_version`, `enable_http3` for `https` or `h3`, and `use_proxy` (the reference's `use_socks_proxy` is accepted on input).
+DoH3 and DoQ are direct-only. A proxy switch set to true is rejected for either protocol.
+Refused options include `protocol: aliapi` / signed-API fields, a literal `socks5`, `so_mark`, `bind_to_device`, `enable_pipeline`, positive `idle_timeout`, and unknown fields.
 Loading errors (start, `check`): unreadable or unparsable file, a version other than 1, an unknown top-level key, a settings key that names no object / the wrong kind, an invalid
 value. A missing or empty file is "no settings". Compiling and `check` never write. (The `native_management` mode that used to bypass the settings API was removed in Phase 6b.)
 

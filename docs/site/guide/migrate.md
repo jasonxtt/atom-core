@@ -38,7 +38,7 @@ atomdns check -d /cus/atomdns -c config_custom.yaml
 | 相对路径 | 一律相对配置目录（`-d`）解析 |
 | `switch1`–`switch17` | 改为具名的 [`feature_flag`](/plugins/feature_flag) |
 | 学习名单（`domain_output` 的 `target_mapper` 等） | 改为 [`route_learner`](/plugins/route_learner) |
-| 上游协议 | 支持 UDP / TCP / DoT / DoH；不支持 DoQ 和 HTTP/3 |
+| 上游协议 | 支持 UDP / TCP / DoT / DoH（含 HTTP/3）/ DoQ |
 | `/log` 兼容页面 | 不提供，WebUI 只在 `/` |
 
 各插件页底部的「与 MosDNS 的差异」一节有更细的说明。

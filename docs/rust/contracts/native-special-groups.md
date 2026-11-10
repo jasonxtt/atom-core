@@ -298,7 +298,9 @@ and scoped wire decoration preserve it.
 Native `mosdns_cache_v2` dumps keep the existing gzip name, block framing and
 protobuf entry fields 1–6. Optional length-delimited entry field 7 carries a
 version-1 JSON object (`version`, `entry`, `peer`, `transport`) for known native
-origin. Its encoded payload is bounded to 64 KiB, with entry identity bounded to
+origin. Field 8 carries the same object for `h3` and `quic` origins so older
+AtomDNS versions can skip the new metadata and still load the DNS response.
+An entry can carry at most one origin. Its encoded payload is bounded to 64 KiB, with entry identity bounded to
 8 KiB before serialization; it participates in existing block/owned decode limits.
 Duplicate fields, unsupported version/transport, invalid endpoints and malformed
 metadata reject import before any merge. Existing Go protobuf readers skip the

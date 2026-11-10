@@ -1,5 +1,6 @@
 //! Bounded native codec for the existing mosdns_cache_v2 persistence format.
 use crate::cache::CacheAdapterError;
+use crate::observer::UpstreamTransport;
 use atomdns_cache_core::NativeSnapshotEntry;
 use flate2::{Compression, GzBuilder, bufread::GzDecoder};
 use std::io::{Read, Write};
@@ -31,8 +32,19 @@ fn field(out: &mut Vec<u8>, number: u64, bytes: &[u8]) {
     varint(out, bytes.len() as u64);
     out.extend_from_slice(bytes);
 }
-// Entry field 7 is a versioned native extension; existing Go protobuf readers
-// skip it. Fields 1..6, gzip name and framing remain mosdns_cache_v2.
+// Entry field 7 is the original native origin extension. Put QUIC origins in
+// field 8 so older AtomDNS versions skip that metadata and still load the DNS
+// response. Go readers skip both fields.
+const ORIGIN_FIELD: u64 = 7;
+const QUIC_ORIGIN_FIELD: u64 = 8;
+
+fn origin_field(transport: Option<UpstreamTransport>) -> u64 {
+    match transport {
+        Some(UpstreamTransport::H3 | UpstreamTransport::Quic) => QUIC_ORIGIN_FIELD,
+        _ => ORIGIN_FIELD,
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DumpOrigin {
@@ -42,38 +54,33 @@ struct DumpOrigin {
     transport: Option<String>,
 }
 const MAX_ORIGIN: usize = 64 * 1024;
-fn validate_origin(value: &DumpOrigin) -> Result<(), CacheAdapterError> {
-    if value.version != 1
-        || value.entry.is_empty()
-        || value.entry.len() > MAX_ORIGIN / 8
-        || value
-            .transport
-            .as_deref()
-            .is_some_and(|transport| !matches!(transport, "udp" | "tcp" | "tls" | "https"))
-    {
+fn validate_origin(value: &DumpOrigin) -> Result<Option<UpstreamTransport>, CacheAdapterError> {
+    if value.version != 1 || value.entry.is_empty() || value.entry.len() > MAX_ORIGIN / 8 {
         return Err(bad());
     }
-    Ok(())
+    value
+        .transport
+        .as_deref()
+        .map(|transport| UpstreamTransport::parse(transport).ok_or_else(bad))
+        .transpose()
 }
-fn decode_origin(bytes: &[u8]) -> Result<atomdns_cache_core::NativeAttachment, CacheAdapterError> {
+fn decode_origin(
+    bytes: &[u8],
+    field: u64,
+) -> Result<atomdns_cache_core::NativeAttachment, CacheAdapterError> {
     if bytes.len() > MAX_ORIGIN {
         return Err(bad());
     }
     let value: DumpOrigin = serde_json::from_slice(bytes).map_err(|_| bad())?;
-    validate_origin(&value)?;
-    let transport = match value.transport.as_deref() {
-        Some("udp") => Some("udp"),
-        Some("tcp") => Some("tcp"),
-        Some("tls") => Some("tls"),
-        Some("https") => Some("https"),
-        None => None,
-        _ => return Err(bad()),
-    };
+    let transport = validate_origin(&value)?;
+    if field != origin_field(transport) {
+        return Err(bad());
+    }
     Ok(atomdns_cache_core::NativeAttachment::new(
         atomdns_sequence_core::ResponseOrigin {
             identity: std::sync::Arc::from(value.entry),
             peer: value.peer,
-            transport,
+            transport: transport.map(UpstreamTransport::as_str),
         },
     ))
 }
@@ -103,12 +110,12 @@ fn encode_entry(entry: &NativeSnapshotEntry) -> Result<Vec<u8>, CacheAdapterErro
             peer: origin.peer,
             transport: origin.transport.map(str::to_owned),
         };
-        validate_origin(&value)?;
+        let field_number = origin_field(validate_origin(&value)?);
         let bytes = serde_json::to_vec(&value).map_err(|_| bad())?;
         if bytes.len() > MAX_ORIGIN {
             return Err(bad());
         }
-        field(&mut out, 7, &bytes);
+        field(&mut out, field_number, &bytes);
     }
     Ok(out)
 }
@@ -211,7 +218,7 @@ fn decode_entry(
         if number == 0 {
             return Err(bad());
         }
-        if number <= 7 {
+        if number <= QUIC_ORIGIN_FIELD {
             let bit = 1 << number;
             if seen & bit != 0 {
                 return Err(bad());
@@ -228,10 +235,10 @@ fn decode_entry(
                     charge(budget, value.len())?;
                     data[index] = value.to_vec();
                 }
-                7 if kind == 2 => {
+                ORIGIN_FIELD | QUIC_ORIGIN_FIELD if kind == 2 && attachment.is_none() => {
                     let value = input.data()?;
                     charge(budget, value.len())?;
-                    attachment = Some(decode_origin(value)?);
+                    attachment = Some(decode_origin(value, number)?);
                 }
                 3..=5 if kind == 0 => {
                     let index = match number {
@@ -319,28 +326,31 @@ mod tests {
 
     #[test]
     fn origin_extension_roundtrip_legacy_and_malformed_are_bounded() {
-        let origin = atomdns_sequence_core::ResponseOrigin {
-            identity: std::sync::Arc::from("persisted_supplier"),
-            peer: Some("127.0.0.1:25556".parse().unwrap()),
-            transport: Some("udp"),
-        };
         let mut item = NativeSnapshotEntry {
-            attachment: Some(atomdns_cache_core::NativeAttachment::new(origin.clone())),
+            attachment: None,
             key: vec![1],
             response: vec![2],
             domain_set: vec![],
             times: [0; 3],
             wall_times: Some([1, 2, 3]),
         };
-        let decoded = decode(&encode(&[item.clone()]).unwrap()).unwrap();
-        assert_eq!(
-            decoded[0]
-                .attachment
-                .as_ref()
-                .unwrap()
-                .downcast_ref::<atomdns_sequence_core::ResponseOrigin>(),
-            Some(&origin)
-        );
+        for transport in ["udp", "h3", "quic"] {
+            let origin = atomdns_sequence_core::ResponseOrigin {
+                identity: std::sync::Arc::from("persisted_supplier"),
+                peer: Some("127.0.0.1:25556".parse().unwrap()),
+                transport: Some(transport),
+            };
+            item.attachment = Some(atomdns_cache_core::NativeAttachment::new(origin.clone()));
+            let decoded = decode(&encode(&[item.clone()]).unwrap()).unwrap();
+            assert_eq!(
+                decoded[0]
+                    .attachment
+                    .as_ref()
+                    .unwrap()
+                    .downcast_ref::<atomdns_sequence_core::ResponseOrigin>(),
+                Some(&origin)
+            );
+        }
         item.attachment = None;
         assert!(
             decode(&encode(&[item.clone()]).unwrap()).unwrap()[0]
@@ -350,12 +360,12 @@ mod tests {
         for bytes in [
             br#"{"version":2,"entry":"peer","peer":null,"transport":"udp"}"#.as_slice(),
             br#"{"version":1,"entry":"","peer":null,"transport":"udp"}"#,
-            br#"{"version":1,"entry":"peer","peer":null,"transport":"quic"}"#,
+            br#"{"version":1,"entry":"peer","peer":null,"transport":"unknown"}"#,
             br#"{"version":1,"entry":"peer","entry":"other","peer":null,"transport":"udp"}"#,
         ] {
-            assert!(decode_origin(bytes).is_err());
+            assert!(decode_origin(bytes, ORIGIN_FIELD).is_err());
         }
-        assert!(decode_origin(&vec![b'x'; MAX_ORIGIN + 1]).is_err());
+        assert!(decode_origin(&vec![b'x'; MAX_ORIGIN + 1], ORIGIN_FIELD).is_err());
         let mut entry = encode_entry(&item).unwrap();
         field(
             &mut entry,
@@ -372,6 +382,52 @@ mod tests {
             "duplicate origin fields rejected"
         );
     }
+
+    #[test]
+    fn quic_origin_field_is_exclusive_and_legacy_readers_can_skip_it() {
+        let udp = br#"{"version":1,"entry":"peer","peer":null,"transport":"udp"}"#;
+        let quic = br#"{"version":1,"entry":"peer","peer":null,"transport":"quic"}"#;
+        assert!(decode_origin(quic, ORIGIN_FIELD).is_err());
+        assert!(decode_origin(udp, QUIC_ORIGIN_FIELD).is_err());
+
+        let origin = atomdns_sequence_core::ResponseOrigin {
+            identity: std::sync::Arc::from("peer"),
+            peer: None,
+            transport: Some("quic"),
+        };
+        let item = NativeSnapshotEntry {
+            attachment: Some(atomdns_cache_core::NativeAttachment::new(origin)),
+            key: vec![1],
+            response: vec![2, 3],
+            domain_set: vec![],
+            times: [0; 3],
+            wall_times: Some([1, 2, 3]),
+        };
+        let mut entry = encode_entry(&item).unwrap();
+        // Project the encoded protobuf with the previous decoder's field
+        // cutoff. Its unknown-field skip must leave the DNS response intact.
+        let mut input = Cursor {
+            bytes: &entry,
+            pos: 0,
+        };
+        let mut legacy = Vec::new();
+        while input.pos < entry.len() {
+            let start = input.pos;
+            let tag = input.integer().unwrap();
+            input.skip(tag & 7).unwrap();
+            if tag >> 3 <= ORIGIN_FIELD {
+                legacy.extend_from_slice(&entry[start..input.pos]);
+            }
+        }
+        assert!(legacy.len() < entry.len());
+        let decoded = decode_entry(&legacy, &mut 0).unwrap();
+        assert_eq!(decoded.response, item.response);
+        assert!(decoded.attachment.is_none());
+
+        field(&mut entry, ORIGIN_FIELD, udp);
+        assert!(decode_entry(&entry, &mut 0).is_err());
+    }
+
     #[test]
     fn stream_owned_and_entry_limits_apply_before_any_merge() {
         let mut writer = GzBuilder::new()

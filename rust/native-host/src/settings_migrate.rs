@@ -516,7 +516,8 @@ fn group_entries(
         let place = format!("{group}[{name}]");
         let used = go_uses_proxy(group, entry);
         let literal = entry.socks5.trim();
-        let tcp_class = matches!(entry.protocol_name().as_str(), "tcp" | "tls" | "https");
+        let tcp_class = !entry.enable_http3
+            && matches!(entry.protocol_name().as_str(), "tcp" | "tls" | "https");
         let use_proxy = if !used {
             false
         } else if !tcp_class {

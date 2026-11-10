@@ -8,12 +8,14 @@ use std::time::Duration;
 
 use crate::cache::{CacheAdapterError, CacheCatalog, CacheClock};
 use atomdns_dns_core::parse_query;
-use atomdns_upstream_core::secure::DotUpstream;
+use atomdns_upstream_core::quic::DoqEndpoint;
+use atomdns_upstream_core::secure::{DotUpstream, SecureResponse, SecureTransport};
 use atomdns_upstream_core::{
-    AddressFamily, BootstrapEndpoint, BootstrapResolver, DohEndpoint, DohReuseOwner, DotEndpoint,
-    Endpoint, ExchangeContext, ExchangeRequest, ExchangeResponse, ResolutionMode, ResolutionPolicy,
-    ResolutionTarget, ReuseOwner, SecureReuseOwner, ServerIdentity, SideEffectState, SystemClock,
-    TlsPolicy, Transport, TransportCancellation, UdpTcpPolicy, Upstream, UpstreamError,
+    AddressFamily, BootstrapEndpoint, BootstrapResolver, Doh3ReuseUpstream, DohEndpoint,
+    DohReuseOwner, DoqReuseUpstream, DotEndpoint, Endpoint, ExchangeContext, ExchangeRequest,
+    ExchangeResponse, ResolutionMode, ResolutionPolicy, ResolutionTarget, ReuseOwner,
+    SecureReuseOwner, ServerIdentity, SideEffectState, SystemClock, TlsPolicy, Transport,
+    TransportCancellation, UdpTcpPolicy, Upstream, UpstreamError,
 };
 use tokio::task::JoinSet;
 
@@ -830,6 +832,8 @@ enum ForwardOwner {
     Doh {
         reuse: DohReuseOwner,
     },
+    H3(Doh3ReuseUpstream),
+    Doq(DoqReuseUpstream),
 }
 
 impl ForwardOwner {
@@ -881,11 +885,21 @@ impl ForwardOwner {
                 // DoH owns bounded stream/pool admission, including waits.
                 // Busy must not escape into TLS-per-request fallback.
                 reuse
-                    .exchange(request, context.clone())
+                    .exchange(request, context)
                     .await
                     .map(secure_response)
                     .map_err(secure_error)
             }
+            Self::H3(reuse) => reuse
+                .exchange(request, context)
+                .await
+                .map(secure_response)
+                .map_err(secure_error),
+            Self::Doq(reuse) => reuse
+                .exchange(request, context)
+                .await
+                .map(secure_response)
+                .map_err(secure_error),
         }
     }
 
@@ -903,19 +917,29 @@ impl ForwardOwner {
             Self::Doh { reuse } => {
                 let _ = reuse.close().await;
             }
+            Self::H3(reuse) => {
+                let _ = reuse.close().await;
+            }
+            Self::Doq(reuse) => {
+                let _ = reuse.close().await;
+            }
         }
     }
 }
 
-fn secure_response(response: atomdns_upstream_core::secure::SecureResponse) -> ExchangeResponse {
+fn secure_response(response: SecureResponse) -> ExchangeResponse {
     let request_id = response.request_id();
     let response_id = response.response_id();
     let truncated = response.truncated();
+    let transport = match response.transport() {
+        SecureTransport::Dot | SecureTransport::Doh => Transport::Tcp,
+        SecureTransport::Doq | SecureTransport::Doh3 => Transport::Quic,
+    };
     ExchangeResponse::new(
         response.into_wire(),
         request_id,
         response_id,
-        Transport::Tcp,
+        transport,
         truncated,
     )
 }
@@ -1713,6 +1737,8 @@ impl ForwardAdapter {
             ForwardScheme::Tcp => UpstreamTransport::Tcp,
             ForwardScheme::Tls => UpstreamTransport::Tls,
             ForwardScheme::Https => UpstreamTransport::Https,
+            ForwardScheme::H3 => UpstreamTransport::H3,
+            ForwardScheme::Quic => UpstreamTransport::Quic,
         };
         tracker.phase(peer, Some(transport));
         owner.exchange(query, deadline, cancellation, tracker).await
@@ -1779,15 +1805,30 @@ fn build_owner(
                 SecureReuseOwner::new(endpoint, policy).map_err(|error| error.to_string())?;
             Ok(ForwardOwner::Dot { reuse, fallback })
         }
-        ForwardScheme::Https => {
+        ForwardScheme::Https | ForwardScheme::H3 => {
             let mut endpoint =
                 DohEndpoint::new(&target.service, dial).map_err(|error| error.to_string())?;
             if let Some(route) = route {
                 endpoint = endpoint.with_socks5(route);
             }
             let policy = tls_policy(target.insecure_skip_verify, tls_roots)?;
-            let reuse = DohReuseOwner::new(endpoint, policy).map_err(|error| error.to_string())?;
-            Ok(ForwardOwner::Doh { reuse })
+            if target.scheme == ForwardScheme::H3 {
+                Doh3ReuseUpstream::new(endpoint, policy)
+                    .map(ForwardOwner::H3)
+                    .map_err(|error| error.to_string())
+            } else {
+                let reuse =
+                    DohReuseOwner::new(endpoint, policy).map_err(|error| error.to_string())?;
+                Ok(ForwardOwner::Doh { reuse })
+            }
+        }
+        ForwardScheme::Quic => {
+            let identity = ServerIdentity::new(&target.host).map_err(|error| error.to_string())?;
+            let endpoint = DoqEndpoint::new(dial, identity).map_err(|error| error.to_string())?;
+            let policy = tls_policy(target.insecure_skip_verify, tls_roots)?;
+            DoqReuseUpstream::new(endpoint, policy)
+                .map(ForwardOwner::Doq)
+                .map_err(|error| error.to_string())
         }
     }
 }

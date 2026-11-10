@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { getJSON, getText, postJSON } from '../../api/http'
-import { isNativeUpstreamReadOnly } from '../../api/nativeManagement'
+import { isNativeUpstreamReadOnly, nativeUpstreamProtocol } from '../../api/nativeManagement'
 import { getRuntimeCapabilities, operationReason, supportsOperation } from '../../api/runtimeCapabilities'
 import { openConfirm } from '../../utils/confirm'
 import { isModified, settingsBackedProxy, settingsSources } from '../../utils/nativeSettings'
@@ -285,7 +285,7 @@ onBeforeUnmount(() => window.removeEventListener('atomdns-log-refresh', load))
             <tr v-if="rowsOf(group).length === 0"><td colspan="6" class="empty">{{ hideDisabled ? '这个组没有已启用的上游' : '这个组还没有上游' }}</td></tr>
             <tr v-for="row in rowsOf(group)" :key="`${group}-${row.index}-${row.entry.tag}`" :class="{ disabled: !row.entry.enabled || row.status.readOnly }">
               <td :title="row.entry.tag">{{ row.entry.tag || '-' }}<span v-if="row.status.readOnly" class="muted" :title="row.status.reason">（只读）</span></td>
-              <td>{{ protocolDisplayLabel(row.entry.protocol) }}</td>
+              <td>{{ protocolDisplayLabel(nativeUpstreamProtocol(row.entry)) }}</td>
               <td class="mono" :title="upstreamAddressDisplay(row.entry)">{{ upstreamAddressDisplay(row.entry) }}</td>
               <td class="rt-col-switch">
                 <label class="switch switch-table">
