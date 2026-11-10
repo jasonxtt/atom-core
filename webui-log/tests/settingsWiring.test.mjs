@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
-import { isNativeUpstreamReadOnly, nativeUpstreamProtocol } from '../src/api/nativeManagement.js'
+import { isNativeUpstreamReadOnly, nativeUpstreamProtocol, nativeUpstreamProtocolFields } from '../src/api/nativeManagement.js'
 import { requestOperation } from '../src/api/runtimeCapabilities.js'
 import {
   isModified,
@@ -56,6 +56,15 @@ test('QUIC upstream editing follows runtime capabilities and refuses a proxy', (
     assert.equal(isNativeUpstreamReadOnly(entry, capable).readOnly, false)
     assert.equal(isNativeUpstreamReadOnly({ ...entry, use_socks_proxy: true }, capable).readOnly, true)
   }
+})
+
+test('the upstream editor preserves explicit schemes and the HTTPS HTTP/3 flag', () => {
+  const https = 'https://dns.example/resolve?x=1'
+  const h3 = 'h3://dns.example/resolve?x=1'
+  assert.deepEqual(nativeUpstreamProtocolFields('h3', https), { protocol: 'https', addr: https, enable_http3: true })
+  assert.deepEqual(nativeUpstreamProtocolFields('h3', h3), { protocol: 'h3', addr: h3 })
+  assert.deepEqual(nativeUpstreamProtocolFields('https', h3), { protocol: 'https', addr: h3 })
+  assert.deepEqual(nativeUpstreamProtocolFields('https', https), { protocol: 'https', addr: https })
 })
 
 test('effective items become the modified marks of the pages', () => {

@@ -3192,7 +3192,17 @@ impl DoqReuseUpstream {
             }
         };
 
-        let (body, truncated) = crate::quic::validate_doq_payload(&complete, request_id)?;
+        let (body, truncated) = crate::quic::validate_doq_payload(&complete, request_id)
+            .inspect_err(|error| {
+                if matches!(
+                    error,
+                    SecureError::DoqProtocolNonzeroResponseId
+                        | SecureError::DoqProtocolTrailingResponse
+                        | SecureError::Transport(UpstreamError::TruncatedFrame)
+                ) {
+                    self.retire_protocol_error(&key, generation, &shared);
+                }
+            })?;
         self.owner.lifecycle().commit_final_response(
             &control.caller_cancellation(),
             deadline,
@@ -3201,6 +3211,20 @@ impl DoqReuseUpstream {
         Ok(crate::secure::SecureResponse::doq(
             body, request_id, truncated,
         ))
+    }
+
+    fn retire_protocol_error(
+        &self,
+        key: &QuicReuseKey,
+        generation: u64,
+        connection: &DoqConnection,
+    ) {
+        // RFC 9250 section 4.3.3 specifies connection closure for framing and
+        // message ID violations. Send the protocol code before the ordinary
+        // owner teardown can close the endpoint with DOQ_NO_ERROR.
+        connection.connection.close(0x2u32.into(), b"");
+        self.owner
+            .apply_error_class(key, generation, QuicErrorClass::EntryTerminal);
     }
 }
 

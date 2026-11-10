@@ -28,7 +28,7 @@ is redesigned (gap list M1-f). `aliapi` takes its values from YAML only.
 - `socks5` (`host:port`, no authentication, remote name resolution) applies to `tcp`, `tls` and `https` upstreams; for `udp` it is
   ignored. A proxied upstream with a host name and no numeric `dial_addr` sends the name to the proxy; `bootstrap` is not used.
   A proxy failure fails that upstream (no direct fallback).
-- DoH3 (`h3://` or `https://` with `enable_http3: true`) and DoQ (`quic://` or `doq://`) require a direct UDP connection. A configured SOCKS5 route for either protocol is a load error.
+- DoH3 (`h3://` or `https://` with `enable_http3: true`) and DoQ (`quic://` or `doq://`) require a direct UDP connection. A SOCKS5 address, an entry-level proxy reference, or `use_proxy: true` is a load error for either protocol.
 - Rejected at load, never ignored: the signed AliDNS API (`type: aliapi`, or the mere presence of `account_id`, `access_key_id`,
   `access_key_secret`, `server_addr`, `ecs_client_ip`, `ecs_client_mask`, whatever the value), `so_mark`, `bind_to_device`, `enable_pipeline`, positive
   `idle_timeout`, unsupported schemes, negative timeouts, and unknown keys.

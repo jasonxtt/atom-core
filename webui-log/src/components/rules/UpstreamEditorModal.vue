@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive } from 'vue'
-import { nativeUpstreamProtocol, normalizeProtocol } from '../../api/nativeManagement'
+import { nativeUpstreamProtocol, nativeUpstreamProtocolFields, normalizeProtocol } from '../../api/nativeManagement'
 import { nativeProxyFlag, protocolUsesProxy } from '../../utils/nativeSettings'
 import { setError } from '../../utils/notice'
 import AppIcon from '../AppIcon.vue'
@@ -51,10 +51,7 @@ function save() {
   if (!addr) return setError('上游地址不能为空')
   emit('save', {
     tag,
-    protocol: form.protocol,
-    addr: ['https', 'h3'].includes(form.protocol)
-      ? addr.replace(/^(https|h3):\/\//i, `${form.protocol}://`)
-      : addr,
+    ...nativeUpstreamProtocolFields(form.protocol, addr),
     dial_addr: form.dial_addr.trim(),
     bootstrap: form.bootstrap.trim(),
     bootstrap_version: Number(form.bootstrap_version) || 0,

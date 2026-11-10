@@ -13,7 +13,7 @@ both, and hot apply of a change. The reference host's `upstream_overrides.json`,
 - tag: client_ecs
   type: ecs_address         # args.addr: an IP, optionally /mask (the mask is ignored, as in quick `ecs`)
 ```
-An empty `socks5_proxy` address is the "no proxy" state (the reference's empty global `socks5`): everything that references it connects directly, `use_proxy: true` included, and the overrides page shows `socks5: ""`. `ecs_address` always needs an address.
+An empty `socks5_proxy` address is the "no proxy" state (the reference's empty global `socks5`). Proxy-capable entries that reference it connect directly, and the overrides page shows `socks5: ""`. `ecs_address` always needs an address.
 Both are non-executable (`exec: $main_proxy` is an error). References are `$tag` strings; an unknown tag or a tag of the wrong kind is a load error naming the YAML path.
 
 - `aliapi`: plugin `proxy: $main_proxy` is the default proxy of entries that say `use_proxy: true` (default false); an entry may instead say `proxy: $other`. `use_proxy` without a plugin

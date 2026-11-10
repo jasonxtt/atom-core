@@ -29,6 +29,13 @@ export function nativeUpstreamProtocol(upstream) {
   return protocol === 'https' && upstream.enable_http3 === true ? 'h3' : protocol
 }
 
+export function nativeUpstreamProtocolFields(protocol, addr) {
+  if (protocol === 'h3' && addr.startsWith('https://')) {
+    return { protocol: 'https', addr, enable_http3: true }
+  }
+  return { protocol, addr }
+}
+
 function readOnly(reason) {
   return { readOnly: true, reason }
 }

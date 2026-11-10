@@ -200,6 +200,13 @@ impl UpstreamEntry {
             scheme @ ("udp" | "tcp" | "tls" | "https" | "h3" | "quic") => scheme.to_owned(),
             _ => return raw.to_owned(),
         };
+        let ipv6;
+        let raw = if raw.parse::<std::net::Ipv6Addr>().is_ok() {
+            ipv6 = format!("[{raw}]");
+            ipv6.as_str()
+        } else {
+            raw
+        };
         if matches!(scheme.as_str(), "https" | "h3") && !raw.contains('/') {
             format!("{scheme}://{raw}/dns-query")
         } else {
@@ -1010,7 +1017,17 @@ fn resolve_items(
             format!("{name}={addr}{dial}{mark}")
         });
         let proxied = own_proxy.is_some() || uses || literal || !proxies.plugin_socks5.is_empty();
-        entries.push(raw_to_entry(item, proxied));
+        let entry = raw_to_entry(item, proxied);
+        if entry.enable_http3 || matches!(entry.protocol.as_str(), "h3" | "quic" | "doq") {
+            let reason = "SOCKS5 is unsupported for HTTP/3 and DoQ upstreams";
+            if own_proxy.is_some() {
+                return refuse("proxy", reason);
+            }
+            if uses {
+                return refuse("use_proxy", reason);
+            }
+        }
+        entries.push(entry);
     }
     Ok((summary, entries))
 }
@@ -1588,6 +1605,69 @@ mod tests {
             assert!(error.contains(reason), "{json}: {error}");
         }
         assert!(serde_json::from_str::<UpstreamEntry>(r#"{"tag":"a","bogus":1}"#).is_err());
+    }
+
+    #[test]
+    fn quic_settings_wrap_bare_ipv6_literals() {
+        for (protocol, expected) in [
+            ("h3", "h3://[2001:db8::53]/dns-query"),
+            ("doq", "quic://[2001:db8::53]"),
+        ] {
+            let entry = UpstreamEntry {
+                protocol: protocol.to_owned(),
+                addr: "2001:db8::53".to_owned(),
+                tag: "ipv6".to_owned(),
+                ..UpstreamEntry::default()
+            };
+            assert!(entry.validate(0).is_ok());
+            assert_eq!(entry.runtime_addr(), expected);
+        }
+    }
+
+    #[test]
+    fn quic_yaml_refuses_an_explicit_proxy_even_when_its_address_is_empty() {
+        let yaml = r#"
+log: {level: error}
+plugins:
+  - tag: main_proxy
+    type: socks5_proxy
+    args: {addr: ""}
+  - tag: upstream
+    type: aliapi
+    args:
+      proxy: $main_proxy
+      upstreams:
+        - {addr: 'h3://192.0.2.53/dns-query'}
+        - {addr: 'quic://192.0.2.53'}
+  - tag: entry
+    type: sequence
+    args: [{exec: $upstream}]
+  - tag: listener
+    type: udp_server
+    args: {entry: entry, listen: '127.0.0.1:5300'}
+"#;
+        super::super::compile_yaml(yaml).expect("group proxy is optional for QUIC entries");
+        for (from, to, field) in [
+            (
+                "h3://192.0.2.53/dns-query'}",
+                "h3://192.0.2.53/dns-query', use_proxy: true}",
+                ".use_proxy",
+            ),
+            (
+                "quic://192.0.2.53'}",
+                "quic://192.0.2.53', proxy: $main_proxy}",
+                ".proxy",
+            ),
+        ] {
+            let error = super::super::compile_yaml(&yaml.replace(from, to))
+                .err()
+                .expect("explicit proxy is rejected")
+                .to_string();
+            assert!(
+                error.contains(field) && error.contains("SOCKS5 is unsupported"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
