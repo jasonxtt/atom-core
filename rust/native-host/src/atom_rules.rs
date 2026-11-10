@@ -1374,6 +1374,12 @@ impl AtomRules {
     /// Removes a builtin set no rule names any more: recorded in
     /// [`BUILTIN_FILE`], it leaves the rulesets page and rules cannot name it.
     pub(crate) fn remove_builtin(&self, name: &str) -> Result<(), Refusal> {
+        // A rule change being applied to sing-box was validated with this
+        // set; it may not disappear under it (codex review of step 6b-2b,
+        // round 2).
+        if self.busy.get() {
+            return Err(singbox::busy());
+        }
         if REQUIRED_BUILTIN.contains(&name) {
             return Err(Refusal::invalid(format!(
                 "内置规则集 `{name}` 是分流必需的，不能删除"

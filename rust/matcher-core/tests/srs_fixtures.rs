@@ -75,3 +75,23 @@ fn flipping_any_byte_never_panics() {
         }
     }
 }
+
+/// atom: the one-pass decoder reads files sing-box publishes (`MetaCubeX`'s,
+/// shipped in atom's configuration; sing-box's own reader reads them; the
+/// fixtures above come from an older writer without the `invert` byte)
+/// completely, and finds what the single-kind decoders find.
+#[test]
+fn the_mixed_decoder_reads_published_files() {
+    const GEOSITE: &[u8] = include_bytes!("../../../config/srs/geosite-tiktok.srs");
+    const GEOIP: &[u8] = include_bytes!("../../../config/srs/geoip-cn.srs");
+    let names = atomdns_matcher_core::decode_srs(GEOSITE, true).unwrap();
+    assert!(names.complete);
+    assert!(!names.rules.is_empty());
+    assert_eq!(names.rules, decode_domain_srs(GEOSITE, true).unwrap().rules);
+    assert!(names.prefixes.is_empty());
+    let ips = atomdns_matcher_core::decode_srs(GEOIP, true).unwrap();
+    assert!(ips.complete);
+    assert!(ips.prefixes.len() > 1000);
+    assert_eq!(ips.prefixes, decode_ip_srs(GEOIP).unwrap().prefixes);
+    assert!(ips.rules.is_empty());
+}

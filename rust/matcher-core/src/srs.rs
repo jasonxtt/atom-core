@@ -386,21 +386,24 @@ pub struct MixedSrs {
 }
 
 /// Reads every name item (domain, keyword, regex) and IP-CIDR item of an SRS
-/// file in one pass. The single-kind decoders stop a rule at an item of the
-/// other kind without reading it, which can misread the rules after it; a
-/// rule set that carries both (a catalog list) needs this one.
+/// file in one pass, with sing-box's rule framing: a default rule ends with
+/// the final item and its `invert` byte, a logical rule with its `invert`
+/// byte. The single-kind decoders keep the reference's reading (no `invert`
+/// after a default rule, and a rule stops at an item of the other kind
+/// unread), which misreads files of several rules; a rule set that carries
+/// names and prefixes (a catalog list) needs this one.
 pub fn decode_srs(bytes: &[u8], enable_regexp: bool) -> Result<MixedSrs, SrsError> {
     let (mut body, count) = open(bytes)?;
     let mut out = MixedSrs::default();
     for _ in 0..count {
         let (rules, prefixes) = (&mut out.rules, &mut out.prefixes);
-        if read_rule(&mut body, &mut |item, body| {
+        if read_framed_rule(&mut body, &mut |item, body| {
             if item == ITEM_IPCIDR {
                 ip_item(item, body, prefixes)
             } else {
                 domain_item(item, body, enable_regexp, rules)
             }
-        })
+        }, 0)
         .is_err()
         {
             return Ok(out);
@@ -408,6 +411,40 @@ pub fn decode_srs(bytes: &[u8], enable_regexp: bool) -> Result<MixedSrs, SrsErro
     }
     out.complete = true;
     Ok(out)
+}
+
+/// One rule with sing-box's framing (see [`decode_srs`]). An item no reader
+/// knows ends decoding (its payload length is unknown).
+fn read_framed_rule<R: BufRead>(
+    body: &mut Body<R>,
+    item: &mut ItemFn<'_, R>,
+    depth: u32,
+) -> io::Result<()> {
+    match body.byte()? {
+        0 => loop {
+            let id = body.byte()?;
+            if id == ITEM_FINAL {
+                let _invert = body.byte()?;
+                return Ok(());
+            }
+            if matches!(item(id, body)?, Next::EndRule) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown rule item"));
+            }
+        },
+        1 => {
+            if depth >= 16 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "rule nesting"));
+            }
+            let _mode = body.byte()?;
+            let n = body.uvarint()?;
+            for _ in 0..n {
+                read_framed_rule(body, item, depth + 1)?;
+            }
+            let _invert = body.byte()?;
+            Ok(())
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "rule mode")),
+    }
 }
 
 /// What an item reader tells the rule loop.
@@ -958,15 +995,21 @@ mod tests {
     /// An SRS holding one rule made of `item` bytes.
     #[test]
     fn a_mixed_file_gives_names_and_prefixes() {
-        // 2 rules: keyword ["ad", "bb"]; IP-CIDR 10.0.0.0 - 10.0.0.255.
-        let mut body = vec![2, 0, ITEM_KEYWORD, 2, 2, b'a', b'd', 2, b'b', b'b', ITEM_FINAL];
+        // sing-box's framing: 3 rules, each default rule ends with the final
+        // item and its invert byte. keyword ["ad", "bb"]; IP-CIDR
+        // 10.0.0.0 - 10.0.0.255; logical(keyword ["zz"]) not inverted.
+        let mut body = vec![3, 0, ITEM_KEYWORD, 2, 2, b'a', b'd', 2, b'b', b'b', ITEM_FINAL, 0];
         body.extend([0, ITEM_IPCIDR, 1]);
         body.extend(1u64.to_be_bytes());
-        body.extend([4, 10, 0, 0, 0, 4, 10, 0, 0, 255, ITEM_FINAL]);
+        body.extend([4, 10, 0, 0, 0, 4, 10, 0, 0, 255, ITEM_FINAL, 0]);
+        body.extend([1, 0, 1, 0, ITEM_KEYWORD, 1, 2, b'z', b'z', ITEM_FINAL, 0, 0]);
         let got = decode_srs(&srs(&body), true).unwrap();
-        assert_eq!(got.rules, ["keyword:ad", "keyword:bb"]);
+        assert_eq!(got.rules, ["keyword:ad", "keyword:bb", "keyword:zz"]);
         assert_eq!(got.prefixes, [("10.0.0.0".parse().unwrap(), 24)]);
         assert!(got.complete);
+        // Truncated after the first rule: what was read, incomplete.
+        let got = decode_srs(&srs(&body[..12]), true).unwrap();
+        assert_eq!((got.rules.len(), got.complete), (2, false));
     }
 
     fn one_rule(items: &[u8]) -> Vec<u8> {

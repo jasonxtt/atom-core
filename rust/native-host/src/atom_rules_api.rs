@@ -247,9 +247,11 @@ async fn delete_any_ruleset(
             .split('&')
             .any(|pair| matches!(pair, "confirm" | "confirm=true" | "confirm=1"))
     });
+    let mut edited = false;
     if confirm {
         if let Some(next) = rules.plan_without_ruleset(id) {
             rules.commit_rules(next).await.map_err(|e| refusal(&e))?;
+            edited = true;
         }
     }
     let removed = if builtin {
@@ -257,7 +259,12 @@ async fn delete_any_ruleset(
     } else {
         rules.delete_ruleset(id)
     };
-    removed.map_err(|e| refusal(&e))?;
+    if let Err(e) = removed {
+        // The rules changed already: the success path (caches, ledger)
+        // still runs, with the failure as the reply (codex review of step
+        // 6b-2b, round 2).
+        return if edited { Ok(refusal(&e)) } else { Err(refusal(&e)) };
+    }
     drop_unused_catalog(rules);
     Ok(json(200, &serde_json::json!({ "deleted": id, "rules_version": rules.rules().0 })))
 }
@@ -524,10 +531,22 @@ async fn update_round(
     cancel: &TransportCancellation,
 ) {
     let now = crate::atom_rules::now();
+    // Catalog sets a cleanup could not remove (a sing-box application was
+    // running then) go now; the unused ones are not downloaded.
+    if let Some(control) = control.upgrade() {
+        if let Ok(lease) = control.begin_management_mutation() {
+            if !cancel.is_cancelled() {
+                drop_unused_catalog(rules);
+            }
+            drop(lease);
+        }
+    }
+    let unused = rules.unused_catalog_rulesets();
     let due: Vec<Ruleset> = rules
         .rulesets()
         .into_iter()
         .filter(|set| !matches!(set.source, Source::Local) && now - set.updated_at >= UPDATE_AGE)
+        .filter(|set| !unused.contains(&set.id))
         .collect();
     let catalog_due = now - rules.catalog().updated_at >= UPDATE_AGE;
     for set in due {
