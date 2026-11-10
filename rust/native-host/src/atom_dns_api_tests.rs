@@ -610,3 +610,70 @@ fn routed_rules_have_per_group_caches_and_state_files_are_inputs() {
     crate::HostAssembly::from_config_file_in(&host.root.join("config.yaml"), None)
         .expect("a stored ddns_foreign is ignored");
 }
+
+/// A route with `route_ecs` sends the ECS to the group (codex review of step
+/// 6b-2a, round 3: it was in an inline block that ended before the
+/// upstream), and requery flushes the generated rule caches with its own
+/// list (round 3).
+#[test]
+fn routed_ecs_reaches_the_upstream_and_requery_knows_the_rule_caches() {
+    let host = Host::new("routed-ecs");
+    let path = host.root.join("config.yaml");
+    std::fs::write(host.root.join("webinfo/requery.json"), "{}").unwrap();
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "args: {marks: {proxy: 41, direct: 42, block: 40, route: 43}}",
+            "args: {marks: {proxy: 41, direct: 42, block: 40, route: 43}, route_ecs: {domestic: $client_ecs}}",
+        )
+        .replace(
+            "  - tag: entry\n",
+            "  - tag: refresh\n    type: requery\n    args: {file: webinfo/requery.json}\n  - tag: entry\n",
+        );
+    std::fs::write(&path, yaml).unwrap();
+    let host = Host {
+        root: host.root.clone(),
+        host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
+    };
+    let requery = host.host.config().local.requeries.first().expect("requery").runtime.clone();
+    assert_eq!(requery.generated_caches(), vec!["cache_atom_domestic".to_owned()]);
+
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let record = std::sync::Arc::clone(&seen);
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 1500];
+        while let Ok((size, peer)) = socket.recv_from(&mut buffer) {
+            let query = buffer[..size].to_vec();
+            let mut reply = query.clone();
+            reply[2] |= 0x80;
+            record.lock().unwrap().push(query);
+            let _ = socket.send_to(&reply, peer);
+        }
+    });
+    let upstream = json!({"tag": "ecs-probe", "enabled": true, "protocol": "udp", "addr": format!("127.0.0.1:{port}")});
+    let (status, value) = host.call("PUT", "upstreams/domestic", &json!({"upstreams": [upstream]}));
+    assert_eq!(status, 200, "{value}");
+    let rule = json!({"match": {"suffix": ["ecs.example"]}, "action": {"type": "direct"}, "dns": "domestic", "cache": false});
+    let (status, value) = host.call("POST", "rules", &rule);
+    assert_eq!(status, 201, "{value}");
+    let control = host.host.control();
+    let local = crate::local_url::LocalApi {
+        control: crate::runtime_snapshot::RuntimeControlWeak::from_control(&control),
+        api: None,
+        roots: None,
+    };
+    host.host.block_on(async move {
+        let _ = local
+            .resolve("entry", &query("a.ecs.example"), std::time::Duration::from_secs(2))
+            .await;
+    });
+    let queries = seen.lock().unwrap();
+    let last = queries.last().expect("the group was asked");
+    // EDNS0 option 8 (client subnet), family 2 (IPv6: 2408:8888::8).
+    let ecs = last
+        .windows(6)
+        .any(|w| w[0] == 0 && w[1] == 8 && w[4] == 0 && w[5] == 2);
+    assert!(ecs, "the routed query carries the ECS: {last:?}");
+}

@@ -23,10 +23,6 @@ use super::{ConfigError, RawMap, RawNumber, RawPlugin, RawValue};
 
 /// The generated sequence a routed direct rule runs.
 pub(crate) const SEQUENCE: &str = "atom_direct";
-/// The same for the refresh flow (`sequence_requery`): no rule cache, so a
-/// refresh always asks the group (requery's flush list cannot name the
-/// generated caches).
-pub(crate) const REQUERY_SEQUENCE: &str = "atom_direct_requery";
 /// The template of the routed direct rules' caches (declared in the YAML,
 /// optional): each group gets a copy, `cache_atom_<group>`, with its own
 /// dump file; the template itself is not compiled.
@@ -208,19 +204,12 @@ pub(super) fn synthesize(
         .position(|p| p.tag == CACHE && p.kind == "cache")
         .map(|at| definitions.remove(at));
     let mut steps = Vec::new();
-    let mut requery_steps = Vec::new();
     let mut routes = Vec::new();
     let mut caches = Vec::new();
     for (index, tag) in groups.iter().enumerate() {
         let cached = MARK_BASE + 2 * u32::try_from(index).unwrap_or(u32::MAX / 4);
         let both = format!("mark {cached} {}", cached + 1);
         let group_ecs = ecs.iter().find(|(group, _)| group == tag).map(|(_, r)| r);
-        let mut prelude = vec![string(&format!(
-            "flow_setter sequence={SEQUENCE} upstream={tag}"
-        ))];
-        if let Some(reference) = group_ecs {
-            prelude.push(string(&format!("ecs {reference}")));
-        }
         let forward = map(vec![
             ("matches", string(&both)),
             (
@@ -228,13 +217,21 @@ pub(super) fn synthesize(
                 RawValue::Sequence(vec![string(&format!("${tag}")), string("cname_remover")]),
             ),
         ]);
-        let label = map(vec![
+        steps.push(map(vec![
             ("matches", string(&both)),
-            ("exec", RawValue::Sequence(prelude)),
-        ]);
-        requery_steps.push(label.clone());
-        requery_steps.push(forward.clone());
-        steps.push(label);
+            (
+                "exec",
+                string(&format!("flow_setter sequence={SEQUENCE} upstream={tag}")),
+            ),
+        ]));
+        // Its own step: `ecs` applies to the rest of the sequence it runs in
+        // (an inline block would end it before the cache and upstream).
+        if let Some(reference) = group_ecs {
+            steps.push(map(vec![
+                ("matches", string(&both)),
+                ("exec", string(&format!("ecs {reference}"))),
+            ]));
+        }
         if let Some(template) = &template {
             let cache_tag = format!("{CACHE}_{tag}");
             caches.push(cache_for(template, &cache_tag, tag, group_ecs.is_some()));
@@ -264,13 +261,6 @@ pub(super) fn synthesize(
         kind: "sequence".to_owned(),
         args: RawValue::Sequence(steps),
         source_path: format!("generated {SEQUENCE}"),
-        root_dir: root_dir.clone(),
-    });
-    definitions.push(RawPlugin {
-        tag: REQUERY_SEQUENCE.to_owned(),
-        kind: "sequence".to_owned(),
-        args: RawValue::Sequence(requery_steps),
-        source_path: format!("generated {REQUERY_SEQUENCE}"),
         root_dir,
     });
     Ok(())
@@ -307,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_add_ecs_per_group_caches_and_a_cacheless_refresh_sequence() {
+    fn routes_add_ecs_and_per_group_caches() {
         let empty = || RawValue::Map(RawMap { entries: Vec::new() });
         let mut definitions = vec![
             plugin("cache_atom", "cache", map(vec![("dump_file", string("cache/cache_atom.dump"))])),
@@ -334,12 +324,11 @@ mod tests {
         assert!(rules.contains("routes=domestic=70000, foreignecs=70002"), "{rules}");
 
         let direct = text(&find(SEQUENCE).unwrap().args);
-        assert!(direct.contains("matches=mark 70002 70003, exec=flow_setter sequence=atom_direct upstream=foreignecs | ecs $client_ecs"), "{direct}");
-        assert!(direct.contains("matches=mark 70002, exec=$cache_atom_foreignecs"), "{direct}");
-        assert!(!direct.contains("mark 70000 70001, exec=flow_setter sequence=atom_direct upstream=domestic | ecs"), "{direct}");
-        let refresh = text(&find(REQUERY_SEQUENCE).unwrap().args);
-        assert!(!refresh.contains("$cache_atom"), "no rule cache when refreshing: {refresh}");
-        assert!(refresh.contains("exec=$foreignecs | cname_remover"), "{refresh}");
-        assert!(!refresh.contains("nocnfake") && !direct.contains("nocnfake"));
+        assert!(
+            direct.contains("matches=mark 70002 70003, exec=ecs $client_ecs | matches=mark 70002, exec=$cache_atom_foreignecs"),
+            "ECS is its own step, ahead of the cache: {direct}"
+        );
+        assert_eq!(direct.matches("ecs $client_ecs").count(), 1, "{direct}");
+        assert!(!direct.contains("nocnfake"));
     }
 }

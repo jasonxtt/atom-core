@@ -2234,6 +2234,16 @@ fn compile_definitions(
             PluginKind::Socks5Proxy | PluginKind::EcsAddress => {}
             PluginKind::Requery => {
                 let (requery, _file) = compile_requery(plugin)?;
+                requery.set_generated_caches(
+                    definitions
+                        .iter()
+                        .filter(|p| {
+                            p.kind == "cache"
+                                && p.tag.starts_with(&format!("{}_", atom_routes::CACHE))
+                        })
+                        .map(|p| p.tag.clone())
+                        .collect(),
+                );
                 requeries.push(RequeryConfig {
                     tag: plugin.tag.clone(),
                     runtime: Rc::new(requery),

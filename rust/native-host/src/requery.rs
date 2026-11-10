@@ -315,6 +315,10 @@ pub struct Requery {
     /// Learned-route category tags: a `flush_rules` URL that flushes one of
     /// them is skipped (the caches are still flushed).
     protected: RefCell<Vec<String>>,
+    /// atom fork: caches the configuration generates (`cache_atom_<group>`,
+    /// `config::atom_routes`) that `flush_rules` cannot name: flushed with
+    /// the listed ones whenever the list flushes anything.
+    generated_caches: RefCell<Vec<String>>,
 }
 
 /// The compiled plugin: the executable-less handle the API looks up by tag.
@@ -340,6 +344,16 @@ impl Requery {
             existing.unwrap_or_default(),
             sequence,
         ))
+    }
+
+    /// The generated caches to flush with `flush_rules` (atom fork).
+    pub(crate) fn set_generated_caches(&self, tags: Vec<String>) {
+        *self.generated_caches.borrow_mut() = tags;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generated_caches(&self) -> Vec<String> {
+        self.generated_caches.borrow().clone()
     }
 
     /// The sequence tag of `resolver: $tag` (`None` for the UDP address).
@@ -372,6 +386,7 @@ impl Requery {
             env: RefCell::new(None),
             fenced: Cell::new(false),
             protected: RefCell::new(Vec::new()),
+            generated_caches: RefCell::new(Vec::new()),
         }
     }
 
@@ -683,7 +698,16 @@ impl Requery {
             crate::diag::info_line!("{}: no domains found to process", self.tag);
             return End::Done;
         }
-        let (flush, skipped) = self.split_flush(flush);
+        let (mut flush, skipped) = self.split_flush(flush);
+        if !flush.is_empty() {
+            // In process (`local_url`): the plugin routes of the caches.
+            flush.extend(
+                self.generated_caches
+                    .borrow()
+                    .iter()
+                    .map(|tag| format!("http://127.0.0.1/plugins/{tag}/flush")),
+            );
+        }
         if skipped > 0 {
             crate::diag::info_line!(
                 "{}: skipping {skipped} flush_rules URL(s) that flush learned routes",
