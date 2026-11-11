@@ -39,8 +39,13 @@ function stale(failure: unknown) {
   return failure instanceof ApiError && failure.status === 409 && failure.body?.version !== undefined
 }
 
-/** Adds imported nodes to a group (or Final), keeping its other fields. */
-async function join(ids: string[], at: number) {
+/**
+ * Adds imported nodes to a group (or Final), keeping its other fields. It reads the state
+ * again first, so the members and the version it writes are the current ones.
+ */
+async function join(ids: string[]) {
+  await loadProxy()
+  const at = version.value
   if (form.joinGroup === FINAL) {
     const members = [...(final.value?.members ?? []), ...ids]
     await call(client.PUT('/final', { body: { members, version: at } }))
@@ -79,7 +84,7 @@ async function submit() {
       let joined = ''
       if (form.join && ids.length) {
         try {
-          await join(ids, answer.version)
+          await join(ids)
           joined = `，已加入「${joinTargets.value.find((item) => item.id === form.joinGroup)?.name ?? ''}」`
         } catch (failure) {
           toast('bad', `节点已导入，但加入节点组失败：${describe(failure)}`)

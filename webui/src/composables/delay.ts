@@ -1,5 +1,5 @@
 import { reactive } from 'vue'
-import { call, client, describe } from '../api/client'
+import { ApiError, call, client, describe } from '../api/client'
 import { loadRuntime, recordDelay } from './proxy'
 import { toast } from './toast'
 
@@ -13,6 +13,8 @@ export async function testNode(id: string, key = id) {
     const answer = await call(client.POST('/nodes/{id}/delay', { params: { path: { id } }, body: {} }))
     recordDelay(id, answer.delay)
   } catch (error) {
+    // sing-box could not reach it (502) or did not answer: a failed test, not an untested node.
+    if (!(error instanceof ApiError) || error.status === 0 || error.status >= 500) recordDelay(id, null)
     toast('bad', describe(error))
   } finally {
     delete testing[key]

@@ -3,12 +3,12 @@ import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { call, client, describe, type Schemas } from '../api/client'
 import { usePoll } from '../composables/poll'
+import { loadRuntime, runtime } from '../composables/proxy'
 import { refreshStatus, singboxVersion, status } from '../composables/status'
 import { sparkArea, sparkLine } from '../composables/spark'
 import { toast } from '../composables/toast'
 import { ago, bytes, duration, latency, latencyText, rate, triggers } from '../format'
 
-type Runtime = { groups: Record<string, { now: string }>; nodes: Record<string, { delay: number | null; time: string | null }> }
 
 const SAMPLES = 60
 const cpu = ref<number[]>([])
@@ -53,7 +53,6 @@ async function sampleSystem() {
   system.value = now
 }
 
-const runtime = ref<Runtime | null>(null)
 const nodes = ref<Schemas['Node'][]>([])
 const groups = ref<Schemas['Group'][]>([])
 const order = ref<string[]>([])
@@ -85,13 +84,14 @@ async function sampleConnections() {
 }
 
 async function loadState() {
-  const [nodeList, groupList, ruleTable, settingsNow, dnsNow, runtimeNow] = await Promise.allSettled([
+  const [nodeList, groupList, ruleTable, settingsNow, dnsNow] = await Promise.allSettled([
     call(client.GET('/nodes')),
     call(client.GET('/groups')),
     call(client.GET('/rules')),
     call(client.GET('/settings')),
     call(client.GET('/dns')),
-    call(client.GET('/runtime'))
+    // Shared with the group and node pages (it keeps failed tests).
+    loadRuntime()
   ])
   if (nodeList.status === 'fulfilled') nodes.value = nodeList.value.nodes
   if (groupList.status === 'fulfilled') {
@@ -101,8 +101,6 @@ async function loadState() {
   if (ruleTable.status === 'fulfilled') rules.value = ruleTable.value
   if (settingsNow.status === 'fulfilled') settings.value = settingsNow.value
   if (dnsNow.status === 'fulfilled') dns.value = dnsNow.value
-  // 409: sing-box has no configuration yet; nothing to show.
-  runtime.value = runtimeNow.status === 'fulfilled' ? (runtimeNow.value as Runtime) : null
 }
 
 usePoll(sampleSystem, 3000)

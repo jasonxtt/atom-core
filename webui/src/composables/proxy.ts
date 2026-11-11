@@ -27,26 +27,48 @@ export const final = ref<Schemas['Final'] | null>(null)
 export const version = ref(0)
 export const runtime = ref<Runtime | null>(null)
 
+/**
+ * Reads nodes, groups and Final. They share one version, so the three answers are one
+ * snapshot only when their versions agree; a write between the reads makes them read again.
+ */
 export async function loadProxy() {
-  const [nodeList, groupList, finalState] = await Promise.all([
-    call(client.GET('/nodes')),
-    call(client.GET('/groups')),
-    call(client.GET('/final'))
-  ])
-  nodes.value = nodeList.nodes
-  groups.value = groupList.groups
-  order.value = groupList.order
-  final.value = finalState
-  version.value = Math.max(nodeList.version, groupList.version, finalState.version)
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const [nodeList, groupList, finalState] = await Promise.all([
+      call(client.GET('/nodes')),
+      call(client.GET('/groups')),
+      call(client.GET('/final'))
+    ])
+    if (nodeList.version === groupList.version && groupList.version === finalState.version) {
+      nodes.value = nodeList.nodes
+      groups.value = groupList.groups
+      order.value = groupList.order
+      final.value = finalState
+      version.value = nodeList.version
+      return
+    }
+  }
+  throw new Error('节点和节点组正在被修改，读取失败，请稍后重试')
 }
+
+// Failed tests by node (when): sing-box drops a node's history when a test fails, so a failure
+// is kept here until sing-box reports a newer result for that node.
+const failures = new Map<string, string>()
 
 /** `GET runtime`; null while sing-box has no configuration or does not answer. */
 export async function loadRuntime() {
+  let answer: Runtime
   try {
-    runtime.value = (await call(client.GET('/runtime'))) as Runtime
+    answer = (await call(client.GET('/runtime'))) as Runtime
   } catch {
     runtime.value = null
+    return
   }
+  for (const [id, at] of failures) {
+    const known = answer.nodes[id]
+    if (known?.time && Date.parse(known.time) >= Date.parse(at)) failures.delete(id)
+    else answer.nodes[id] = { delay: null, time: at }
+  }
+  runtime.value = answer
 }
 
 /** A write refused for a stale version reloads the state; other failures are shown. */
@@ -109,8 +131,10 @@ export function delayOf(id: string | undefined) {
   return leaf ? runtime.value?.nodes[leaf] : undefined
 }
 
-/** Records a delay answer (until the next runtime read replaces it). */
+/** Records a test's result; a failed one (no delay) lasts until sing-box has a newer one. */
 export function recordDelay(id: string, delay: number | null | undefined) {
-  if (!runtime.value) return
-  runtime.value.nodes[id] = { delay: delay ?? null, time: new Date().toISOString() }
+  const time = new Date().toISOString()
+  if (delay == null) failures.set(id, time)
+  else failures.delete(id)
+  if (runtime.value) runtime.value.nodes[id] = { delay: delay ?? null, time }
 }

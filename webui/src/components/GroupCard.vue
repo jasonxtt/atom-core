@@ -64,7 +64,16 @@ const memberTesting = (member: string) => testing[isGroup(member) ? `m:${member}
         <button class="lat" :class="head.kind" type="button" :title="`整组测速：${view.name}`" @click.stop="testGroup(view.id)">
           {{ testing[`g:${view.id}`] ? '…' : head.kind === 'idle' ? '测速' : head.text }}
         </button>
-        <span class="muted" aria-hidden="true">{{ open ? '▴' : '▾' }}</span>
+        <button
+          class="ico"
+          type="button"
+          style="width: 24px; height: 24px"
+          :aria-expanded="!!open"
+          :aria-label="`${open ? '收起' : '展开'}：${view.name}`"
+          @click.stop="emit('toggle')"
+        >
+          {{ open ? '▴' : '▾' }}
+        </button>
       </template>
     </div>
     <div class="gnow">

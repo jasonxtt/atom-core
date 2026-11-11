@@ -34,10 +34,13 @@ export function duration(seconds: number): string {
 
 export type Latency = 'ok' | 'warn' | 'bad' | 'idle'
 
-/** A delay test: `delay` null with a `time` is a failed test, both null an untested node. */
+/**
+ * A delay test: `delay` null with a `time` is a failed test, both null an untested node. A
+ * test that answered is never a failure: under 200 ms is good, slower is high.
+ */
 export function latency(delay: number | null | undefined, time?: string | null): Latency {
   if (delay == null) return time ? 'bad' : 'idle'
-  return delay < 200 ? 'ok' : delay < 500 ? 'warn' : 'bad'
+  return delay < 200 ? 'ok' : 'warn'
 }
 
 export function latencyText(delay: number | null | undefined, time?: string | null): string {

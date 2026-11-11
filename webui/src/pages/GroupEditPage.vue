@@ -26,8 +26,21 @@ const form = reactive({
 const loaded = ref(false)
 const error = ref('')
 const saving = ref(false)
+// The version the form was filled from; a save carries it, so a change made elsewhere since
+// is refused (409) instead of being overwritten.
+const formVersion = ref(0)
+// After a 409: what is saved now, for the user to compare with the form.
+const conflict = ref<{ name: string; type: string; members: string[] } | null>(null)
+
+function latest() {
+  if (isFinal.value) return final.value ? { name: FINAL_NAME, type: 'selector', members: final.value.members } : null
+  const group = groups.value.find((item) => item.id === id.value)
+  return group ? { name: group.name, type: group.type, members: group.members } : null
+}
 
 function fill() {
+  formVersion.value = version.value
+  conflict.value = null
   if (isFinal.value) {
     Object.assign(form, { name: FINAL_NAME, type: 'selector', members: [...(final.value?.members ?? [])], selected: final.value?.selected ?? '', builtin: true })
     return
@@ -83,8 +96,18 @@ function toggle(member: string) {
   else form.members.splice(index, 1)
 }
 
-async function save() {
+/** Drops the form's edits and starts again from what is saved now. */
+function reload() {
   error.value = ''
+  fill()
+}
+
+async function save(overwrite = false) {
+  error.value = ''
+  if (overwrite) {
+    formVersion.value = version.value
+    conflict.value = null
+  }
   const name = form.name.trim()
   if (!isFinal.value && !name) {
     error.value = '请填写名称'
@@ -100,13 +123,13 @@ async function save() {
   saving.value = true
   try {
     if (isFinal.value) {
-      await call(client.PUT('/final', { body: { members: form.members, selected, version: version.value } }))
+      await call(client.PUT('/final', { body: { members: form.members, selected, version: formVersion.value } }))
     } else {
       const body = {
         name,
         type: form.type,
         members: form.members,
-        version: version.value,
+        version: formVersion.value,
         ...(form.type === 'selector'
           ? { selected }
           : {
@@ -123,7 +146,14 @@ async function save() {
   } catch (failure) {
     if (failure instanceof ApiError && failure.status === 409 && failure.body?.version !== undefined) {
       await loadProxy().catch(() => {})
-      error.value = '节点或节点组已在别处修改，已载入最新版本；你的修改还在，请确认后再保存（409）'
+      if (!id.value) {
+        // A new group overwrites nothing: the next save carries the current version.
+        formVersion.value = version.value
+        error.value = '节点或节点组已在别处修改，已载入最新版本，请再保存一次（409）'
+      } else {
+        conflict.value = latest()
+        if (!conflict.value) error.value = '这个节点组已在别处删除（409）'
+      }
     } else {
       error.value = describe(failure)
     }
@@ -219,10 +249,21 @@ async function save() {
         </template>
       </draggable>
       <div v-if="!form.members.length" class="err">空组</div>
+      <div v-if="conflict" class="grid" style="gap: 8px">
+        <div class="err">已在别处修改（409）。现在保存的是：</div>
+        <div class="tile" style="font-size: 12.5px">
+          <div>{{ conflict.name }} · {{ conflict.type === 'selector' ? '手动' : '自动测速' }}</div>
+          <div class="t2">{{ conflict.members.map(nameOf).join('、') || '空组' }}</div>
+        </div>
+        <div class="row" style="justify-content: flex-end">
+          <button class="btn" type="button" @click="reload">载入最新内容</button>
+          <button class="btn red" type="button" :disabled="saving" @click="save(true)">仍然保存</button>
+        </div>
+      </div>
       <div v-if="error" class="err">{{ error }}</div>
-      <div class="row" style="justify-content: flex-end">
+      <div v-if="!conflict" class="row" style="justify-content: flex-end">
         <button class="btn" type="button" @click="router.push('/groups')">取消</button>
-        <button class="btn pri" type="button" :disabled="saving || (!isFinal && !form.name.trim())" @click="save">保存</button>
+        <button class="btn pri" type="button" :disabled="saving || (!isFinal && !form.name.trim())" @click="save()">保存</button>
       </div>
     </div>
   </div>
