@@ -288,7 +288,9 @@ async function save(overwrite = false) {
     error.value = '有客户端条件时不能代理'
     return
   }
-  const direct = form.action === 'direct' && hasNamePart.value
+  // A direct rule keeps its upstream group and cache switch even while it has no name part
+  // (they are hidden then, and apply again once it has one).
+  const direct = form.action === 'direct'
   const body = {
     enabled: form.enabled,
     remark: form.remark.trim(),

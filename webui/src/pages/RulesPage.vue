@@ -66,8 +66,11 @@ function replacement(rule: Rule, change: Partial<Pick<Rule, 'enabled' | 'action'
   }
 }
 
+// One write at a time: each carries the table's version, so a second one sent before the first
+// answered would be refused (or answered out of order).
 const busy = ref('')
 async function change(rule: Rule, edit: Partial<Pick<Rule, 'enabled' | 'action'>>) {
+  if (busy.value) return
   busy.value = rule.id
   try {
     const answer = await call(client.PUT('/rules/{id}', { params: { path: { id: rule.id } }, body: replacement(rule, edit) }))
@@ -95,7 +98,9 @@ async function moved(event: { newIndex: number; oldIndex: number }) {
   const body: { id: string; version: number; before_id?: string; after_id?: string } = { id, version: rulesVersion.value }
   if (event.newIndex + 1 < list.length) body.before_id = list[event.newIndex + 1].id
   else body.after_id = list[event.newIndex - 1].id
+  busy.value = id
   await send(body)
+  busy.value = ''
 }
 
 /** The keyboard way to move: the arrows on a rule's handle move it one place. */
@@ -131,7 +136,7 @@ async function send(body: { id: string; version: number; before_id?: string; aft
 const removing = ref<Rule | null>(null)
 async function remove() {
   const rule = removing.value
-  if (!rule) return
+  if (!rule || busy.value) return
   busy.value = rule.id
   try {
     const answer = await call(client.DELETE('/rules/{id}', { params: { path: { id: rule.id }, query: { version: rulesVersion.value } } }))
@@ -172,6 +177,7 @@ async function remove() {
       item-key="id"
       class="list"
       handle=".handle"
+      :disabled="!!busy"
       :animation="180"
       :force-fallback="true"
       :fallback-on-body="true"
@@ -204,10 +210,10 @@ async function remove() {
             :class="{ on: rule.enabled }"
             :aria-label="`${rule.enabled ? '停用' : '启用'}：${rule.remark || rule.id}`"
             :aria-pressed="rule.enabled"
-            :disabled="busy === rule.id"
+            :disabled="!!busy"
             @click="change(rule, { enabled: !rule.enabled })"
           ></button>
-          <select class="inp act" :value="actionKey(rule)" :aria-label="`动作：${rule.remark || rule.id}`" :disabled="busy === rule.id" @change="setAction(rule, ($event.target as HTMLSelectElement).value)">
+          <select class="inp act" :value="actionKey(rule)" :aria-label="`动作：${rule.remark || rule.id}`" :disabled="!!busy" @change="setAction(rule, ($event.target as HTMLSelectElement).value)">
             <option v-for="target in proxyTargets" :key="target.id" :value="`proxy:${target.id}`" :disabled="!!rule.match.client?.length">代理 → {{ target.name }}</option>
             <option value="direct">直连</option>
             <option value="block">屏蔽</option>
