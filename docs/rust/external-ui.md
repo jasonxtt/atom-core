@@ -11,52 +11,21 @@ Contract: [native-webui-hosting.md](contracts/native-webui-hosting.md) ("Same-or
 
 ## Build a package (developer)
 ```sh
-cd webui-log
-UI_VERSION=v0.4.0-ui2 npm run build            # webui-log/dist/ (UI_VERSION is optional; default: git describe)
-UI_VERSION=v0.4.0-ui2 npm run build:package    # and release/atomdns-webui.tar.gz
+cd webui
+UI_VERSION=v0.4.0-ui2 npm run build            # webui/dist/ (UI_VERSION is optional; default: git describe)
+UI_VERSION=v0.4.0-ui2 npm run build:package    # and release/atom-webui.tar.gz
 ```
-`webui-log/dist/` holds `index.html`, `app.js`, `app.css`, `chunks/`, `assets/` and `ui-manifest.json`; `atomdns-webui.tar.gz` has the same files at its top level
-(the release asset of the same name is built this way). Resource URLs are **relative**, so one package works as `ui/main` and under any other name.
-
-## Optional glass UI (`/bl/`)
-
-The glass variant reuses the maintained UI's routes, menus, pages and API workflows.
-It adds the MosDNS light/dark glass palette and browser-local background controls;
-the duplicate page-title strip is hidden. The normal build remains unchanged.
-
-```sh
-cd webui-log
-npm ci
-npm run build:bl              # dist-bl/ only; no release archive
-```
-
-Install the contents of `webui-log/dist-bl/` into `<config root>/ui/bl/` using the
-same package installation procedure below. Build outputs are ignored by Git.
-This variant is not included in the normal release build or online update of `ui/main`.
-
-Source:
-- `webui-log/src/glass.css`: palette, shared transparency/blur and component surfaces.
-- `webui-log/src/pages/system/SystemGlassSection.vue`: System Management → background and glass appearance.
-- `webui-log/src/utils/glassAppearance.js`: browser storage, validation and live preview.
-
-Local images (PNG/JPEG/WebP/GIF, up to 3 MiB) are read in the browser and saved as
-data URLs in `localStorage` under `atomdns-bl-appearance-v1`, together with opacity,
-blur, background colors and text/accent overrides. No image-upload API or backend
-change is involved. Image links load directly from the browser. These preferences
-are specific to the browser and origin; clearing site data removes them. A storage
-quota/private-mode failure is reported instead of claiming a successful save.
-
-Glass panes share one opacity; controls use a lighter tint inside them and nested
-groups avoid repeated blur. Text, focus rings, chart colors and switch knobs retain
-their semantic colors. The source also includes opaque fallback styling for browsers
-without backdrop-filter and reduced-transparency preferences.
+`webui/dist/` holds `index.html`, `app.js`, `app.css`, `chunks/`, `assets/` and `ui-manifest.json`; `atom-webui.tar.gz` has the same files at its top level.
+Resource URLs are **relative** and routes are hash routes, so one package works as `ui/main` and under any other name. The build type-checks the pages against
+the API types, which `npm run gen:api` generates from `docs/api/openapi.yaml`. atom step 6b replaced the former `webui-log/` (and its optional glass variant at `/bl/`)
+with `webui/`.
 
 ## Install / update (operator)
 Online updates replace `ui/main` together with the program when `ui/main` exists ([native-update.md](contracts/native-update.md)); by hand:
 1. Unpack into the directory (the configuration root is the directory that holds `config_custom.yaml`; for `atomdns start -d /cus/atomdns` that is `/cus/atomdns`):
    ```sh
-   mkdir -p /cus/atomdns/ui/main && tar -xzf atomdns-webui.tar.gz -C /cus/atomdns/ui/main      # the WebUI at /
-   mkdir -p /cus/atomdns/ui/pg && tar -xzf atomdns-webui.tar.gz -C /cus/atomdns/ui/pg          # another copy at /pg/
+   mkdir -p /cus/atomdns/ui/main && tar -xzf atom-webui.tar.gz -C /cus/atomdns/ui/main      # the WebUI at /
+   mkdir -p /cus/atomdns/ui/pg && tar -xzf atom-webui.tar.gz -C /cus/atomdns/ui/pg          # another copy at /pg/
    ```
    Replace a package by unpacking into an empty directory (remove the old one first), so no files of the old version are left behind.
 2. **Restart once** so the program checks the package (`POST /api/v1/system/restart`, the "重启" button, or `systemctl restart atomdns`). Directories are registered at start-up.
@@ -75,4 +44,4 @@ supports), or `index.html` is missing, the package is **not mounted**: `/<name>/
 `GET /api/v1/system/health` shows `{"name": "pg", "path": "/pg/", "mounted": false, "kind": "atomdns_ui", "reason": "…"}`. Fix by installing a matching package or updating the program.
 
 ## Roll back
-Unpack the previous version's `atomdns-webui.tar.gz` into the directory (and restart once). Deleting `ui/main` leaves the pure backend; deleting another `ui/<name>` removes only that address.
+Unpack the previous version's `atom-webui.tar.gz` into the directory (and restart once). Deleting `ui/main` leaves the pure backend; deleting another `ui/<name>` removes only that address.

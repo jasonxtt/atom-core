@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: webui-log/package-lock.json
+          cache-dependency-path: webui/package-lock.json
       - name: Install the cross toolchain and qemu
         # zig is the C cross compiler/linker for the static musl ARM builds (ring has C and asm);
         # qemu-user-static runs the ARM programs for `atomdns version` and the smoke test below.

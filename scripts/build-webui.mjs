@@ -1,7 +1,7 @@
-// Builds the WebUI package: webui-log/dist/{index.html, app.js, app.css, chunks/, assets/, ui-manifest.json}.
+// Builds the WebUI package: webui/dist/{index.html, app.js, app.css, chunks/, assets/, ui-manifest.json}.
 // Installed as `<config root>/ui/main/` it is served at `/`; as any other `ui/<name>/` at `/<name>/`.
 //   npm run build            the package directory only
-//   npm run build:package    and release/atomdns-webui.tar.gz (the package files at the top level)
+//   npm run build:package    and release/atom-webui.tar.gz (the package files at the top level)
 // UI_VERSION overrides the version (default: git describe, then "dev"). The archive needs `tar`.
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url'
 import { ARCHIVE_NAME, buildManifest, validVersion } from './external-ui-manifest.mjs'
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const workspace = path.join(repository, 'webui-log')
-const output = path.join(workspace, process.env.VITE_UI_VARIANT === 'glass' ? 'dist-bl' : 'dist')
+const workspace = path.join(repository, 'webui')
+const output = path.join(workspace, 'dist')
 
 function describe() {
   try {
@@ -24,6 +24,8 @@ function describe() {
 const version = process.env.UI_VERSION || describe()
 if (!validVersion(version)) throw new Error(`invalid UI version: ${JSON.stringify(version)}`)
 
+// The pages are type-checked against the API types (`npm run gen:api`) before the build.
+execFileSync('npx', ['vue-tsc', '--noEmit'], { cwd: workspace, stdio: 'inherit' })
 execFileSync('npx', ['vite', 'build'], {
   cwd: workspace,
   stdio: 'inherit',
@@ -36,7 +38,7 @@ console.log(`WebUI ${version}: ${output}`)
 if (process.argv.includes('--package')) {
   const releaseDirectory = path.join(repository, 'release')
   mkdirSync(releaseDirectory, { recursive: true })
-  const archive = path.join(releaseDirectory, process.env.VITE_UI_VARIANT === 'glass' ? 'atomdns-webui-bl.tar.gz' : ARCHIVE_NAME)
+  const archive = path.join(releaseDirectory, ARCHIVE_NAME)
   rmSync(archive, { force: true })
   // ustar, numeric root ownership, sorted names, no `./` prefix and (on macOS) no AppleDouble
   // files: the updater accepts plain files and directories only.

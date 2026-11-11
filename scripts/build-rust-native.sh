@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the atomdns program (the pure Rust host). It embeds no WebUI: the WebUI is the separate
-# package `npm run build` / `npm run build:package` in webui-log (installed as <config root>/ui/main/).
+# package `npm run build` / `npm run build:package` in webui (installed as <config root>/ui/main/).
 # Cross builds: CARGO_BUILD_TARGET=<triple> (and CARGO_SUBCOMMAND=zigbuild for the musl and ARM glibc targets, see
 # build-rust-release.sh); the finished program must be runnable here (natively or through qemu-user).
 set -euo pipefail

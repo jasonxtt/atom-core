@@ -32,10 +32,10 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: webui-log/package-lock.json
+          cache-dependency-path: webui/package-lock.json
       - name: Test and build the WebUI
-        working-directory: webui-log
+        working-directory: webui
         run: |
           npm ci --include=dev
-          node --test tests/*.test.mjs
+          npm test
           npm run build

@@ -15,8 +15,9 @@ excluded from Git tracking. A fresh clone does not require them to build AtomDNS
 ## WebUI
 
 Since v0.4.0 the program embeds no UI: `/` serves `<config root>/ui/main/`, the WebUI package
-built from `webui-log/src` by `npm run build` (`webui-log/dist/`, not checked in) or
-`npm run build:package` (`release/atomdns-webui.tar.gz`, the release asset); the former
+built from `webui/` by `npm run build` (`webui/dist/`, not checked in) or
+`npm run build:package` (`release/atom-webui.tar.gz`); atom step 6b replaced the former `webui-log/`
+with `webui/`; the former
 `rust/native-host/ui/` tree was removed. Since Phase 6a the `rust` branch has no Go host and no
 `/log` compatibility UI (`webui-log/src-log1` was removed; it lives in the Go
 repository). The leftover Go-era `webui-blog/` source was removed on 2026-10-18 (user

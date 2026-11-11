@@ -9,7 +9,7 @@ coremain/                 process lifecycle, generated config, HTTP API, embedde
 plugin/                   AtomDNS plugin registration and implementations
   executable/cache/      current Go cache plugin and compatibility contract
 pkg/                      reusable Go DNS, matcher, transport, cache, and utility code
-webui-log/                maintained Vue UI served at /
+webui/                    atom WebUI (Vue) served at /
 webui-blog/               legacy-compatible UI assets
 rust/                     gradual Rust data-plane crates (introduced by migration tasks)
 scripts/                  repository build and release entrypoints

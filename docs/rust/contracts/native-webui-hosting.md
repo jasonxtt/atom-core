@@ -43,26 +43,26 @@ Root replacement does not change the pinned mount. Unsupported platforms or
 kernels fail closed for every UI directory (`/` shows the "no WebUI" page); the API continues. Startup
 failures produce bounded diagnostics, without filenames/content disclosure.
 
-**WebUI packages (UI-1, v0.4.0).** `npm run build` in `webui-log/` builds the WebUI package into
-`webui-log/dist/` (`index.html`, `app.js`, `app.css`, `chunks/`, `assets/`, `ui-manifest.json`) with
+**WebUI packages (UI-1, v0.4.0).** `npm run build` in `webui/` (atom step 6b; formerly `webui-log/`) builds the WebUI package into
+`webui/dist/` (`index.html`, `app.js`, `app.css`, `chunks/`, `assets/`, `ui-manifest.json`) with
 **relative** resource URLs (`base: './'`), so the same package works as `ui/main` at `/` and as any
 `ui/<name>` at `/<name>/` (API calls are same-origin absolute paths); `npm run build:package` also
-writes `release/atomdns-webui.tar.gz` (the package files at the top level: the release asset). Online
+writes `release/atom-webui.tar.gz` (the package files at the top level). Online
 updates replace `ui/main` with the release's package when, and only when, `ui/main` exists
 ([native-update](native-update.md)); other `ui/<name>` directories are never touched. Directory
 names follow the rules above. A **atomdns UI package** is a directory that carries a
 `ui-manifest.json`:
 
 ```json
-{"manifest_schema": 1, "ui_version": "v0.7.3-12-gabcdef", "built_at": "2026-10-17T10:00:00Z", "api_level": 1, "requires_api_level": 1}
+{"manifest_schema": 1, "ui_version": "v0.7.3-12-gabcdef", "built_at": "2026-10-17T10:00:00Z", "api_level": 2, "requires_api_level": 2}
 ```
 
 `manifest_schema` must be 1; `ui_version` is required (non-empty, at most 64 characters, no
 control characters); `built_at` is optional; `api_level` is the interface level the UI was built for
 and `requires_api_level` (default `api_level`) the least level it needs from the host. The host
-provides `HOST_API_LEVEL = 1` and still serves UIs built for `MIN_UI_API_LEVEL = 1` or later
-(`rust/native-host/src/ui_manifest.rs`; backward-compatible additions do not change the level, the UI
-degrades by `/api/v1/capabilities`). **Compatible ⇔ `requires_api_level ≤ HOST_API_LEVEL` and
+provides `HOST_API_LEVEL = 2` and still serves UIs built for `MIN_UI_API_LEVEL = 2` or later
+(`rust/native-host/src/ui_manifest.rs`; atom: level 2 is `/api/v1/atom/`, level 1 UIs used the
+interfaces removed in step 6a; backward-compatible additions do not change the level). **Compatible ⇔ `requires_api_level ≤ HOST_API_LEVEL` and
 `api_level ≥ MIN_UI_API_LEVEL`.** The manifest check applies **only to directories that have a
 manifest**, `ui/main` included. At startup the registry looks in each pinned `ui/<name>` directory for
 `ui-manifest.json` (beneath-only, no symlinks, a regular file of at most 64 KiB):
@@ -281,6 +281,10 @@ above, `/metrics`, and `perf` on the host (`perf record -e cpu-clock -F 999 --ca
 
 ## Capability discovery and UI
 
+> atom (step 6b): this section and the two after it describe the retired AtomDNS WebUI
+> (`webui-log/`, deleted) and its management interfaces (removed in step 6a). They are kept as
+> history. The atom WebUI is `webui/`, built against `docs/api/openapi.yaml`.
+
 Schema1 retains its existing keys and adds `ui_operations`: 30 IDs (the
 [approved matrix](../plans/native-webui-runtime-capabilities.md) with `switches.manage`
 replaced by `flags.manage` in M2-1 and `appearance.server` removed in the UI redo), each with
@@ -383,6 +387,6 @@ executable); it runs no frontend build. `BUILD_VERSION` overrides repository
 `.manifest.json` records the source hashes (`rust/` and the two build scripts), compiler,
 artifact SHA-256 and CLI version. Source ID is null unless `BUILD_SOURCE_ID` is explicitly
 supplied; dirty code is not represented as clean HEAD. The WebUI is built separately
-(`npm run build` / `npm run build:package` in `webui-log/`, above); Node is a build-time tool
+(`npm run build` / `npm run build:package` in `webui/`, above); Node is a build-time tool
 only. Earlier evidence: [task evidence](../validation-records/10-04-rust-native-webui-runtime-capabilities/s6-status.md);
 v0.4.0: [10-24-v0.4.0-ui-split](../validation-records/10-24-v0.4.0-ui-split/README.md).

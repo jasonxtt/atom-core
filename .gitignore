@@ -21,8 +21,7 @@ release/
 .vscode/
 .idea/
 node_modules/
-webui-log/node_modules/
-webui-log/dist/
+webui/dist/
 rust/target/
 
 # test utils
@@ -45,9 +44,6 @@ demo/
 # Retired root eBPF build artifact
 /proxy.o
 
-# external UI package build output (webui-log, `npm run build:external`)
-webui-log/dist-external/
 docs/site/.vitepress/dist/
 docs/site/.vitepress/cache/
 
-/webui-log/dist-bl/

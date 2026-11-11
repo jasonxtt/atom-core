@@ -7,14 +7,15 @@
 #[cfg(any(target_os = "linux", test))]
 use serde::Deserialize;
 
-/// The interface level this host serves (the `/api/...`, `/plugins/...`, `/metrics` and
-/// capability surface the maintained UI talks to). Backward-compatible additions do not change
-/// it (the UI degrades per `/api/v1/capabilities`); a breaking change raises it.
+/// The interface level this host serves (atom: 2 is the `/api/v1/atom/` API of
+/// `docs/api/openapi.yaml`). Backward-compatible additions do not change it; a breaking change
+/// raises it.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) const HOST_API_LEVEL: u64 = 1;
-/// The oldest UI interface level this host still serves.
+pub(crate) const HOST_API_LEVEL: u64 = 2;
+/// The oldest UI interface level this host still serves (atom: level 1 UIs used the management
+/// interfaces removed in step 6a).
 #[cfg(any(target_os = "linux", test))]
-pub(crate) const MIN_UI_API_LEVEL: u64 = 1;
+pub(crate) const MIN_UI_API_LEVEL: u64 = 2;
 /// The largest manifest read.
 #[cfg(target_os = "linux")]
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
@@ -90,13 +91,13 @@ mod tests {
     #[test]
     fn a_compatible_manifest_reports_its_version() {
         let info = manifest(
-            r#"{"manifest_schema":1,"ui_version":"v1.2.3","built_at":"2026-10-17T10:00:00Z","api_level":1,"requires_api_level":1,"extra":true}"#,
+            r#"{"manifest_schema":1,"ui_version":"v1.2.3","built_at":"2026-10-17T10:00:00Z","api_level":2,"requires_api_level":2,"extra":true}"#,
         )
         .unwrap();
         assert_eq!(info.ui_version, "v1.2.3");
         assert_eq!(info.built_at.as_deref(), Some("2026-10-17T10:00:00Z"));
         // `requires_api_level` defaults to `api_level`; `built_at` is optional.
-        let info = manifest(r#"{"manifest_schema":1,"ui_version":"x","api_level":1}"#).unwrap();
+        let info = manifest(r#"{"manifest_schema":1,"ui_version":"x","api_level":2}"#).unwrap();
         assert_eq!(info.built_at, None);
     }
 
@@ -113,9 +114,9 @@ mod tests {
             "a newer UI that only needs today's level works"
         );
         let too_new = level(HOST_API_LEVEL + 1, HOST_API_LEVEL + 1).unwrap_err();
-        assert!(too_new.contains("需要接口级别 2"), "{too_new}");
+        assert!(too_new.contains("需要接口级别 3"), "{too_new}");
         let too_old = level(MIN_UI_API_LEVEL - 1, 0).unwrap_err();
-        assert!(too_old.contains("面向接口级别 0"), "{too_old}");
+        assert!(too_old.contains("面向接口级别 1"), "{too_old}");
     }
 
     #[test]
@@ -124,24 +125,24 @@ mod tests {
             ("not json", "不是合法的 JSON"),
             ("[]", "不是合法的 JSON"),
             (
-                r#"{"manifest_schema":2,"ui_version":"x","api_level":1}"#,
+                r#"{"manifest_schema":2,"ui_version":"x","api_level":2}"#,
                 "manifest_schema 必须为 1",
             ),
             (
-                r#"{"ui_version":"x","api_level":1}"#,
+                r#"{"ui_version":"x","api_level":2}"#,
                 "manifest_schema 必须为 1",
             ),
-            (r#"{"manifest_schema":1,"api_level":1}"#, "ui_version 缺失"),
+            (r#"{"manifest_schema":1,"api_level":2}"#, "ui_version 缺失"),
             (
-                r#"{"manifest_schema":1,"ui_version":"  ","api_level":1}"#,
+                r#"{"manifest_schema":1,"ui_version":"  ","api_level":2}"#,
                 "ui_version 缺失",
             ),
             (
-                r#"{"manifest_schema":1,"ui_version":"a\nb","api_level":1}"#,
+                r#"{"manifest_schema":1,"ui_version":"a\nb","api_level":2}"#,
                 "ui_version 缺失",
             ),
             (
-                r#"{"manifest_schema":1,"ui_version":"x","api_level":1,"built_at":"\u0007"}"#,
+                r#"{"manifest_schema":1,"ui_version":"x","api_level":2,"built_at":"\u0007"}"#,
                 "built_at 无效",
             ),
             (
@@ -157,7 +158,7 @@ mod tests {
             assert!(error.contains(reason), "{text}: {error}");
         }
         let long = format!(
-            r#"{{"manifest_schema":1,"ui_version":"{}","api_level":1}}"#,
+            r#"{{"manifest_schema":1,"ui_version":"{}","api_level":2}}"#,
             "v".repeat(65)
         );
         assert!(manifest(&long).unwrap_err().contains("ui_version"));

@@ -1,0 +1,26 @@
+{
+  "name": "atom-webui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "gen:api": "openapi-typescript ../docs/api/openapi.yaml -o src/api/schema.ts",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "node --test tests/*.test.mjs",
+    "build": "node ../scripts/build-webui.mjs",
+    "build:package": "node ../scripts/build-webui.mjs --package"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.15.0",
+    "vue": "^3.5.22",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "openapi-typescript": "^7.10.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.1.9",
+    "vue-tsc": "^3.1.1"
+  }
+}

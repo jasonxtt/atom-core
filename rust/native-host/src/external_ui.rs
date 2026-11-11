@@ -611,7 +611,7 @@ mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
 
-    const GOOD: &str = r#"{"manifest_schema":1,"ui_version":"v9","built_at":"2026-10-17T00:00:00Z","api_level":1,"requires_api_level":1}"#;
+    const GOOD: &str = r#"{"manifest_schema":1,"ui_version":"v9","built_at":"2026-10-17T00:00:00Z","api_level":2,"requires_api_level":2}"#;
 
     /// A configuration root whose `ui/` holds one directory per `(name, files)` entry.
     fn root_with(label: &str, packages: &[(&str, &[(&str, &str)])]) -> std::path::PathBuf {
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn any_directory_name_works_and_a_manifest_decides_whether_a_package_is_mounted() {
         const NEWER: &str =
-            r#"{"manifest_schema":1,"ui_version":"v","api_level":2,"requires_api_level":2}"#;
+            r#"{"manifest_schema":1,"ui_version":"v","api_level":3,"requires_api_level":3}"#;
         let root = root_with(
             "names",
             &[
@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(plain.reason.as_deref(), Some(NO_MANIFEST_NOTE));
         assert!(registry.mounts.contains_key("plain"));
         for (name, reason) in [
-            ("newer", "需要接口级别 2"),
+            ("newer", "需要接口级别 3"),
             ("garbage", "不是合法的 JSON"),
             ("no-index", "缺少 index.html"),
         ] {
@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn without_a_usable_ui_main_the_root_explains_and_everything_else_is_unchanged() {
         const NEWER: &str =
-            r#"{"manifest_schema":1,"ui_version":"v","api_level":2,"requires_api_level":2}"#;
+            r#"{"manifest_schema":1,"ui_version":"v","api_level":3,"requires_api_level":3}"#;
         let missing = root_with("no-main", &[("aa", &[("index.html", "AA")])]);
         let refused = root_with(
             "refused-main",
@@ -959,7 +959,7 @@ mod tests {
         std::os::unix::fs::symlink(linked.join("ui/real"), linked.join("ui/main")).unwrap();
         for (root, reason) in [
             (&missing, None),
-            (&refused, Some("需要接口级别 2")),
+            (&refused, Some("需要接口级别 3")),
             (&linked, Some("符号链接")),
         ] {
             let registry = Registry::scan(Some(root));

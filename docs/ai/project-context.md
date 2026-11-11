@@ -20,7 +20,7 @@ behavioural reference (see `tools/go-reference/README.md`).
 ## Repository map
 
 - `rust/`: the Cargo workspace. `native-host` is the product (`atomdns` binary, built-in `/` UI, management API, update guard); `dns-core`, `cache-core`, `matcher-core`, `sequence-core`, `upstream-core` are its libraries
-- `webui-log/`: active Vue frontend workspace (historical name); `src/` builds the WebUI package (`npm run build` → `webui-log/dist/`, `npm run build:package` → `release/atomdns-webui.tar.gz`), installed as `<config root>/ui/main/` (served at `/`) or any other `ui/<name>/`. The program embeds no UI (v0.4.0)
+- `webui/`: the atom WebUI (Vue 3 + Vite + TypeScript, step 6b; it replaced `webui-log/`), typed from `docs/api/openapi.yaml`; builds the WebUI package (`npm run build` → `webui/dist/`, `npm run build:package` → `release/atom-webui.tar.gz`), installed as `<config root>/ui/main/` (served at `/`) or any other `ui/<name>/`. The program embeds no UI (v0.4.0)
 - `scripts/`: Rust build and release scripts (`build-rust-native.sh`, `build-rust-release.sh`, `generate-rust-update-manifest.sh`; release steps in `docs/rust/release.md`) and measurement helpers
 - `tools/`: differential and evidence tools (Python, plus thin Go wrappers built from the Go repository by `tools/go-reference/build.sh`)
 - `tests/phase5a-baseline/`: workload/config fixtures read by Rust tests, and the standalone Go load-generator helper (own `go.mod`, not needed by the Rust build)
@@ -38,7 +38,7 @@ The normal route contract is:
 - `/<name>/` → optional external UI package from `<config root>/ui/<name>/`, any directory name (Rust-native; see `docs/rust/external-ui.md`)
 
 Do not infer the route from a directory name. Verify `rust/native-host/src/external_ui.rs`,
-`rust/native-host/src/static_ui.rs` and `webui-log/vite.config.js` before changing UI behavior.
+`rust/native-host/src/static_ui.rs` and `webui/vite.config.ts` before changing UI behavior.
 
 ## Compatibility contracts
 

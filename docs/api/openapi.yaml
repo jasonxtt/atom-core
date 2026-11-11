@@ -2885,9 +2885,9 @@ components:
             running:
               type: boolean
             version:
-              type: object
+              type: string
               nullable: true
-              description: Clash API `/version`.
+              description: The `version` of Clash API `/version` (`sing-box 1.14.4-atom`); null when sing-box does not answer.
             in_sync:
               type: boolean
               description: The running file is the one the current state generates.

@@ -102,7 +102,7 @@ pub(crate) async fn write_not_installed<W: AsyncWrite + Unpin>(
     let body = format!(
         "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>atomdns</title>\
          <p>atomdns 正在运行，但没有安装 WebUI。</p>{detail}\
-         <p>把 atomdns-webui.tar.gz 解压到 &lt;配置根&gt;/ui/main/ 后重启即可；接口照常可用。</p></html>\n"
+         <p>把 atom-webui.tar.gz 解压到 &lt;配置根&gt;/ui/main/ 后重启即可；接口照常可用。</p></html>\n"
     );
     let response = async {
         writer

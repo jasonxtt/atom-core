@@ -27,10 +27,10 @@ tar -xzf atomdns-webui.tar.gz -C /cus/atomdns/ui/main
 
 ## 自己构建
 
-界面源码在仓库的 `webui-log/` 目录（Vue）：
+界面源码在仓库的 `webui/` 目录（Vue）：
 
 ```bash
-cd webui-log
+cd webui
 npm ci
-npm run build:package    # 生成 release/atomdns-webui.tar.gz
+npm run build:package    # 生成 release/atom-webui.tar.gz
 ```

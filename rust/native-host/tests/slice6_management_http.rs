@@ -695,7 +695,7 @@ fn ui_main_is_the_root_served_live_over_real_http_without_audit_or_metrics() {
     let fixture = fixture("ui-main", free_udp_port(), free_tcp_port());
     fixture.write(
         "ui/main/ui-manifest.json",
-        r#"{"manifest_schema":1,"ui_version":"v9.9.9","api_level":1}"#,
+        r#"{"manifest_schema":1,"ui_version":"v9.9.9","api_level":2}"#,
     );
     fixture.write("ui/main/index.html", "<html>main</html>");
     fixture.write("ui/main/app.js", "console.log(1)");
@@ -875,9 +875,9 @@ fn external_ui_is_live_confined_and_root_pinned() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn external_ui_packages_use_any_directory_name_and_a_manifest_decides_mounting() {
-    const GOOD: &str = r#"{"manifest_schema":1,"ui_version":"v9.9","built_at":"2026-10-17T00:00:00Z","api_level":1,"requires_api_level":1}"#;
+    const GOOD: &str = r#"{"manifest_schema":1,"ui_version":"v9.9","built_at":"2026-10-17T00:00:00Z","api_level":2,"requires_api_level":2}"#;
     const TOO_NEW: &str =
-        r#"{"manifest_schema":1,"ui_version":"v10","api_level":2,"requires_api_level":2}"#;
+        r#"{"manifest_schema":1,"ui_version":"v10","api_level":3,"requires_api_level":3}"#;
     let fixture = fixture("ui-packages", free_udp_port(), free_tcp_port());
     for (path, text) in [
         // The same package under two unrelated names: the mount name is the directory name.
@@ -942,7 +942,7 @@ fn external_ui_packages_use_any_directory_name_and_a_manifest_decides_mounting()
         );
         assert!(plain["ui_version"].is_null());
         for (name, kind, reason) in [
-            ("newer", "atomdns_ui", "需要接口级别 2"),
+            ("newer", "atomdns_ui", "需要接口级别 3"),
             ("broken", "atomdns_ui", "不是合法的 JSON"),
             ("log", "unusable", "保留名"),
         ] {

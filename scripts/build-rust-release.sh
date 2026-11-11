@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the release artifacts for a tag on a Linux x86_64 host: atomdns-linux-<variant>.tar.gz
-# (one file, `atomdns`; the variant is amd64 by default), atomdns-webui.tar.gz (the WebUI package:
+# (one file, `atomdns`; the variant is amd64 by default), atom-webui.tar.gz (the WebUI package:
 # the files of <config root>/ui/main/ at the top level) and atomdns-update-manifest.json. Nothing is
 # published; attach the files to a GitHub release named like the tag by hand or from CI.
 #   scripts/build-rust-release.sh vX.Y.Z [out-dir]
@@ -13,7 +13,7 @@
 # The in-app updater installs amd64 by default, amd64-v3 on request (or when v3 is running) and amd64-musl
 # on musl/Alpine systems; the ARM packages are for manual installs and the Docker image.
 # PREBUILT=<path to an already built atomdns> replaces the amd64 build (it must report the same tag).
-# PREBUILT_WEBUI=<atomdns-webui.tar.gz> skips the WebUI build (its ui_version must be the tag).
+# PREBUILT_WEBUI=<atom-webui.tar.gz> skips the WebUI build (its ui_version must be the tag).
 # RUST_CONFIG_PACKAGE=<config_rust_up.zip> is passed on to generate-rust-update-manifest.sh.
 set -euo pipefail
 
@@ -79,29 +79,29 @@ for VARIANT in ${VARIANTS:-amd64}; do
   echo "built ${ARCHIVE}"
 done
 
-WEBUI="${OUT}/atomdns-webui.tar.gz"
+WEBUI="${OUT}/atom-webui.tar.gz"
 rm -f "${WEBUI}"
 if [ -n "${PREBUILT_WEBUI:-}" ]; then
   cp "${PREBUILT_WEBUI}" "${WEBUI}"
 else
   (
-    cd "${ROOT_DIR}/webui-log"
+    cd "${ROOT_DIR}/webui"
     npm ci --include=dev
     UI_VERSION="${TAG}" npm run build:package
   )
-  cp "${ROOT_DIR}/release/atomdns-webui.tar.gz" "${WEBUI}"
+  cp "${ROOT_DIR}/release/atom-webui.tar.gz" "${WEBUI}"
 fi
 # List once: `tar | grep -q` under pipefail fails when grep exits early and tar gets SIGPIPE.
 WEBUI_ENTRIES="$(tar -tzf "${WEBUI}")"
 for required in index.html ui-manifest.json; do
   if ! grep -qx "${required}" <<<"${WEBUI_ENTRIES}"; then
-    echo "atomdns-webui.tar.gz has no top-level ${required}" >&2
+    echo "atom-webui.tar.gz has no top-level ${required}" >&2
     exit 1
   fi
 done
 UI_REPORTED="$(tar -xzOf "${WEBUI}" ui-manifest.json | jq -r '.ui_version')"
 if [ "${UI_REPORTED}" != "${TAG}" ]; then
-  echo "atomdns-webui.tar.gz reports ui_version ${UI_REPORTED}, not ${TAG}" >&2
+  echo "atom-webui.tar.gz reports ui_version ${UI_REPORTED}, not ${TAG}" >&2
   exit 1
 fi
 

@@ -1,7 +1,7 @@
 // The `ui-manifest.json` of a WebUI package (`<config root>/ui/main/` at `/`, any other `ui/<name>/`).
 // The host judges it in rust/native-host/src/ui_manifest.rs; keep API_LEVEL equal to
-// that file's HOST_API_LEVEL (a Node test compares them).
-export const API_LEVEL = 1
+// that file's HOST_API_LEVEL (a Node test compares them). atom: 2 is `/api/v1/atom/`.
+export const API_LEVEL = 2
 
 export function validVersion(version) {
   return typeof version === 'string' && version.trim() !== '' && [...version].length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(version)
@@ -18,5 +18,5 @@ export function buildManifest({ version, now = new Date() }) {
   }
 }
 
-/** The release asset holding the package (rust/native-host/src/update/mod.rs WEBUI_ASSET). */
-export const ARCHIVE_NAME = 'atomdns-webui.tar.gz'
+/** The archive holding the package (`release/`, and the release asset of the same name). */
+export const ARCHIVE_NAME = 'atom-webui.tar.gz'

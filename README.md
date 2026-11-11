@@ -146,7 +146,7 @@ plugins:
 
 ```bash
 scripts/build-rust-native.sh                          # 程序 → release/atomdns-native
-(cd webui-log && npm ci && npm run build:package)     # WebUI → release/atomdns-webui.tar.gz
+(cd webui && npm ci && npm run build:package)         # WebUI → release/atom-webui.tar.gz
 scripts/build-rust-release.sh vX.Y.Z                  # 全部发布资产（只构建，不发布）
 cargo test --workspace --manifest-path rust/Cargo.toml
 ```
