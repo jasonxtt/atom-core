@@ -141,7 +141,8 @@ export const hasNames = (match: Match) =>
 export function dnsLabel(rule: Pick<Rule, 'action' | 'match' | 'dns' | 'cache'>): string {
   if (rule.action.type === 'block') return ''
   if (rule.action.type === 'proxy') return 'FakeIP'
-  if (!hasNames(rule.match)) return '不经过 DNS'
+  // A rule of clients alone meets every name those clients ask.
+  if (!hasNames(rule.match) && !rule.match.client?.length) return '不经过 DNS'
   return `${upstreamName(rule.dns)}${rule.cache === false ? ' · 不缓存' : ''}`
 }
 

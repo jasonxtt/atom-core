@@ -23,20 +23,24 @@ const form = reactive({
 const error = ref('')
 const busy = ref(false)
 const loading = ref(false)
+// A local list being edited must have been read: saving sends the whole list.
+const listRead = ref(!(props.mode === 'edit' && custom?.type === 'local'))
 
-// A local list is read for editing.
-onMounted(async () => {
-  if (props.mode !== 'edit' || custom?.type !== 'local') return
+async function readList() {
+  if (listRead.value || !custom) return
   loading.value = true
+  error.value = ''
   try {
     const set = (await call(client.GET('/rulesets/{id}', { params: { path: { id: custom.id } } }))) as { rules?: string[] }
     form.text = (set.rules ?? []).join('\n')
+    listRead.value = true
   } catch (failure) {
-    error.value = describe(failure)
+    error.value = `读取名单失败：${describe(failure)}`
   } finally {
     loading.value = false
   }
-})
+}
+onMounted(readList)
 
 const stats = () => {
   const parsed = parseNames(form.text)
@@ -115,8 +119,9 @@ const titles = { new: '新建规则集', edit: '编辑规则集', url: '编辑�
     </div>
     <div v-if="error" class="err">{{ error }}</div>
     <template #footer>
+      <button v-if="!listRead && !loading" class="btn" type="button" @click="readList">重新读取</button>
       <button class="btn" type="button" @click="emit('close')">取消</button>
-      <button class="btn pri" type="button" :disabled="busy || loading || (form.type === 'remote' && !form.url.trim())" @click="submit">保存</button>
+      <button class="btn pri" type="button" :disabled="busy || loading || (form.type === 'local' && !listRead) || (form.type === 'remote' && !form.url.trim())" @click="submit">保存</button>
     </template>
   </AppModal>
 </template>

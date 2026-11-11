@@ -12,7 +12,7 @@ export interface Source {
   ips: boolean | null
 }
 
-defineProps<{ label: string }>()
+const props = defineProps<{ label: string; namesOnly?: boolean }>()
 const emit = defineEmits<{ pick: [source: Source] }>()
 
 const PROVIDERS: Record<string, string> = { meta: 'MetaCubeX', bm7: 'blackmatrix7' }
@@ -51,10 +51,36 @@ const options = computed<Source[]>(() => {
   return [...local, ...remote]
 })
 
+// With a client condition only names can be taken: a source of IP prefixes alone is unusable.
+const usable = (source: Source) => !props.namesOnly || source.names !== false
+
+// Keyboard: the arrows move the active option, Enter picks it, Escape closes the list.
+const active = ref(-1)
+const listId = `source-${Math.random().toString(36).slice(2, 8)}`
+watch(options, () => (active.value = -1))
+function move(step: number) {
+  open.value = true
+  const count = options.value.length
+  if (!count) return
+  let next = active.value
+  for (let tries = 0; tries < count; tries++) {
+    next = (next + step + count) % count
+    if (usable(options.value[next])) {
+      active.value = next
+      return
+    }
+  }
+}
+function enter() {
+  const source = options.value[active.value]
+  if (open.value && source && usable(source)) pick(source)
+}
+
 const parts = (source: Source) =>
   source.names === null ? '' : [source.names ? '域名' : '', source.ips ? 'IP' : ''].filter(Boolean).join(' · ')
 
 function pick(source: Source) {
+  if (!usable(source)) return
   open.value = false
   emit('pick', source)
 }
@@ -69,15 +95,34 @@ function pick(source: Source) {
       :aria-label="label"
       autocomplete="off"
       role="combobox"
+      aria-autocomplete="list"
+      :aria-controls="listId"
       :aria-expanded="open"
+      :aria-activedescendant="open && active >= 0 ? `${listId}-${active}` : undefined"
       @focus="open = true"
       @click="open = true"
       @input="open = true"
+      @keydown.down.prevent="move(1)"
+      @keydown.up.prevent="move(-1)"
+      @keydown.enter.prevent="enter"
       @keydown.esc="open = false"
       @blur="open = false"
     />
-    <div v-if="open" class="drop" role="listbox">
-      <button v-for="source in options" :key="source.id" type="button" class="opt" role="option" @mousedown.prevent="pick(source)">
+    <div v-if="open" :id="listId" class="drop" role="listbox" :aria-label="label">
+      <button
+        v-for="(source, index) in options"
+        :id="`${listId}-${index}`"
+        :key="source.id"
+        type="button"
+        tabindex="-1"
+        class="opt"
+        :class="{ active: index === active }"
+        role="option"
+        :aria-selected="index === active"
+        :aria-disabled="!usable(source)"
+        :disabled="!usable(source)"
+        @mousedown.prevent="pick(source)"
+      >
         <span class="nm">{{ source.name }}</span>
         <span class="tag">{{ source.provider }}</span>
         <span class="hint">{{ parts(source) }}</span>

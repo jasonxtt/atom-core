@@ -40,8 +40,13 @@ const busy = ref('')
 async function refresh(target: Ruleset | Builtin) {
   busy.value = target.id
   try {
-    await call(client.POST('/rulesets/{id}/refresh', { params: { path: { id: target.id } } }))
-    toast('ok', `已刷新「${target.name}」`)
+    const answer = (await call(client.POST('/rulesets/{id}/refresh', { params: { path: { id: target.id } } }))) as { sources?: number; updated?: number }
+    // A builtin set of several sources: some may have failed (only the rest replaced their lists).
+    if (answer.sources !== undefined && answer.updated !== undefined && answer.updated < answer.sources) {
+      toast('warn', `「${target.name}」${answer.sources} 个来源中 ${answer.updated} 个已更新，其余下载失败`)
+    } else {
+      toast('ok', `已刷新「${target.name}」`)
+    }
   } catch (failure) {
     toast('bad', `「${target.name}」${describe(failure)}`)
   } finally {

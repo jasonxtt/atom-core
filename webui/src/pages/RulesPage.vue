@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import draggable from 'vuedraggable'
 import { ApiError, call, client, describe, type Schemas } from '../api/client'
@@ -95,6 +95,27 @@ async function moved(event: { newIndex: number; oldIndex: number }) {
   const body: { id: string; version: number; before_id?: string; after_id?: string } = { id, version: rulesVersion.value }
   if (event.newIndex + 1 < list.length) body.before_id = list[event.newIndex + 1].id
   else body.after_id = list[event.newIndex - 1].id
+  await send(body)
+}
+
+/** The keyboard way to move: the arrows on a rule's handle move it one place. */
+async function nudge(index: number, step: -1 | 1) {
+  const list = rules.value
+  const target = index + step
+  if (busy.value || target < 0 || target >= list.length) return
+  const id = list[index].id
+  const neighbour = list[target].id
+  const body = { id, version: rulesVersion.value, ...(step < 0 ? { before_id: neighbour } : { after_id: neighbour }) }
+  busy.value = id
+  await send(body)
+  busy.value = ''
+  // Focus follows the rule to its new place.
+  await nextTick()
+  const handle = document.querySelector<HTMLButtonElement>(`[data-handle="${id}"]`)
+  handle?.focus()
+}
+
+async function send(body: { id: string; version: number; before_id?: string; after_id?: string }) {
   try {
     const answer = await call(client.POST('/rules/move', { body }))
     rules.value = answer.rules
@@ -162,7 +183,15 @@ async function remove() {
     >
       <template #item="{ element: rule, index }">
         <div class="li" :class="{ off: !rule.enabled, hit: hitId === rule.id }">
-          <span class="handle" title="拖动排序" aria-hidden="true">⠿</span>
+          <button
+            type="button"
+            class="handle"
+            :data-handle="rule.id"
+            :aria-label="`移动：${rule.remark || rule.id}（第 ${index + 1} 条，上下方向键移动）`"
+            title="拖动排序"
+            @keydown.up.prevent="nudge(index, -1)"
+            @keydown.down.prevent="nudge(index, 1)"
+          >⠿</button>
           <span class="idx tnum">{{ index + 1 }}</span>
           <div style="min-width: 0">
             <div>{{ rule.remark || rule.id }}</div>

@@ -142,21 +142,30 @@ function add(t: Kind) {
   form.conds.push(blank(t))
 }
 
+/** Keeps a source's part one it may take (names first). */
+function fitPart(cond: Cond) {
+  if (partOk(cond, cond.part)) return
+  cond.part = (['domain', 'ip', 'all'] as const).find((part) => partOk(cond, part)) ?? 'domain'
+}
+
 function pickSource(cond: Cond, source: Source) {
   cond.ref = source.id
   cond.label = source.name
   cond.provider = source.provider
   cond.names = source.names
   cond.ips = source.ips
-  cond.part = source.names === false ? 'ip' : 'domain'
+  cond.part = 'domain'
+  fitPart(cond)
 }
 
 function pickSet(cond: Cond, value: string) {
   cond.ref = value
   const set = rulesets.value.find((item) => item.id === value)
-  cond.names = set ? set.rule_count > 0 : null
-  cond.ips = set ? (set.ip_count ?? 0) > 0 : null
-  if (cond.part !== 'domain' && cond.ips === false) cond.part = 'domain'
+  // A set not downloaded yet may hold either.
+  cond.names = set && set.updated_at ? set.rule_count > 0 : null
+  cond.ips = set && set.updated_at ? (set.ip_count ?? 0) > 0 : null
+  cond.label = set?.name ?? value
+  fitPart(cond)
 }
 
 /** Whether a source condition may take `part` (a rule with a client takes names only). */
@@ -220,6 +229,9 @@ const built = computed((): { match: Match; problem: string } => {
         problem ||= cond.t === 'source' ? '有规则源还没选' : '有自定义规则集还没选'
         continue
       }
+      if (!partOk(cond, cond.part)) {
+        problem ||= hasClient.value ? `「${cond.label}」只能取域名部分（有客户端条件）` : `「${cond.label}」没有${cond.part === 'ip' ? ' IP' : '域名'}部分`
+      }
       if (cond.part !== 'ip') push('ruleset', [cond.ref])
       if (cond.part !== 'domain') push('ip_ruleset', [cond.ref])
     } else if (cond.t === 'domain') {
@@ -239,10 +251,16 @@ const built = computed((): { match: Match; problem: string } => {
     }
   }
   if (!form.conds.length) problem ||= '至少要有一个条件'
+  if (match.client && (match.ip_cidr || match.ip_ruleset)) problem ||= '有客户端条件时不能带 IP 部分'
   return { match, problem }
 })
 
-const hasNamePart = computed(() => !!(built.value.match.domain || built.value.match.suffix || built.value.match.keyword || built.value.match.regex || built.value.match.ruleset))
+// The DNS side applies to a rule that meets names: one with name conditions, or one of clients
+// alone (it meets every name those clients ask).
+const hasNamePart = computed(() => {
+  const match = built.value.match
+  return !!(match.domain || match.suffix || match.keyword || match.regex || match.ruleset || (match.client && !match.ip_cidr && !match.ip_ruleset))
+})
 const action = computed<Schemas['Action']>(() => (form.action === 'proxy' ? { type: 'proxy', group_id: form.group } : { type: form.action }))
 const preview = computed(() => ({
   match: built.value.match,
@@ -357,7 +375,7 @@ const kindLabel: Record<Kind, string> = { source: '规则源', set: '自定义�
           </div>
 
           <template v-if="cond.t === 'source'">
-            <SourcePicker v-if="!cond.ref" :label="`搜索规则源 ${index + 1}`" @pick="pickSource(cond, $event)" />
+            <SourcePicker v-if="!cond.ref" :label="`搜索规则源 ${index + 1}`" :names-only="hasClient" @pick="pickSource(cond, $event)" />
             <div v-else class="row" style="gap: 8px">
               <span>{{ cond.label }}</span>
               <span class="tag">{{ cond.provider }}</span>
