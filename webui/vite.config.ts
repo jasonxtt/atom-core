@@ -39,6 +39,9 @@ export default defineConfig({
       }
     }
   ],
+  // vuedraggable ships only a UMD build whose `require("vue")` would pull in Vue's CommonJS
+  // build as a second copy; every import of `vue` gets the one ESM runtime.
+  resolve: { alias: { vue: 'vue/dist/vue.runtime.esm-bundler.js' } },
   publicDir: false,
   server: { proxy: { '/api': devTarget } },
   build: {
