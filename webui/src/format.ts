@@ -29,7 +29,8 @@ export function duration(seconds: number): string {
   const minutes = Math.floor((seconds % 3600) / 60)
   if (days) return `${days} 天 ${hours} 小时`
   if (hours) return `${hours} 小时 ${minutes} 分钟`
-  return `${minutes} 分钟`
+  if (minutes) return `${minutes} 分钟`
+  return `${Math.max(0, Math.floor(seconds))} 秒`
 }
 
 export type Latency = 'ok' | 'warn' | 'bad' | 'idle'
