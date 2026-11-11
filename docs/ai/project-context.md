@@ -21,7 +21,7 @@ behavioural reference (see `tools/go-reference/README.md`).
 
 - `rust/`: the Cargo workspace. `native-host` is the product (`atomdns` binary, built-in `/` UI, management API, update guard); `dns-core`, `cache-core`, `matcher-core`, `sequence-core`, `upstream-core` are its libraries
 - `webui/`: the atom WebUI (Vue 3 + Vite + TypeScript, step 6b; it replaced `webui-log/`), typed from `docs/api/openapi.yaml`; builds the WebUI package (`npm run build` → `webui/dist/`, `npm run build:package` → `release/atom-webui.tar.gz`), installed as `<config root>/ui/main/` (served at `/`) or any other `ui/<name>/`. The program embeds no UI (v0.4.0)
-- `scripts/`: Rust build and release scripts (`build-rust-native.sh`, `build-rust-release.sh`, `generate-rust-update-manifest.sh`; release steps in `docs/rust/release.md`) and measurement helpers
+- `scripts/`: Rust build and release scripts (`build-rust-native.sh`, `build-rust-release.sh`; release steps in `docs/rust/release.md`) and measurement helpers
 - `tools/`: differential and evidence tools (Python, plus thin Go wrappers built from the Go repository by `tools/go-reference/build.sh`)
 - `tests/phase5a-baseline/`: workload/config fixtures read by Rust tests, and the standalone Go load-generator helper (own `go.mod`, not needed by the Rust build)
 - `docs/rust/contracts/`: public product and migration contracts

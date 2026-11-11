@@ -57,7 +57,7 @@ log:
   level: warn
   file: "/tmp/mosdns.log"
 
-#管理 API 与 WebUI 的监听地址；端口可在 WebUI 系统设置里修改
+#管理 API 与 WebUI 的监听地址；端口由安装器写入（改了要重启 atom-dns.service）
 api:
   http: "0.0.0.0:9099"
 

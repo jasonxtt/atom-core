@@ -1,5 +1,7 @@
 # Native online update, automatic rollback and configuration package (F-3a)
 
+> atom: removed in step 1 (atom design 7.1). The atom installer installs and upgrades the programs, the configuration and the WebUI. Kept as history.
+
 Status: implemented in `rust/native-host/src/update/`. Validation: [10-18-f3a](../validation-records/10-18-f3a/README.md).
 Design notes and the Go comparison: the task's `research/design.md` / `go-semantics.md`.
 

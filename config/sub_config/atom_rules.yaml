@@ -47,7 +47,7 @@ plugins:
       ip_builtin: [geoip_cn]                    #规则集页面显示、可刷新和改地址的 IP 名单（原判断用），规则不能引用
       proxy: $main_proxy                        #下载远程规则集用的代理；定义: sub_config/settings.yaml
       singbox:
-        binary: /usr/local/bin/sing-box
+        binary: /opt/atom/bin/sing-box
         dir: sing-box
         reload: [systemctl, reload-or-restart, atom-sing-box.service]
         clash_api: "127.0.0.1:9090"

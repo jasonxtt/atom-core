@@ -40,6 +40,8 @@ managed-file boundaries, and published packages consistent.
 
 ### Rust (native) config package
 
+> atom: the online updater and this package were removed (atom design 7.1); the configuration ships in the atom package (`installer/scripts/build-package.sh`). Kept as history.
+
 The native host has its own schema and package ID, independent of the Go ones:
 `REQUIRED_CONFIG_SCHEMA` / `REQUIRED_CONFIG_PACKAGE_ID` (`7`, `rust-config-schema-7`) in
 `rust/native-host/src/update/mod.rs`, checked against `scripts/rust-release-metadata.json` by

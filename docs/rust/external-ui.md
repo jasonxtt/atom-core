@@ -21,14 +21,14 @@ the API types, which `npm run gen:api` generates from `docs/api/openapi.yaml`. a
 with `webui/`.
 
 ## Install / update (operator)
-Online updates replace `ui/main` together with the program when `ui/main` exists ([native-update.md](contracts/native-update.md)); by hand:
+The atom installer (`installer/` in the atom repository) installs `ui/main` and replaces it on every upgrade; by hand:
 1. Unpack into the directory (the configuration root is the directory that holds `config_custom.yaml`; for `atomdns start -d /cus/atomdns` that is `/cus/atomdns`):
    ```sh
    mkdir -p /cus/atomdns/ui/main && tar -xzf atom-webui.tar.gz -C /cus/atomdns/ui/main      # the WebUI at /
    mkdir -p /cus/atomdns/ui/pg && tar -xzf atom-webui.tar.gz -C /cus/atomdns/ui/pg          # another copy at /pg/
    ```
    Replace a package by unpacking into an empty directory (remove the old one first), so no files of the old version are left behind.
-2. **Restart once** so the program checks the package (`POST /api/v1/system/restart`, the "重启" button, or `systemctl restart atomdns`). Directories are registered at start-up.
+2. **Restart once** so the program checks the package (`systemctl restart atom-dns`). Directories are registered at start-up.
 3. Open `http://<host>:<api port>/` (or `/pg/`). The system page shows the WebUI's version as 界面版本 and links to every other mounted package.
 
 Replacing files of an already mounted package takes effect on the next request (files are re-read live). A *new* package version's manifest is judged — and its version shown in

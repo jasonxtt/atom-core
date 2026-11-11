@@ -4,7 +4,6 @@
 
 <p align="center">
   <a href="https://github.com/jasonxtt/atomdns/releases"><img src="https://img.shields.io/github/v/release/jasonxtt/atomdns?label=release" alt="Release"></a>
-  <a href="https://hub.docker.com/r/jasonxtt/atomdns"><img src="https://img.shields.io/docker/pulls/jasonxtt/atomdns" alt="Docker Pulls"></a>
   <img src="https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20armv7-blue" alt="Platform">
   <img src="https://img.shields.io/badge/built%20with-Rust-orange?logo=rust" alt="Rust">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/jasonxtt/atomdns" alt="License"></a>
@@ -63,43 +62,8 @@
 
 ## 快速开始
 
-### Docker（推荐）
-
-```bash
-docker run -d --name atomdns --restart unless-stopped --network host \
-  -v "$PWD/atomdns-data:/cus/atomdns" jasonxtt/atomdns:latest
-```
-
-首次启动会把默认配置写入挂载目录。DNS 监听 `53`，WebUI 在 `http://<主机>:9099/`。
-支持 amd64 / arm64 / armv7；容器内关闭在线更新，升级即拉取新镜像重建容器。bridge 网络与 compose 示例见 [Docker 部署](docs/rust/docker.md)。
-
-### 二进制
-
-1. 从 [Releases](https://github.com/jasonxtt/atomdns/releases) 下载对应架构的 `atomdns-linux-*.tar.gz` 和全新安装包 `config_rust.zip`。
-2. 解出 `atomdns` 放到 `/usr/local/bin/`，把 `config_rust.zip` 解到配置目录（如 `/cus/atomdns`，已带 WebUI）。
-3. 用 systemd 运行：
-
-   ```ini
-   [Unit]
-   Description=AtomDNS
-   After=network-online.target
-
-   [Service]
-   ExecStart=/usr/local/bin/atomdns start -d /cus/atomdns -c config_custom.yaml
-   Restart=always
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-之后在 WebUI「系统」页检查并一键更新（仅 amd64）。
-
-| 程序包 | 适用 |
-| --- | --- |
-| `atomdns-linux-amd64` | x86_64 glibc，支持在线更新 |
-| `atomdns-linux-amd64-v3` | 支持 AVX2 的 x86_64 |
-| `atomdns-linux-amd64-musl` | x86_64 静态链接（Alpine 等） |
-| `atomdns-linux-arm64[-gnu]` / `armv7[-gnu]` | ARM 设备，无后缀为 musl 静态版 |
+atom 的安装器（仓库 `atom/installer/`）一条命令装好 atomdns、sing-box、nft 规则和 systemd 服务，在浏览器里完成配置。
+单独运行本程序（配置目录是含 `config_custom.yaml` 的目录，WebUI 包解到 `<配置目录>/ui/main/`）：
 
 ### 命令行
 
@@ -159,7 +123,6 @@ cargo test --workspace --manifest-path rust/Cargo.toml
 
 | 主题 | 链接 |
 | --- | --- |
-| Docker 部署 | [docs/rust/docker.md](docs/rust/docker.md) |
 | 纯后端运行 | [docs/rust/headless.md](docs/rust/headless.md) |
 | 自定义 / 外部 WebUI | [docs/rust/external-ui.md](docs/rust/external-ui.md) |
 | 在线更新机制 | [docs/rust/contracts/native-update.md](docs/rust/contracts/native-update.md) |
