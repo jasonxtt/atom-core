@@ -44,14 +44,16 @@ const usedBy = (tag: string) => rules.value.filter((rule) => rule.dns === tag)
 const allTags = computed(() => Object.values(drafts).flatMap((draft) => draft.upstreams.map((item) => item.tag)))
 const PROTOCOLS: Record<string, string> = { udp: 'UDP', tcp: 'TCP', tls: 'DoT', dot: 'DoT', https: 'DoH', doh: 'DoH' }
 
-/** Applies a write's answer: every group as it is now (drafts of other groups are kept). */
-function applied(groups: Group[], keep: string[]) {
-  const kept = Object.fromEntries(keep.filter((tag) => drafts[tag]).map((tag) => [tag, drafts[tag]]))
+/**
+ * Applies a write's answer: every group as it is now. The unsaved drafts of the other groups,
+ * taken when the answer arrives, are kept (editing waits while a write runs).
+ */
+function applied(groups: Group[], written: string) {
+  const kept = Object.fromEntries(upstreamGroups.value.filter((group) => group.tag !== written && dirty(group)).map((group) => [group.tag, drafts[group.tag]]))
   upstreamGroups.value = groups
   reset(groups)
-  Object.assign(drafts, kept)
+  for (const [tag, draft] of Object.entries(kept)) if (drafts[tag]) drafts[tag] = draft
 }
-const otherDirty = (tag: string) => upstreamGroups.value.filter((group) => group.tag !== tag && dirty(group)).map((group) => group.tag)
 
 async function save(group: Group) {
   const draft = drafts[group.tag]
@@ -60,7 +62,7 @@ async function save(group: Group) {
   try {
     const body = { upstreams: draft.upstreams, ...(!group.builtin && draft.name.trim() !== group.name ? { name: draft.name.trim() } : {}) }
     const answer = await call(client.PUT('/upstreams/{tag}', { params: { path: { tag: group.tag } }, body }))
-    applied(answer.groups, otherDirty(group.tag))
+    applied(answer.groups, group.tag)
     toast('ok', `已保存「${draft.name}」`)
   } catch (failure) {
     toast('bad', describe(failure))
@@ -77,12 +79,11 @@ async function confirmed() {
   const { group, kind } = current
   busy.value = group.tag
   try {
-    const keep = otherDirty(group.tag)
     const answer =
       kind === 'restore'
         ? await call(client.PUT('/upstreams/{tag}', { params: { path: { tag: group.tag } }, body: { upstreams: [] } }))
         : await call(client.DELETE('/upstreams/{tag}', { params: { path: { tag: group.tag } } }))
-    applied(answer.groups, keep)
+    applied(answer.groups, group.tag)
     toast('ok', kind === 'restore' ? `「${group.name}」已恢复默认` : `已删除「${group.name}」`)
   } catch (failure) {
     const ids = failure instanceof ApiError && failure.status === 409 ? failure.body?.rules : undefined
@@ -113,9 +114,8 @@ function removeUpstream() {
 async function createGroup(name: string, upstream: Upstream) {
   busy.value = 'new'
   try {
-    const keep = otherDirty('')
     const answer = await call(client.POST('/upstreams', { body: { name, upstreams: [upstream] } }))
-    applied(answer.groups, keep)
+    applied(answer.groups, '')
     toast('ok', `已新建「${name}」`)
     editing.value = null
   } catch (failure) {
@@ -131,10 +131,10 @@ async function createGroup(name: string, upstream: Upstream) {
   <div v-if="error" class="err">{{ error }}</div>
   <div class="row">
     <span class="sp"></span>
-    <button class="btn pri" type="button" :disabled="busy === 'new'" @click="editing = { index: -1 }">＋ 新建上游组</button>
+    <button class="btn pri" type="button" :disabled="!!busy" @click="editing = { index: -1 }">＋ 新建上游组</button>
   </div>
   <div v-for="group in upstreamGroups" :key="group.tag" class="card">
-    <template v-if="drafts[group.tag]">
+    <fieldset v-if="drafts[group.tag]" class="plain" :disabled="!!busy">
       <div class="hd">
         <input v-if="!group.builtin" v-model="drafts[group.tag].name" class="inp" style="width: 180px" :aria-label="`组名：${group.name}`" autocomplete="off" />
         <h2 v-else>{{ group.name }}</h2>
@@ -170,7 +170,7 @@ async function createGroup(name: string, upstream: Upstream) {
         </table>
       </div>
       <button class="btn sm ghost" type="button" style="margin-top: 8px" @click="editing = { group, index: -1 }">＋ 添加上游</button>
-    </template>
+    </fieldset>
   </div>
 
   <UpstreamModal
@@ -179,6 +179,7 @@ async function createGroup(name: string, upstream: Upstream) {
     :upstream="editing.group && editing.index >= 0 ? drafts[editing.group.tag].upstreams[editing.index] : undefined"
     :tags="allTags"
     :with-name="!editing.group"
+    :pending="busy === 'new'"
     @close="editing = null"
     @save="saveUpstream"
     @remove="removeUpstream"

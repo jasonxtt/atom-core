@@ -275,11 +275,12 @@ const groupValue = (row: Row<Conn>) => String(row.groupingValue ?? '')
             <th
               v-for="column in visible"
               :key="column.id"
-              :class="{ sortable: column.getCanSort() }"
               :aria-sort="column.getIsSorted() === 'asc' ? 'ascending' : column.getIsSorted() === 'desc' ? 'descending' : undefined"
-              @click="column.getCanSort() && column.toggleSorting()"
             >
-              {{ LABELS[column.id as ColumnId] }}<span style="color: var(--accent)">{{ sortMark(column.id) }}</span>
+              <button v-if="column.getCanSort()" type="button" class="thsort" @click="column.toggleSorting()">
+                {{ LABELS[column.id as ColumnId] }}<span style="color: var(--accent)">{{ sortMark(column.id) }}</span>
+              </button>
+              <template v-else>{{ LABELS[column.id as ColumnId] }}</template>
               <button v-if="column.id === 'host'" type="button" class="thb" :class="{ on: hostMode === 'ip' }" :title="hostMode === 'ip' ? '显示域名' : '显示 IP'" :aria-label="hostMode === 'ip' ? '显示域名' : '显示 IP'" @click.stop="hostMode = hostMode === 'ip' ? 'host' : 'ip'">⇄</button>
               <button v-if="column.getCanGroup()" type="button" class="thb" :class="{ on: column.getIsGrouped() }" :title="column.getIsGrouped() ? '取消分组' : '按此列分组'" :aria-label="column.getIsGrouped() ? '取消分组' : `按${LABELS[column.id as ColumnId]}分组`" @click.stop="toggleGroup(column.id)">
                 <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6" /><path d="M20 20l-4.5-4.5" /></svg>

@@ -5,7 +5,7 @@ import type { Schemas } from '../api/client'
 
 type Upstream = Schemas['Upstream']
 /** Edits one upstream locally (the group is saved as a whole); `upstream` absent adds one. */
-const props = defineProps<{ group: string; upstream?: Upstream; tags: string[]; withName?: boolean }>()
+const props = defineProps<{ group: string; upstream?: Upstream; tags: string[]; withName?: boolean; pending?: boolean }>()
 const emit = defineEmits<{ close: []; save: [upstream: Upstream, name: string]; remove: [] }>()
 
 const PROTOCOLS = [
@@ -38,6 +38,7 @@ const form = reactive({
 const error = ref('')
 
 function submit() {
+  if (props.pending) return
   error.value = ''
   const tag = form.tag.trim()
   if (props.withName && !form.name.trim()) return void (error.value = '请填写组名')
@@ -129,7 +130,7 @@ function submit() {
     <template #footer>
       <button v-if="upstream" class="btn danger" type="button" style="margin-right: auto" @click="emit('remove')">删除</button>
       <button class="btn" type="button" @click="emit('close')">取消</button>
-      <button class="btn pri" type="button" @click="submit">{{ withName ? '创建' : '确定' }}</button>
+      <button class="btn pri" type="button" :disabled="pending" @click="submit">{{ withName ? '创建' : '确定' }}</button>
     </template>
   </AppModal>
 </template>

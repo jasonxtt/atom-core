@@ -58,9 +58,19 @@ export const closed = ref<Conn[]>([])
 export const totals = ref({ down: 0, up: 0, downRate: 0, upRate: 0 })
 export const failure = ref('')
 let last: { at: number; byId: Map<string, Conn>; down: number; up: number } | null = null
+// After a pause no rate spans the gap (the next snapshot only sets the baseline), but the
+// connections that left meanwhile are still found closed.
+let rateBaseline = true
+let queue: Promise<void> = Promise.resolve()
 
-/** Takes one snapshot: rates are the growth since the previous one. */
-export async function sample() {
+/** Takes one snapshot; calls run one after another, so answers apply in order. */
+export function sample(): Promise<void> {
+  queue = queue.then(take, take)
+  return queue
+}
+
+/** One snapshot: rates are the growth since the previous one. */
+async function take() {
   let snapshot: { downloadTotal?: number; uploadTotal?: number; connections?: unknown[] | null }
   try {
     snapshot = await call(client.GET('/connections'))
@@ -70,7 +80,8 @@ export async function sample() {
     return
   }
   const at = Date.now()
-  const seconds = last ? (at - last.at) / 1000 : 0
+  const seconds = last && !rateBaseline ? (at - last.at) / 1000 : 0
+  rateBaseline = false
   const byId = new Map<string, Conn>()
   for (const item of (snapshot.connections ?? []) as Snapshot[]) {
     const meta = item.metadata ?? {}
@@ -113,7 +124,7 @@ export async function sample() {
   last = { at, byId, down, up }
 }
 
-/** Forgets the previous snapshot (after a pause, so rates do not span it). */
+/** After a pause or a return to the page: the next snapshot measures no rate. */
 export function restart() {
-  last = null
+  rateBaseline = true
 }

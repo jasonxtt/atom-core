@@ -131,7 +131,8 @@ async function saveRewrite() {
 <template>
   <DnsTabs />
   <div v-if="errors.load" class="err">{{ errors.load }}</div>
-  <div class="split3">
+  <!-- A save answers with the stored values, which replace the form: nothing is edited meanwhile. -->
+  <fieldset class="plain split3" :disabled="!!busy">
     <div v-if="dns" class="card grid" style="gap: 14px">
       <div class="hd" style="margin: 0">
         <h2>基本</h2>
@@ -189,5 +190,5 @@ async function saveRewrite() {
         <div v-if="errors.rewrite" class="err">{{ errors.rewrite }}</div>
       </div>
     </div>
-  </div>
+  </fieldset>
 </template>
