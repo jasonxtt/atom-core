@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from 'vue'
 import { ApiError, call, client, describe } from '../api/client'
 import AppModal from './AppModal.vue'
-import { FINAL, FINAL_NAME, final, groups, loadProxy, version, type Node } from '../composables/proxy'
+import { FINAL, FINAL_NAME, final, groups, loadProxy, nodes, version, type Node } from '../composables/proxy'
 import { refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
 
@@ -32,6 +32,21 @@ const form = reactive({
 })
 const error = ref('')
 const busy = ref(false)
+// The version the dialog opened at; an edit carries it, so a change made elsewhere since is
+// refused (409) instead of being overwritten.
+const formVersion = ref(version.value)
+// After a 409 on an edit: the node as it is saved now (null when it was deleted).
+const conflict = ref<Node | null | undefined>(undefined)
+
+/** Drops the edits and starts again from the node as saved now. */
+function reload(current: Node) {
+  form.name = current.name
+  form.replace = false
+  form.content = ''
+  formVersion.value = version.value
+  conflict.value = undefined
+  error.value = ''
+}
 const joinTargets = computed(() => [...groups.value.map((group) => ({ id: group.id, name: group.name })), { id: FINAL, name: FINAL_NAME }])
 const outbound = computed(() => JSON.stringify(props.node?.outbound ?? {}, null, 2))
 
@@ -62,13 +77,17 @@ async function join(ids: string[]) {
   )
 }
 
-async function submit() {
+async function submit(overwrite = false) {
   error.value = ''
+  if (overwrite) {
+    formVersion.value = version.value
+    conflict.value = undefined
+  }
   const content = form.content.trim()
   busy.value = true
   try {
     if (props.node) {
-      const body: { name?: string; format?: Format; content?: string; version: number } = { version: version.value }
+      const body: { name?: string; format?: Format; content?: string; version: number } = { version: formVersion.value }
       if (form.name.trim() && form.name.trim() !== props.node.name) body.name = form.name.trim()
       if (form.replace) {
         if (!content) throw new Error('请粘贴新的连接')
@@ -79,7 +98,7 @@ async function submit() {
       toast('ok', '已保存')
     } else {
       if (!content) throw new Error('请先粘贴节点')
-      const answer = await call(client.POST('/nodes', { body: { format: form.format, content, version: version.value } }))
+      const answer = await call(client.POST('/nodes', { body: { format: form.format, content, version: formVersion.value } }))
       const ids = answer.nodes.map((node) => node.id)
       let joined = ''
       if (form.join && ids.length) {
@@ -97,7 +116,14 @@ async function submit() {
   } catch (failure) {
     if (stale(failure)) {
       await loadProxy().catch(() => {})
-      error.value = '节点或节点组已在别处修改，已载入最新版本，请再提交一次（409）'
+      if (props.node) {
+        conflict.value = nodes.value.find((item) => item.id === props.node?.id) ?? null
+        if (!conflict.value) error.value = '这个节点已在别处删除（409）'
+      } else {
+        // An import adds nodes and overwrites nothing: the next one carries the current version.
+        formVersion.value = version.value
+        error.value = '节点或节点组已在别处修改，已载入最新版本，请再提交一次（409）'
+      }
     } else {
       error.value = failure instanceof ApiError ? describe(failure) : failure instanceof Error ? failure.message : String(failure)
     }
@@ -137,10 +163,23 @@ async function submit() {
         <option v-for="item in joinTargets" :key="item.id" :value="item.id">{{ item.name }}</option>
       </select>
     </label>
+    <template v-if="conflict">
+      <div class="err">已在别处修改（409）。现在保存的是：</div>
+      <div class="tile" style="font-size: 12.5px">
+        <div>{{ conflict.name }}</div>
+        <div class="t2 mono">{{ conflict.type }} · {{ conflict.server }}:{{ conflict.server_port }}</div>
+      </div>
+    </template>
     <div v-if="error" class="err">{{ error }}</div>
     <template #footer>
-      <button class="btn" type="button" @click="emit('close')">取消</button>
-      <button class="btn pri" type="button" :disabled="busy" @click="submit">{{ node ? '保存' : '导入' }}</button>
+      <template v-if="conflict">
+        <button class="btn" type="button" @click="reload(conflict)">载入最新内容</button>
+        <button class="btn red" type="button" :disabled="busy" @click="submit(true)">仍然保存</button>
+      </template>
+      <template v-else>
+        <button class="btn" type="button" @click="emit('close')">取消</button>
+        <button class="btn pri" type="button" :disabled="busy" @click="submit()">{{ node ? '保存' : '导入' }}</button>
+      </template>
     </template>
   </AppModal>
 </template>

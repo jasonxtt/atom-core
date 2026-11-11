@@ -30,12 +30,16 @@ const saving = ref(false)
 // is refused (409) instead of being overwritten.
 const formVersion = ref(0)
 // After a 409: what is saved now, for the user to compare with the form.
-const conflict = ref<{ name: string; type: string; members: string[] } | null>(null)
+// Every field a save replaces is shown.
+type Saved = { name: string; type: string; members: string[]; selected?: string; url?: string; interval?: string; tolerance?: number }
+const conflict = ref<Saved | null>(null)
 
-function latest() {
-  if (isFinal.value) return final.value ? { name: FINAL_NAME, type: 'selector', members: final.value.members } : null
+function latest(): Saved | null {
+  if (isFinal.value) return final.value ? { name: FINAL_NAME, type: 'selector', members: final.value.members, selected: final.value.selected } : null
   const group = groups.value.find((item) => item.id === id.value)
-  return group ? { name: group.name, type: group.type, members: group.members } : null
+  return group
+    ? { name: group.name, type: group.type, members: group.members, selected: group.selected, url: group.url, interval: group.interval, tolerance: group.tolerance }
+    : null
 }
 
 function fill() {
@@ -253,7 +257,12 @@ async function save(overwrite = false) {
         <div class="err">已在别处修改（409）。现在保存的是：</div>
         <div class="tile" style="font-size: 12.5px">
           <div>{{ conflict.name }} · {{ conflict.type === 'selector' ? '手动' : '自动测速' }}</div>
-          <div class="t2">{{ conflict.members.map(nameOf).join('、') || '空组' }}</div>
+          <div class="t2">成员：{{ conflict.members.map(nameOf).join('、') || '空组' }}</div>
+          <div v-if="conflict.type === 'selector'" class="t2">选中：{{ conflict.selected ? nameOf(conflict.selected) : '第一个成员' }}</div>
+          <template v-else>
+            <div class="t2 mono">测速 URL：{{ conflict.url || '—' }}</div>
+            <div class="t2 mono">间隔：{{ conflict.interval || '—' }} · 容差：{{ conflict.tolerance ?? '—' }}</div>
+          </template>
         </div>
         <div class="row" style="justify-content: flex-end">
           <button class="btn" type="button" @click="reload">载入最新内容</button>

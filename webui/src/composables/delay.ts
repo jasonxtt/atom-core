@@ -1,6 +1,6 @@
 import { reactive } from 'vue'
 import { ApiError, call, client, describe } from '../api/client'
-import { loadRuntime, recordDelay } from './proxy'
+import { FINAL, final, groups, isGroup, loadRuntime, recordDelay } from './proxy'
 import { toast } from './toast'
 
 /** Tests running now, by key (a node ID, `g:<group>`, `m:<member>`). */
@@ -26,7 +26,12 @@ export async function testGroup(id: string) {
   const key = `g:${id}`
   testing[key] = true
   try {
-    await call(client.POST('/groups/{id}/delay', { params: { path: { id } }, body: {} }))
+    const answer = await call(client.POST('/groups/{id}/delay', { params: { path: { id } }, body: {} }))
+    // The answer lists the members that answered; a node member left out failed (and sing-box
+    // dropped its history).
+    const delays = (answer.delays ?? {}) as Record<string, number>
+    const members = id === FINAL ? (final.value?.members ?? []) : (groups.value.find((group) => group.id === id)?.members ?? [])
+    for (const member of members) if (!isGroup(member)) recordDelay(member, delays[member] ?? null)
   } catch (error) {
     toast('bad', describe(error))
   } finally {
