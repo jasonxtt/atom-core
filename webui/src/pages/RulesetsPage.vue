@@ -74,7 +74,7 @@ const editing = ref<{ mode: 'new' | 'edit' | 'url'; target?: Ruleset | Builtin }
 
 // Deleting: a set rules name asks again, listing them (a rule left without a name or IP
 // condition is deleted with it).
-const removing = ref<{ target: Ruleset | Builtin; rules: Rule[] | null; unknown: string[] } | null>(null)
+const removing = ref<{ target: Ruleset | Builtin; rules: Rule[] | null } | null>(null)
 function leftOver(rule: Rule, id: string) {
   const match = rule.match
   const sets = (match.ruleset ?? []).filter((item) => item !== id)
@@ -92,10 +92,15 @@ async function remove(confirm: boolean) {
   } catch (failure) {
     const ids = failure instanceof ApiError && failure.status === 409 ? failure.body?.rules : undefined
     if (ids?.length && !confirm) {
-      // The rules named in the refusal are shown; any the table could not show are listed by ID.
-      await loadRules().catch(() => {})
-      current.rules = rules.value.filter((rule) => ids.includes(rule.id))
-      current.unknown = ids.filter((ruleId) => !current.rules?.some((rule) => rule.id === ruleId))
+      // What happens to each rule is told from the table as it is now: without it, no
+      // confirmation is offered.
+      try {
+        await loadRules()
+        current.rules = rules.value.filter((rule) => ids.includes(rule.id))
+      } catch (reload) {
+        removing.value = null
+        toast('bad', `有规则用到它，但读取规则表失败，请重试：${describe(reload)}`)
+      }
     } else {
       removing.value = null
       toast('bad', describe(failure))
@@ -138,7 +143,7 @@ async function remove(confirm: boolean) {
             <td style="text-align: right; white-space: nowrap">
               <button class="btn sm" type="button" @click="editing = { mode: 'edit', target: set }">编辑</button>
               <button v-if="set.type === 'remote'" class="btn sm" type="button" :disabled="busy === set.id" @click="refresh(set)">刷新</button>
-              <button class="btn sm danger" type="button" @click="removing = { target: set, rules: null, unknown: [] }">删除</button>
+              <button class="btn sm danger" type="button" @click="removing = { target: set, rules: null }">删除</button>
             </td>
           </tr>
         </tbody>
@@ -196,7 +201,7 @@ async function remove(confirm: boolean) {
             <td style="text-align: right; white-space: nowrap">
               <button v-if="set.url" class="btn sm" type="button" @click="editing = { mode: 'url', target: set }">编辑 URL</button>
               <button v-if="set.refreshable" class="btn sm" type="button" :disabled="busy === set.id" @click="refresh(set)">刷新</button>
-              <button v-if="!set.required" class="btn sm danger" type="button" @click="removing = { target: set, rules: null, unknown: [] }">删除</button>
+              <button v-if="!set.required" class="btn sm danger" type="button" @click="removing = { target: set, rules: null }">删除</button>
             </td>
           </tr>
         </tbody>
@@ -207,13 +212,12 @@ async function remove(confirm: boolean) {
   <RulesetModal v-if="editing" :mode="editing.mode" :target="editing.target" @close="editing = null" />
   <AppModal v-if="removing" :title="`删除规则集「${removing.target.name}」`" @close="removing = null">
     <template v-if="removing.rules">
-      <div class="err">有 {{ removing.rules.length + removing.unknown.length }} 条规则用到它，删除后会从这些规则里去掉这个条件：</div>
+      <div class="err">有 {{ removing.rules.length }} 条规则用到它，删除后会从这些规则里去掉这个条件：</div>
       <div class="tile" style="font-size: 12.5px">
         <div v-for="rule in removing.rules" :key="rule.id">
           {{ rule.remark || rule.id }}{{ leftOver(rule, removing.target.id) ? '' : '（整条删除）' }}
           <span class="t2">{{ summary(rule.match) }}</span>
         </div>
-        <div v-for="ruleId in removing.unknown" :key="ruleId">{{ ruleId }}<span class="t2">（读取规则表失败，不知道这条会去掉条件还是整条删除）</span></div>
       </div>
     </template>
     <template #footer>

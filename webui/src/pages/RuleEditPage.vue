@@ -122,17 +122,27 @@ function fill(rule: Rule | undefined) {
   })
 }
 
-onMounted(async () => {
+// The form opens only when everything it shows and saves was read (the rule table, the
+// rulesets, the upstream groups, the node groups) and the rule edited exists; else the error
+// and a retry.
+async function load() {
+  loaded.value = false
+  error.value = ''
   try {
     await Promise.all([loadRules(), loadRulesets(), loadUpstreams(), loadProxy()])
-    const rule = rules.value.find((item) => item.id === id.value)
-    if (id.value && !rule) error.value = '规则不存在'
-    fill(rule)
   } catch (failure) {
-    error.value = describe(failure)
+    error.value = `读取失败：${describe(failure)}`
+    return
   }
+  const rule = rules.value.find((item) => item.id === id.value)
+  if (id.value && !rule) {
+    error.value = '规则不存在'
+    return
+  }
+  fill(rule)
   loaded.value = true
-})
+}
+onMounted(load)
 
 // ---- conditions -----------------------------------------------------------------
 const hasClient = computed(() => form.conds.some((cond) => cond.t === 'client'))
@@ -503,5 +513,8 @@ const kindLabel: Record<Kind, string> = { source: '规则源', set: '自定义�
       </div>
     </div>
   </div>
-  <div v-else-if="error" class="err">{{ error }}</div>
+  <div v-else-if="error" class="row">
+    <div class="err" style="flex: 1">{{ error }}</div>
+    <button class="btn" type="button" @click="load">重试</button>
+  </div>
 </template>
