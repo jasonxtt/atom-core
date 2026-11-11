@@ -43,7 +43,7 @@ jobs:
         working-directory: release/rust
         run: |
           ls -l
-          jq '.version, (.artifacts | keys)' atomdns-update-manifest.json
+          tar -tzf atom-webui.tar.gz
           for variant in amd64 amd64-v3 amd64-musl arm64 armv7 arm64-gnu armv7-gnu; do
             mkdir "verify-${variant}"
             tar -xzf "atomdns-linux-${variant}.tar.gz" -C "verify-${variant}"

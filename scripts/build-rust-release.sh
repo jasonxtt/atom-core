@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the release artifacts for a tag on a Linux x86_64 host: atomdns-linux-<variant>.tar.gz
 # (one file, `atomdns`; the variant is amd64 by default), atom-webui.tar.gz (the WebUI package:
-# the files of <config root>/ui/main/ at the top level) and atomdns-update-manifest.json. Nothing is
+# the files of <config root>/ui/main/ at the top level). atom: no update manifest (the online updater
+# was removed in step 1). Nothing is
 # published; attach the files to a GitHub release named like the tag by hand or from CI.
 #   scripts/build-rust-release.sh vX.Y.Z [out-dir]
 # VARIANTS="amd64 amd64-v3 amd64-musl arm64 armv7 arm64-gnu armv7-gnu" builds more program packages (default: amd64).
@@ -14,7 +15,6 @@
 # on musl/Alpine systems; the ARM packages are for manual installs and the Docker image.
 # PREBUILT=<path to an already built atomdns> replaces the amd64 build (it must report the same tag).
 # PREBUILT_WEBUI=<atom-webui.tar.gz> skips the WebUI build (its ui_version must be the tag).
-# RUST_CONFIG_PACKAGE=<config_rust_up.zip> is passed on to generate-rust-update-manifest.sh.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -105,5 +105,4 @@ if [ "${UI_REPORTED}" != "${TAG}" ]; then
   exit 1
 fi
 
-"${ROOT_DIR}/scripts/generate-rust-update-manifest.sh" "${TAG}" "${OUT}"
 echo "built ${VARIANTS:-amd64} and ${WEBUI}"

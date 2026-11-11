@@ -14,14 +14,26 @@ export class ApiError extends Error {
   }
 }
 
-// While the host publishes a new configuration generation any request may be answered 503
-// (`host is applying configuration`); the request was not handled, so it is sent again.
+// While the host publishes a new configuration generation it refuses requests before handling
+// them with 503 `host is applying configuration`; such a request is sent again. Any other 503
+// (a change that was handled but not fully published, for one) goes to the caller as it is.
 const RETRIES = 6
+const ADMISSION_REFUSAL = 'host is applying configuration'
+
+async function refusedBeforeHandling(response: Response): Promise<boolean> {
+  if (response.status !== 503) return false
+  try {
+    const body = (await response.clone().json()) as { error?: unknown }
+    return body.error === ADMISSION_REFUSAL
+  } catch {
+    return false
+  }
+}
 
 async function retrying(request: Request): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     const response = await fetch(request.clone())
-    if (response.status !== 503 || attempt >= RETRIES) return response
+    if (attempt >= RETRIES || !(await refusedBeforeHandling(response))) return response
     await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)))
   }
 }

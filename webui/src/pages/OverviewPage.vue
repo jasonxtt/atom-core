@@ -24,8 +24,17 @@ function push(list: number[], value: number) {
 
 // CPU use between two samples: the machine's busy share, and each process's CPU time over the
 // same total (so the three figures add up on one scale).
+// A failed sample shows the figures as unavailable (the curves keep what was sampled).
 async function sampleSystem() {
-  const now = await call(client.GET('/system'))
+  let now: Schemas['System']
+  try {
+    now = await call(client.GET('/system'))
+  } catch (error) {
+    system.value = null
+    previous = null
+    shares.value = { atomdns: null, singbox: null }
+    throw error
+  }
   if (previous?.cpu && now.cpu) {
     const total = now.cpu.total_seconds - previous.cpu.total_seconds
     if (total > 0) {
@@ -50,11 +59,18 @@ const order = ref<string[]>([])
 const rules = ref<Schemas['RuleTable'] | null>(null)
 const settings = ref<Schemas['Settings'] | null>(null)
 const dns = ref<Schemas['Dns'] | null>(null)
-const traffic = ref({ count: 0, down: 0, up: 0 })
+const traffic = ref<{ count: number; down: number; up: number } | null>(null)
 let lastTotals: { at: number; down: number; up: number } | null = null
 
 async function sampleConnections() {
-  const snapshot = await call(client.GET('/connections'))
+  let snapshot
+  try {
+    snapshot = await call(client.GET('/connections'))
+  } catch (error) {
+    traffic.value = null
+    lastTotals = null
+    throw error
+  }
   const at = Date.now()
   const down = snapshot.downloadTotal ?? 0
   const up = snapshot.uploadTotal ?? 0
@@ -197,7 +213,7 @@ async function reapply() {
       <div class="hd">
         <h2>CPU 使用率</h2>
         <span class="sp"></span>
-        <span class="big tnum">{{ cpu.length ? `${cpu[cpu.length - 1].toFixed(1)}%` : '—' }}</span>
+        <span class="big tnum">{{ system && cpu.length ? `${cpu[cpu.length - 1].toFixed(1)}%` : '—' }}</span>
       </div>
       <svg class="spark" viewBox="0 0 300 70" preserveAspectRatio="none">
         <polygon :points="sparkArea(cpu, 100)" fill="var(--accent-soft)" />
@@ -214,7 +230,7 @@ async function reapply() {
       <div class="hd">
         <h2>内存</h2>
         <span class="sp"></span>
-        <span class="big tnum">{{ memory.length ? bytes(memory[memory.length - 1]) : '—' }}</span>
+        <span class="big tnum">{{ system && memory.length ? bytes(memory[memory.length - 1]) : '—' }}</span>
         <span class="muted" v-if="system?.memory">/ {{ bytes(system.memory.total_bytes) }}</span>
       </div>
       <svg class="spark" viewBox="0 0 300 70" preserveAspectRatio="none">
@@ -268,9 +284,9 @@ async function reapply() {
         <RouterLink class="btn sm ghost" to="/connections">查看全部 →</RouterLink>
       </div>
       <div class="grid g3" style="gap: 8px">
-        <div class="tile"><div class="k">连接</div><div class="v tnum">{{ traffic.count }}</div></div>
-        <div class="tile"><div class="k">↓ 下行</div><div class="v tnum">{{ rate(traffic.down) }}</div></div>
-        <div class="tile"><div class="k">↑ 上行</div><div class="v tnum">{{ rate(traffic.up) }}</div></div>
+        <div class="tile"><div class="k">连接</div><div class="v tnum">{{ traffic ? traffic.count : '—' }}</div></div>
+        <div class="tile"><div class="k">↓ 下行</div><div class="v tnum">{{ traffic ? rate(traffic.down) : '—' }}</div></div>
+        <div class="tile"><div class="k">↑ 上行</div><div class="v tnum">{{ traffic ? rate(traffic.up) : '—' }}</div></div>
       </div>
     </div>
   </div>

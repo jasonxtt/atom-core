@@ -18,11 +18,14 @@ function fill(value: Schemas['Settings']) {
   form.mixed_port = String(value.mixed_port)
 }
 
-async function load() {
+/** Whether the settings were read (a failure is shown in the form). */
+async function load(): Promise<boolean> {
   try {
     fill(await call(client.GET('/settings')))
+    return true
   } catch (failure) {
     error.value = describe(failure)
+    return false
   }
 }
 onMounted(load)
@@ -53,8 +56,8 @@ async function save() {
     toast('ok', '已保存')
   } catch (failure) {
     if (failure instanceof ApiError && failure.status === 409 && failure.body?.version !== undefined) {
-      await load()
-      toast('warn', '设置已在别处修改，已载入最新内容（409）')
+      if (await load()) toast('warn', '设置已在别处修改，已载入最新内容（409）')
+      else error.value = `设置已在别处修改（409），重新读取失败：${error.value}`
     } else {
       error.value = describe(failure)
     }

@@ -41,7 +41,7 @@ The old `/Users/tom/github/mosdns-rust` worktree is no longer used for new work.
 
 ## Build and validation
 
-- Build the program with `scripts/build-rust-native.sh` (Rust only) and the WebUI with `npm run build` / `npm run build:package` in `webui`; release artifacts (program, WebUI, manifest): `scripts/build-rust-release.sh`.
+- Build the program with `scripts/build-rust-native.sh` (Rust only) and the WebUI with `npm run build` / `npm run build:package` in `webui`; release artifacts (program, WebUI): `scripts/build-rust-release.sh`.
 - Production runs this program as `atomdns` since 2026-10-21 (manual cutover; the Go `atomdns` service stays installed for rollback). Do not publish a GitHub Release or deploy without explicit user approval.
 - Naming (2026-10-22): the cargo bin is `atomdns`; releases and online updates come only from `jasonxtt/atomdns`, tags `vX.Y.Z`, assets `atomdns-linux-amd64.tar.gz` (file `atomdns`) and `atomdns-update-manifest.json`. Crate names (`atomdns-*`), `ATOMDNS_*` environment variables, metrics/API field names and the configuration package identifiers (`channel "rust"`, `rust-config-schema-N`, `config_rust_up.zip`) keep their old names. Release and manual-replacement steps: `docs/rust/release.md`.
 - Config compatibility and switch-bit reservations are documented in `docs/ai/config-notes.md`; do not change them casually.
