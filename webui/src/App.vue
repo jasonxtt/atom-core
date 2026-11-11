@@ -44,6 +44,7 @@ const versions = computed(() => {
         <h1>{{ title }}</h1>
         <span class="pill" :class="health.kind"><span class="dot"></span>{{ health.text }}</span>
         <span class="sp"></span>
+        <div id="top-actions" class="row"></div>
         <button class="ico" :aria-label="`主题：${themeLabels[theme]}`" :title="`主题：${themeLabels[theme]}`" @click="setTheme(nextTheme[theme])">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2" /></svg>
         </button>
