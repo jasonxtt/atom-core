@@ -95,7 +95,8 @@ const view = ref<'active' | 'closed'>('active')
 const source = ref('')
 const search = ref('')
 const regex = ref(false)
-const sources = computed(() => [...new Set(active.value.map((conn) => conn.src).filter(Boolean))].sort())
+// The clients of the list shown (a client whose connections all closed is still in the closed list).
+const sources = computed(() => [...new Set((view.value === 'active' ? active.value : closed.value).map((conn) => conn.src).filter(Boolean))].sort())
 const chainText = (conn: Conn) => conn.chain.map(nameOf).join(' › ')
 const hostText = (conn: Conn) => (hostMode.value === 'ip' ? conn.ip || conn.host : conn.host || conn.ip)
 const searchError = computed(() => {
@@ -309,7 +310,7 @@ const groupValue = (row: Row<Conn>) => String(row.groupingValue ?? '')
             </template>
             <template v-else>
               <td v-for="column in visible" :key="column.id">
-                <button v-if="column.id === 'close'" type="button" class="ico" style="width: 24px; height: 24px" aria-label="关闭连接" @click.stop="closeOne(rows[item.index].original)">✕</button>
+                <button v-if="column.id === 'close'" type="button" class="ico" style="width: 24px; height: 24px" aria-label="关闭连接" @click.stop="closeOne(rows[item.index].original)" @keydown.enter.stop @keydown.space.stop>✕</button>
                 <span v-else-if="column.id === 'host'" class="mono">{{ hostText(rows[item.index].original) }}</span>
                 <span v-else-if="column.id === 'network'" class="tag">{{ rows[item.index].original.network }}</span>
                 <span v-else-if="column.id === 'chain'" class="chain"><span v-for="(tag, index) in rows[item.index].original.chain" :key="index">{{ nameOf(tag) }}</span></span>
