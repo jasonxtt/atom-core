@@ -539,10 +539,42 @@ pub(crate) fn parse_any(
         };
         return parse_mrs(bytes, want, regexp);
     }
+    if !category.trim().is_empty() && dat_is_geoip(bytes, category.trim())? {
+        return parse(bytes, true, category, Want::Ips, regexp);
+    }
     parse(bytes, true, category, Want::Domains, regexp).or_else(|names| {
         parse(bytes, true, category, Want::Ips, regexp)
             .map_err(|ips| format!("not a geosite category ({names}) nor a geoip one ({ips})"))
     })
+}
+
+/// Whether `category` of a `.dat` is a geoip one: it has the `reverse_match`
+/// field or a cidr (whose first field is the address bytes; a geosite domain
+/// starts with its type varint or its value). A reverse match is refused:
+/// even an empty one stands for every address but the listed ones.
+fn dat_is_geoip(bytes: &[u8], category: &str) -> Result<bool, String> {
+    let mut geoip = false;
+    for entry in dat_entries(bytes, category)? {
+        let mut cursor = Cursor { buf: entry };
+        while !cursor.is_empty() {
+            match cursor.tag()? {
+                (3, 0) => {
+                    if cursor.varint()? != 0 {
+                        return Err(format!("不支持 GeoIP 反向匹配（分类 {category:?}）"));
+                    }
+                    geoip = true;
+                }
+                (2, 2) => {
+                    let mut message = Cursor { buf: cursor.delimited()? };
+                    if !message.is_empty() && message.tag()? == (1, 2) {
+                        geoip = true;
+                    }
+                }
+                (_, wire) => cursor.skip(wire)?,
+            }
+        }
+    }
+    Ok(geoip)
 }
 
 /// The `behavior` byte of an `.mrs` file (read without inflating the rest).

@@ -530,6 +530,13 @@ fn binary_downloads_give_the_names_and_prefixes_they_hold() {
     let dat = geoip_entry("CN", &[c(&[1, 0, 1, 0], 24), c(&[0x24, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 20)], false);
     let got = convert_download(&dat, "dat", "cn", "geoip.dat").unwrap();
     assert_eq!(got.ips, ["1.0.1.0/24", "240e::/20"]);
+    // A reverse match, even an empty one, is refused by name.
+    let dat = geoip_entry("CN", &[], true);
+    let error = convert_download(&dat, "dat", "cn", "geoip.dat").err().unwrap();
+    assert!(error.contains("不支持 GeoIP 反向匹配"), "{error}");
+    let dat = geoip_entry("CN", &[c(&[1, 0, 1, 0], 24)], true);
+    let error = convert_download(&dat, "dat", "cn", "geoip.dat").err().unwrap();
+    assert!(error.contains("不支持 GeoIP 反向匹配"), "{error}");
     let dat = geosite_entry("CN", &[(2, "example.cn")]);
     let got = convert_download(&dat, "dat", "cn", "geosite.dat").unwrap();
     assert_eq!((got.entries.as_slice(), got.ips.len()), (&["domain:example.cn".to_owned()][..], 0));

@@ -502,8 +502,12 @@ fn skip_item<R: BufRead>(
         15 => ("WIFI-BSSID", body.string_slice()?.len() as u64),
         17 => ("PROCESS-PATH-REGEX", body.string_slice()?.len() as u64),
         18 => ("NETWORK-TYPE", fixed(body, 1)?),
-        19 => ("NETWORK-IS-EXPENSIVE", 1),
-        20 => ("NETWORK-IS-CONSTRAINED", 1),
+        19 | 20 => {
+            // No payload, but each one still counts against the budget.
+            body.spend(1)?;
+            let kind = if item == 19 { "NETWORK-IS-EXPENSIVE" } else { "NETWORK-IS-CONSTRAINED" };
+            (kind, 1)
+        }
         21 => {
             let keys = body.uvarint()?;
             body.spend(keys)?;
@@ -1106,6 +1110,22 @@ mod tests {
         // Truncated after the first rule: what was read, incomplete.
         let got = decode_srs(&srs(&body[..12]), true).unwrap();
         assert_eq!((got.rules.len(), got.complete), (2, false));
+    }
+
+    #[test]
+    fn a_flood_of_boolean_items_hits_the_rule_budget() {
+        // sing-box's framing: one default rule of `count` boolean items.
+        let file = |count: usize| {
+            let mut body = vec![1, 0];
+            body.resize(2 + count, 19);
+            body.extend([ITEM_FINAL, 0]);
+            srs(&body)
+        };
+        let got = decode_srs(&file(MAX_ITEMS + 1), true).unwrap();
+        assert!(!got.complete);
+        let got = decode_srs(&file(1000), true).unwrap();
+        assert_eq!(got.skipped.get("NETWORK-IS-EXPENSIVE"), Some(&1000));
+        assert!(got.complete);
     }
 
     fn one_rule(items: &[u8]) -> Vec<u8> {
