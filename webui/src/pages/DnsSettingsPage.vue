@@ -21,6 +21,21 @@ const settings = ref<Schemas['Settings'] | null>(null)
 const ttl = reactive({ direct: '', fakeip: '' })
 const rewrite = ref('')
 const savedRewrite = ref('')
+// A save replaces every rewrite rule: the editor opens only once the rules were read.
+const rewriteRead = ref(false)
+const rewriteError = ref('')
+
+async function loadRewrite() {
+  rewriteError.value = ''
+  try {
+    const answer = await call(client.GET('/rewrite'))
+    savedRewrite.value = answer.entries.join('\n')
+    rewrite.value = savedRewrite.value
+    rewriteRead.value = true
+  } catch (failure) {
+    rewriteError.value = `读取失败：${describe(failure)}`
+  }
+}
 const errors = reactive({ load: '', dns: '', ttl: '', rewrite: '' })
 const busy = ref('')
 
@@ -44,14 +59,10 @@ function fillSettings(value: Schemas['Settings']) {
 }
 
 onMounted(async () => {
-  const results = await Promise.allSettled([call(client.GET('/dns')), call(client.GET('/settings')), call(client.GET('/rewrite'))])
-  const [dnsNow, settingsNow, rewriteNow] = results
+  const results = await Promise.allSettled([call(client.GET('/dns')), call(client.GET('/settings')), loadRewrite()])
+  const [dnsNow, settingsNow] = results
   if (dnsNow.status === 'fulfilled') fillDns(dnsNow.value)
   if (settingsNow.status === 'fulfilled') fillSettings(settingsNow.value)
-  if (rewriteNow.status === 'fulfilled') {
-    savedRewrite.value = rewriteNow.value.entries.join('\n')
-    rewrite.value = savedRewrite.value
-  }
   const failed = results.find((result) => result.status === 'rejected')
   errors.load = failed ? describe((failed as PromiseRejectedResult).reason) : ''
 })
@@ -182,11 +193,15 @@ async function saveRewrite() {
       <div class="card grid" style="gap: 10px">
         <div class="hd" style="margin: 0">
           <h2>重写 / hosts</h2>
-          <span class="tag">{{ lines(rewrite).length }} 行</span>
+          <span v-if="rewriteRead" class="tag">{{ lines(rewrite).length }} 行</span>
           <span class="sp"></span>
-          <button class="btn sm pri" type="button" :disabled="!!busy || rewrite === savedRewrite" @click="saveRewrite">保存</button>
+          <button v-if="rewriteRead" class="btn sm pri" type="button" :disabled="!!busy || rewrite === savedRewrite" @click="saveRewrite">保存</button>
         </div>
-        <textarea v-model="rewrite" class="inp" aria-label="重写规则" placeholder="full:router.lan 192.168.1.1&#10;domain:corp.example.com 10.8.0.10"></textarea>
+        <textarea v-if="rewriteRead" v-model="rewrite" class="inp" aria-label="重写规则" placeholder="full:router.lan 192.168.1.1&#10;domain:corp.example.com 10.8.0.10"></textarea>
+        <div v-else-if="rewriteError" class="row">
+          <div class="err" style="flex: 1">{{ rewriteError }}</div>
+          <button class="btn" type="button" @click="loadRewrite">重试</button>
+        </div>
         <div v-if="errors.rewrite" class="err">{{ errors.rewrite }}</div>
       </div>
     </div>

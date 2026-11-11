@@ -27,8 +27,24 @@ export async function loadRulesets() {
   rulesets.value = list.filter((item): item is Ruleset => item.type !== 'builtin')
 }
 
+// Every read and every write of the upstream groups takes a number in order (a read when it
+// is sent, a write when it answers); a read answering after a later read or write was applied
+// is dropped, so no page's late read replaces newer groups.
+let upstreamTicket = 0
+let upstreamApplied = 0
+
 export async function loadUpstreams() {
-  upstreamGroups.value = (await call(client.GET('/upstreams'))).groups
+  const ticket = ++upstreamTicket
+  const groups = (await call(client.GET('/upstreams'))).groups
+  if (ticket < upstreamApplied) return
+  upstreamApplied = ticket
+  upstreamGroups.value = groups
+}
+
+/** The groups a write answered with (always newer than any read sent before). */
+export function setUpstreamGroups(groups: UpstreamGroup[]) {
+  upstreamApplied = ++upstreamTicket
+  upstreamGroups.value = groups
 }
 
 // ---- names ------------------------------------------------------------------

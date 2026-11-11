@@ -97,6 +97,10 @@ const search = ref('')
 const regex = ref(false)
 // The clients of the list shown (a client whose connections all closed is still in the closed list).
 const sources = computed(() => [...new Set((view.value === 'active' ? active.value : closed.value).map((conn) => conn.src).filter(Boolean))].sort())
+// A client the view switched to does not have is no filter there.
+watch(view, () => {
+  if (source.value && !sources.value.includes(source.value)) source.value = ''
+})
 const chainText = (conn: Conn) => conn.chain.map(nameOf).join(' › ')
 const hostText = (conn: Conn) => (hostMode.value === 'ip' ? conn.ip || conn.host : conn.host || conn.ip)
 const searchError = computed(() => {

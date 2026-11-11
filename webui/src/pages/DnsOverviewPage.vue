@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router'
 import { call, client, describe, type Schemas } from '../api/client'
 import DnsTabs from '../components/DnsTabs.vue'
 import { usePoll } from '../composables/poll'
+import { loadUpstreams, upstreamGroups } from '../composables/rules'
 
 type Rank = Schemas['AuditRankItem'][]
 const stats = ref<{ total_queries: number; average_duration_ms: number } | null>(null)
@@ -11,8 +12,6 @@ const windows = ref<{ key: string; label: string; request_count: number; average
 const domains = ref<Rank>([])
 const clients = ref<Rank>([])
 const sets = ref<Rank>([])
-// Its own copy: a late answer here must not replace what the upstream page saved meanwhile.
-const upstreamGroups = ref<Schemas['UpstreamGroup'][]>([])
 const error = ref('')
 
 async function load() {
@@ -22,15 +21,14 @@ async function load() {
     call(client.GET('/audit/rank/domain', { params: { query: { limit: 8 } } })),
     call(client.GET('/audit/rank/client', { params: { query: { limit: 8 } } })),
     call(client.GET('/audit/rank/domain_set', { params: { query: { limit: 8 } } })),
-    call(client.GET('/upstreams'))
+    loadUpstreams()
   ])
-  const [total, recent, topDomains, topClients, topSets, groups] = results
+  const [total, recent, topDomains, topClients, topSets] = results
   stats.value = total.status === 'fulfilled' ? total.value : null
   windows.value = recent.status === 'fulfilled' ? recent.value.items : []
   domains.value = topDomains.status === 'fulfilled' ? topDomains.value : []
   clients.value = topClients.status === 'fulfilled' ? topClients.value : []
   sets.value = topSets.status === 'fulfilled' ? topSets.value : []
-  if (groups.status === 'fulfilled') upstreamGroups.value = groups.value.groups
   const failed = results.find((result) => result.status === 'rejected')
   error.value = failed ? describe((failed as PromiseRejectedResult).reason) : ''
 }

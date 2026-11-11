@@ -4,7 +4,7 @@ import { ApiError, call, client, describe, type Schemas } from '../api/client'
 import AppModal from '../components/AppModal.vue'
 import DnsTabs from '../components/DnsTabs.vue'
 import UpstreamModal from '../components/UpstreamModal.vue'
-import { loadRules, loadUpstreams, rules, upstreamGroups } from '../composables/rules'
+import { loadRules, loadUpstreams, rules, setUpstreamGroups, upstreamGroups } from '../composables/rules'
 import { toast } from '../composables/toast'
 
 type Upstream = Schemas['Upstream']
@@ -50,7 +50,7 @@ const PROTOCOLS: Record<string, string> = { udp: 'UDP', tcp: 'TCP', tls: 'DoT', 
  */
 function applied(groups: Group[], written: string) {
   const kept = Object.fromEntries(upstreamGroups.value.filter((group) => group.tag !== written && dirty(group)).map((group) => [group.tag, drafts[group.tag]]))
-  upstreamGroups.value = groups
+  setUpstreamGroups(groups)
   reset(groups)
   for (const [tag, draft] of Object.entries(kept)) if (drafts[tag]) drafts[tag] = draft
 }
