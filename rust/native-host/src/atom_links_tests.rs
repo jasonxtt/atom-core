@@ -317,3 +317,46 @@ fn yaml_credentials_are_kept_verbatim() {
     assert_eq!(nodes[2].1["password"], " x");
     assert_eq!(nodes[2].1["obfs"]["password"], " o ");
 }
+
+#[test]
+fn json_copied_out_of_a_configuration() {
+    // Two outbounds as copied from a sing-box config: a commented-out line,
+    // no enclosing [ ], trailing commas inside and after the last object.
+    let text = r#"{
+      "type": "vless",
+      "tag": "node-a",
+      "server": "2001:db8::1",
+      //"server": "192.0.2.1",
+      "server_port": 28443,
+      "uuid": "5f0b2c1e-0000-4000-8000-000000000001",
+      "tls": {"enabled": true, "server_name": "a.example", /* sni */ },
+    },
+    {
+      "type": "vless",
+      "tag": "node-b",
+      "server": "192.0.2.2",
+      "server_port": 23881,
+      "uuid": "5f0b2c1e-0000-4000-8000-000000000001",
+      "flow": "xtls-rprx-vision",
+    },
+    "#;
+    let value = lenient_json(text).unwrap();
+    let nodes = from_singbox_json(value).unwrap();
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0].0, "node-a");
+    assert_eq!(nodes[0].1["server"], "2001:db8::1");
+    assert_eq!(nodes[0].1["tls"]["server_name"], "a.example");
+    assert_eq!(nodes[1].0, "node-b");
+}
+
+#[test]
+fn lenient_json_keeps_strings_and_rejects_broken_text() {
+    let value =
+        lenient_json(r#"{"path": "https://x.example/a//b/*c*/", "s": ",}", "q": "\"//"}"#).unwrap();
+    assert_eq!(value["path"], "https://x.example/a//b/*c*/");
+    assert_eq!(value["s"], ",}");
+    assert_eq!(value["q"], "\"//");
+    assert_eq!(lenient_json("[1, 2, ]").unwrap(), json!([1, 2]));
+    assert!(lenient_json(r#"{"type": "vless""#).is_err());
+    assert!(lenient_json("").is_err());
+}

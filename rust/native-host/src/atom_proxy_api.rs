@@ -169,9 +169,9 @@ async fn import_nodes(rules: &AtomRules, bytes: &[u8]) -> Answer {
 fn parse_import(format: &str, content: Value) -> Result<Vec<crate::atom_links::Imported>, Reply> {
     let text = content.as_str().map(str::to_owned);
     let imported = match (format, text) {
-        ("json", Some(text)) => serde_json::from_str::<Value>(&text)
-            .map_err(|e| format!("JSON 无法解析: {e}"))
-            .and_then(crate::atom_links::from_singbox_json),
+        ("json", Some(text)) => {
+            crate::atom_links::lenient_json(&text).and_then(crate::atom_links::from_singbox_json)
+        }
         ("json", None) => crate::atom_links::from_singbox_json(content),
         ("yaml", Some(text)) => crate::atom_links::from_clash_yaml(&text),
         ("link", Some(text)) => crate::atom_links::from_links(&text),

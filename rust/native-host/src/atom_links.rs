@@ -933,6 +933,103 @@ pub(crate) fn from_clash_yaml(content: &str) -> Result<Vec<Imported>, String> {
         .collect()
 }
 
+/// Parses JSON text as copied out of a sing-box configuration: `//` and
+/// `/* */` comments and trailing commas are allowed (sing-box reads its own
+/// configuration with comments too), and objects separated by commas without
+/// an enclosing `[ ]` are read as a list.
+pub(crate) fn lenient_json(text: &str) -> Result<Value, String> {
+    let cleaned = strip_comments_and_trailing_commas(text);
+    let trimmed = cleaned.trim();
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if trimmed.starts_with('{') {
+                if let Ok(value) = serde_json::from_str::<Value>(&format!("[{trimmed}]")) {
+                    return Ok(value);
+                }
+            }
+            Err(format!("JSON 无法解析: {error}"))
+        }
+    }
+}
+
+fn strip_comments_and_trailing_commas(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < chars.len() {
+                out.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+                i += 1;
+            }
+            '/' if chars.get(i + 1) == Some(&'/') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i += 2;
+                out.push(' ');
+            }
+            ',' => {
+                // Drop a comma followed only by whitespace or comments and then
+                // `}`, `]` or the end of the text.
+                let mut j = i + 1;
+                loop {
+                    while j < chars.len() && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if chars.get(j) == Some(&'/') && chars.get(j + 1) == Some(&'/') {
+                        while j < chars.len() && chars[j] != '\n' {
+                            j += 1;
+                        }
+                    } else if chars.get(j) == Some(&'/') && chars.get(j + 1) == Some(&'*') {
+                        j += 2;
+                        while j < chars.len()
+                            && !(chars[j] == '*' && chars.get(j + 1) == Some(&'/'))
+                        {
+                            j += 1;
+                        }
+                        j += 2;
+                    } else {
+                        break;
+                    }
+                }
+                if !matches!(chars.get(j), None | Some('}') | Some(']')) {
+                    out.push(c);
+                }
+                i += 1;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Nodes from sing-box JSON: one outbound, a list, or a configuration with
 /// `outbounds` (only its proxy outbounds).
 pub(crate) fn from_singbox_json(value: Value) -> Result<Vec<Imported>, String> {
