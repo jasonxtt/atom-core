@@ -538,8 +538,9 @@ pub(crate) struct NftSets {
 impl NftSets {
     pub(crate) fn of(fakeip_range: &str, ip_rules: &[IpRule]) -> Self {
         let mut iprule4: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for cidr in ip_rules.iter().flat_map(|rule| &rule.cidrs) {
-            if !cidr.contains(':') && !iprule4.contains(cidr) {
+            if !cidr.contains(':') && seen.insert(cidr) {
                 iprule4.push(cidr.clone());
             }
         }
@@ -563,10 +564,11 @@ impl NftSets {
             .as_str()?
             .to_owned();
         let mut iprule4: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for rule in value.pointer("/route/rules")?.as_array()? {
             for cidr in rule["ip_cidr"].as_array().into_iter().flatten() {
                 let cidr = cidr.as_str()?;
-                if !cidr.contains(':') && !iprule4.iter().any(|known| known == cidr) {
+                if !cidr.contains(':') && seen.insert(cidr) {
                     iprule4.push(cidr.to_owned());
                 }
             }

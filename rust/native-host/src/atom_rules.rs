@@ -669,6 +669,7 @@ pub(crate) fn ip_rules(state: &State) -> Vec<crate::atom_singbox::IpRule> {
         .filter(|rule| rule.enabled && rule.matches.has_ip())
         .map(|rule| {
             let mut cidrs: Vec<String> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
             let from_sets = rule
                 .matches
                 .ip_ruleset
@@ -682,7 +683,7 @@ pub(crate) fn ip_rules(state: &State) -> Vec<crate::atom_singbox::IpRule> {
                 .filter_map(|value| ip_entry(value).ok())
                 .chain(from_sets)
             {
-                if !cidrs.contains(&cidr) {
+                if seen.insert(cidr.clone()) {
                     cidrs.push(cidr);
                 }
             }
@@ -714,9 +715,10 @@ impl AtomRules {
 
     /// [`Self::load`] with the upstream group routes a direct rule may name.
     /// `inputs` (a hot-apply candidate) records the state files read
-    /// (`atom_rules.json`, `atom_rulesets.json`, `atom_proxy.json`): a rule or
-    /// proxy write that lands while the candidate compiles makes its
-    /// publication fail, instead of installing tables read before the write.
+    /// (`atom_rules.json`, `atom_rulesets.json`, `atom_proxy.json`, the
+    /// catalog indexes): a rule, proxy or catalog write that lands while the
+    /// candidate compiles makes its publication fail, instead of installing
+    /// tables read before the write.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn load_with_routes(
         root: &Path,
@@ -760,6 +762,15 @@ impl AtomRules {
                 }
                 None => BTreeSet::new(),
             }
+        };
+        // Both catalog indexes are inputs too (a sync that lands while the
+        // candidate compiles makes its publication fail).
+        let catalog = if root.as_os_str().is_empty() {
+            crate::atom_catalog::Catalog::default()
+        } else {
+            let shipped = read(&root.join(crate::atom_catalog::SNAPSHOT))?;
+            let synced = read(&root.join(crate::atom_catalog::SYNCED))?;
+            crate::atom_catalog::Catalog::from_files(shipped.as_deref(), synced.as_deref())
         };
         let names: Vec<String> = builtin
             .iter()
@@ -846,7 +857,7 @@ impl AtomRules {
             },
             busy: std::cell::Cell::new(false),
             routes,
-            catalog: RefCell::new(crate::atom_catalog::Catalog::load(root)),
+            catalog: RefCell::new(catalog),
             ip_builtin: RefCell::new(Vec::new()),
             removed: RefCell::new(removed),
             updates: RefCell::new(None),
@@ -1860,7 +1871,7 @@ pub(crate) struct Converted {
 }
 
 /// Converts a downloaded list (blocking work): names and IP prefixes; an
-/// SRS file gives either (a geosite or a geoip set).
+/// SRS, `.mrs` or `.dat` file gives what it holds.
 pub(crate) fn convert_download(
     bytes: &[u8],
     format: &str,
@@ -1870,25 +1881,33 @@ pub(crate) fn convert_download(
     use crate::rule_formats::Format;
     let format =
         crate::rule_formats::resolve(Format::parse(format).unwrap_or(Format::Auto), bytes, url);
-    let mut skipped = BTreeMap::new();
+    let skipped;
     let (entries, prefixes) = match format {
         Format::Srs => {
             // One pass over both kinds (a rule set may carry names and prefixes).
             let srs = atomdns_matcher_core::decode_srs(bytes, true)
                 .map_err(|error| format!("无效的 SRS 数据: {error}"))?;
+            if !srs.complete {
+                // Part of the file would replace the whole saved list.
+                return Err(
+                    "SRS 数据没有读完整（损坏，或含不支持读取的条目，如 AdGuard 规则），保留原列表"
+                        .to_owned(),
+                );
+            }
+            skipped = srs
+                .skipped
+                .into_iter()
+                .map(|(kind, count)| (format!("unsupported rule type {kind}"), count))
+                .collect();
             (srs.rules, srs.prefixes)
         }
         Format::Dat | Format::Mrs => {
-            let names = crate::rule_binary::parse(
-                bytes,
-                format == Format::Dat,
-                category,
-                crate::rule_binary::Want::Domains,
-                true,
-            )
-            .map_err(|error| format!("无效的 {} 数据: {error}", format.as_str()))?
-            .domains;
-            (names, Vec::new())
+            // The file decides names or prefixes (`behavior`, the category).
+            let parsed =
+                crate::rule_binary::parse_any(bytes, format == Format::Dat, category, true)
+                    .map_err(|error| format!("无效的 {} 数据: {error}", format.as_str()))?;
+            skipped = parsed.skipped.counts();
+            (parsed.domains, parsed.ips)
         }
         _ => {
             let parsed = crate::rule_formats::parse(bytes, format, true)

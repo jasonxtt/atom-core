@@ -72,20 +72,19 @@ fn plain(name: &str) -> bool {
 }
 
 impl Catalog {
-    fn read(path: &Path) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
-        serde_json::from_slice(&bytes).ok()
-    }
-
     /// The newer of the synced index and the shipped one (empty without
     /// either).
+    #[cfg(test)]
     pub(crate) fn load(root: &Path) -> Self {
-        if root.as_os_str().is_empty() {
-            return Self::default();
-        }
-        let shipped = Self::read(&root.join(SNAPSHOT));
-        let synced = Self::read(&root.join(SYNCED));
-        match (shipped, synced) {
+        let read = |name: &str| std::fs::read(root.join(name)).ok();
+        Self::from_files(read(SNAPSHOT).as_deref(), read(SYNCED).as_deref())
+    }
+
+    /// [`Self::load`] from the bytes of the shipped and the synced index
+    /// (a file missing or not an index counts as absent).
+    pub(crate) fn from_files(shipped: Option<&[u8]>, synced: Option<&[u8]>) -> Self {
+        let parse = |bytes: Option<&[u8]>| -> Option<Self> { serde_json::from_slice(bytes?).ok() };
+        match (parse(shipped), parse(synced)) {
             (Some(a), Some(b)) => {
                 if b.updated_at >= a.updated_at {
                     b

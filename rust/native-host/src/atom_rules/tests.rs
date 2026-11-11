@@ -472,6 +472,71 @@ fn remote_downloads_are_converted_and_failures_recorded() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// An SRS file (zlib body under the `SRS` 3 header).
+fn srs_file(body: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(body).unwrap();
+    let mut file = b"SRS\x03".to_vec();
+    file.extend(encoder.finish().unwrap());
+    file
+}
+
+#[test]
+fn binary_downloads_give_the_names_and_prefixes_they_hold() {
+    // SRS: a name rule, a process-name rule (read past, counted), an IP rule.
+    let mut body = vec![3, 0, 3, 1, 2, b'a', b'd', 0xFF, 0];
+    body.extend([0, 11, 1, 3, b'a', b'p', b'p', 0xFF, 0]);
+    body.extend([0, 6, 1]);
+    body.extend(1u64.to_be_bytes());
+    body.extend([4, 10, 0, 0, 0, 4, 10, 0, 0, 255, 0xFF, 0]);
+    let got = convert_download(&srs_file(&body), "srs", "", "x.srs").unwrap();
+    assert_eq!((got.entries.as_slice(), got.ips.as_slice()), (&["keyword:ad".to_owned()][..], &["10.0.0.0/24".to_owned()][..]));
+    assert_eq!(got.skipped.get("unsupported rule type PROCESS-NAME"), Some(&1), "{:?}", got.skipped);
+    // Decoding stopped early (an AdGuard item): refused, the list stays.
+    let body = [2, 0, 3, 1, 2, b'a', b'd', 0xFF, 0, 0, 16, 1, 2, 3];
+    let error = convert_download(&srs_file(&body), "srs", "", "x.srs").err().unwrap();
+    assert!(error.contains("没有读完整"), "{error}");
+    let root = scratch("binary");
+    let rules = owner(&root);
+    let source = Source::Remote {
+        url: "https://example.com/x.srs".to_owned(),
+        format: "srs".to_owned(),
+        category: String::new(),
+    };
+    let set = rules.create_ruleset("srs", source, Vec::new()).unwrap();
+    let ok = convert_download(&srs_file(&[1, 0, 3, 1, 2, b'a', b'd', 0xFF, 0]), "srs", "", "x.srs");
+    rules.store_download(&set.id, &set.source, rules.begin_download(&set.id), ok).unwrap();
+    let failed = rules
+        .store_download(&set.id, &set.source, rules.begin_download(&set.id), Err(error))
+        .unwrap();
+    assert_eq!(failed.rule_count, 1);
+    assert!(failed.last_error.contains("没有读完整"), "{}", failed.last_error);
+    let _ = std::fs::remove_dir_all(&root);
+
+    // An IP-behavior `.mrs` keeps its prefixes.
+    let mrs = crate::rule_binary::tests::mrs_ip_file(&[(
+        crate::rule_binary::tests::mapped([192, 0, 2, 0]),
+        crate::rule_binary::tests::mapped([192, 0, 2, 255]),
+    )]);
+    let got = convert_download(&mrs, "mrs", "", "x.mrs").unwrap();
+    assert_eq!((got.entries.len(), got.ips.as_slice()), (0, &["192.0.2.0/24".to_owned()][..]));
+    let mrs = crate::rule_binary::tests::mrs_domain_file(&["+.example.com"]);
+    let got = convert_download(&mrs, "mrs", "", "x.mrs").unwrap();
+    assert_eq!((got.entries.len(), got.ips.len()), (1, 0), "{:?}", got.entries);
+
+    // A geoip `.dat` category gives prefixes, a geosite one names.
+    use crate::rule_binary::tests::{c, geoip_entry, geosite_entry};
+    let dat = geoip_entry("CN", &[c(&[1, 0, 1, 0], 24), c(&[0x24, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 20)], false);
+    let got = convert_download(&dat, "dat", "cn", "geoip.dat").unwrap();
+    assert_eq!(got.ips, ["1.0.1.0/24", "240e::/20"]);
+    let dat = geosite_entry("CN", &[(2, "example.cn")]);
+    let got = convert_download(&dat, "dat", "cn", "geosite.dat").unwrap();
+    assert_eq!((got.entries.as_slice(), got.ips.len()), (&["domain:example.cn".to_owned()][..], 0));
+    let error = convert_download(&dat, "dat", "us", "geosite.dat").err().unwrap();
+    assert!(error.contains("not found"), "{error}");
+}
+
 #[test]
 fn proxy_rules_cannot_have_a_client_condition() {
     let root = scratch("client-proxy");
@@ -1165,4 +1230,34 @@ fn an_inverted_client_condition_matches_the_clients_outside_the_list() {
     let saved = serde_json::to_value(&rules.rules().1).unwrap();
     assert_eq!(saved[1]["match"]["client_invert"], true);
     assert!(saved[2]["match"].get("client_invert").is_none());
+}
+
+#[test]
+fn a_candidate_records_both_catalog_indexes() {
+    let root = scratch("catalog-inputs");
+    std::fs::create_dir_all(root.join("rule")).unwrap();
+    std::fs::write(
+        root.join(crate::atom_catalog::SNAPSHOT),
+        br#"{"updated_at": 5, "meta": {"geosite": ["cn"], "geoip": []}, "bm7": []}"#,
+    )
+    .unwrap();
+    let mut inputs = crate::special_groups::CandidateInputSet::default();
+    let rules = AtomRules::load_with_routes(
+        &root,
+        MARKS,
+        None,
+        String::new(),
+        Vec::new(),
+        None,
+        BTreeMap::new(),
+        Some(&mut inputs),
+    )
+    .unwrap();
+    assert_eq!(rules.catalog.borrow().updated_at, 5);
+    let snapshot = inputs.files.get(&root.join(crate::atom_catalog::SNAPSHOT));
+    assert!(matches!(snapshot, Some(Some(_))), "{:?}", inputs.files);
+    // The synced index is missing: recorded as missing.
+    let synced = inputs.files.get(&root.join(crate::atom_catalog::SYNCED));
+    assert_eq!(synced, Some(&None), "{:?}", inputs.files);
+    let _ = std::fs::remove_dir_all(&root);
 }

@@ -706,10 +706,11 @@ async fn status(rules: &AtomRules) -> Reply {
         _ => None,
     };
     let (mut v4, mut v6) = (Vec::new(), Vec::new());
+    let mut seen = std::collections::HashSet::new();
     for rule in rules.current_ip_rules() {
         for cidr in rule.cidrs {
-            let list = if cidr.contains(':') { &mut v6 } else { &mut v4 };
-            if !list.contains(&cidr) {
+            if seen.insert(cidr.clone()) {
+                let list = if cidr.contains(':') { &mut v6 } else { &mut v4 };
                 list.push(cidr);
             }
         }

@@ -381,7 +381,11 @@ pub fn decode_ip_srs(bytes: &[u8]) -> Result<IpSrs, SrsError> {
 pub struct MixedSrs {
     pub rules: Vec<String>,
     pub prefixes: Vec<(IpAddr, u8)>,
-    /// `false` when decoding stopped before the declared rules were read.
+    /// Entries of the item types no rule set here uses (process names,
+    /// ports, ...), read past by their encoding: kind → entries.
+    pub skipped: std::collections::BTreeMap<&'static str, u64>,
+    /// `false` when decoding stopped before the declared rules were read
+    /// (damage, or an item whose encoding is not read here: AdGuard).
     pub complete: bool,
 }
 
@@ -396,14 +400,18 @@ pub fn decode_srs(bytes: &[u8], enable_regexp: bool) -> Result<MixedSrs, SrsErro
     let (mut body, count) = open(bytes)?;
     let mut out = MixedSrs::default();
     for _ in 0..count {
-        let (rules, prefixes) = (&mut out.rules, &mut out.prefixes);
-        if read_framed_rule(&mut body, &mut |item, body| {
-            if item == ITEM_IPCIDR {
-                ip_item(item, body, prefixes)
-            } else {
-                domain_item(item, body, enable_regexp, rules)
-            }
-        }, 0)
+        let (rules, prefixes, skipped) = (&mut out.rules, &mut out.prefixes, &mut out.skipped);
+        if read_framed_rule(
+            &mut body,
+            &mut |item, body| match item {
+                ITEM_IPCIDR => ip_item(item, body, prefixes),
+                ITEM_DOMAIN | ITEM_KEYWORD | ITEM_REGEX => {
+                    domain_item(item, body, enable_regexp, rules)
+                }
+                other => skip_item(other, body, skipped),
+            },
+            0,
+        )
         .is_err()
         {
             return Ok(out);
@@ -445,6 +453,73 @@ fn read_framed_rule<R: BufRead>(
         }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "rule mode")),
     }
+}
+
+/// An item type no rule set here uses, read past by sing-box's encoding of
+/// it and counted (`kind` → entries); an item whose encoding is not read
+/// here ends the rule (`Next::EndRule`, decoding then stops).
+fn skip_item<R: BufRead>(
+    item: u8,
+    body: &mut Body<R>,
+    skipped: &mut std::collections::BTreeMap<&'static str, u64>,
+) -> io::Result<Next> {
+    // A list of `count` values of `width` bytes each (`varbin.ReadSlice`).
+    fn fixed<R: BufRead>(body: &mut Body<R>, width: u64) -> io::Result<u64> {
+        let count = body.uvarint()?;
+        body.spend(count)?;
+        let len = count
+            .checked_mul(width)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "slice too large"))?;
+        body.bytes(len)?;
+        Ok(count)
+    }
+    // A list of prefixes (`readPrefix`: address bytes, then the bits).
+    fn prefixes<R: BufRead>(body: &mut Body<R>) -> io::Result<u64> {
+        let count = body.uvarint()?;
+        body.spend(count)?;
+        for _ in 0..count {
+            body.capped_byte_slice(16)?;
+            body.byte()?;
+        }
+        Ok(count)
+    }
+    let (kind, count) = match item {
+        0 => ("QUERY-TYPE", fixed(body, 2)?),
+        1 => ("NETWORK", body.string_slice()?.len() as u64),
+        5 => {
+            let mut scratch = Vec::new();
+            ip_item(ITEM_IPCIDR, body, &mut scratch)?;
+            ("SRC-IP-CIDR", scratch.len() as u64)
+        }
+        7 => ("SRC-PORT", fixed(body, 2)?),
+        8 => ("SRC-PORT", body.string_slice()?.len() as u64),
+        9 => ("DST-PORT", fixed(body, 2)?),
+        10 => ("DST-PORT", body.string_slice()?.len() as u64),
+        11 => ("PROCESS-NAME", body.string_slice()?.len() as u64),
+        12 => ("PROCESS-PATH", body.string_slice()?.len() as u64),
+        13 => ("PACKAGE-NAME", body.string_slice()?.len() as u64),
+        14 => ("WIFI-SSID", body.string_slice()?.len() as u64),
+        15 => ("WIFI-BSSID", body.string_slice()?.len() as u64),
+        17 => ("PROCESS-PATH-REGEX", body.string_slice()?.len() as u64),
+        18 => ("NETWORK-TYPE", fixed(body, 1)?),
+        19 => ("NETWORK-IS-EXPENSIVE", 1),
+        20 => ("NETWORK-IS-CONSTRAINED", 1),
+        21 => {
+            let keys = body.uvarint()?;
+            body.spend(keys)?;
+            let mut count = 0;
+            for _ in 0..keys {
+                body.byte()?;
+                count += prefixes(body)?;
+            }
+            ("NETWORK-INTERFACE-ADDRESS", count)
+        }
+        22 => ("DEFAULT-INTERFACE-ADDRESS", prefixes(body)?),
+        23 => ("PACKAGE-NAME-REGEX", body.string_slice()?.len() as u64),
+        _ => return Ok(Next::EndRule),
+    };
+    *skipped.entry(kind).or_default() += count;
+    Ok(Next::Continue)
 }
 
 /// What an item reader tells the rule loop.
@@ -1007,6 +1082,27 @@ mod tests {
         assert_eq!(got.rules, ["keyword:ad", "keyword:bb", "keyword:zz"]);
         assert_eq!(got.prefixes, [("10.0.0.0".parse().unwrap(), 24)]);
         assert!(got.complete);
+        // A rule of process names between them is read past and counted.
+        let mut body = vec![3, 0, ITEM_KEYWORD, 1, 2, b'a', b'd', ITEM_FINAL, 0];
+        body.extend([0, 11, 2, 3, b'a', b'p', b'p', 1, b'b', 9, 2, 0, 80, 1, 187, ITEM_FINAL, 0]);
+        body.extend([0, ITEM_IPCIDR, 1]);
+        body.extend(1u64.to_be_bytes());
+        body.extend([4, 10, 0, 0, 0, 4, 10, 0, 0, 255, ITEM_FINAL, 0]);
+        let got = decode_srs(&srs(&body), true).unwrap();
+        assert_eq!(got.rules, ["keyword:ad"]);
+        assert_eq!(got.prefixes, [("10.0.0.0".parse().unwrap(), 24)]);
+        assert_eq!(got.skipped.get("PROCESS-NAME"), Some(&2));
+        assert_eq!(got.skipped.get("DST-PORT"), Some(&2));
+        assert!(got.complete);
+        // An AdGuard item (its encoding is not read here) stops decoding.
+        let body = vec![2, 0, ITEM_KEYWORD, 1, 2, b'a', b'd', ITEM_FINAL, 0, 0, 16, 1, 2, 3];
+        let got = decode_srs(&srs(&body), true).unwrap();
+        assert_eq!((got.rules.len(), got.complete), (1, false));
+        let mut body = vec![3, 0, ITEM_KEYWORD, 2, 2, b'a', b'd', 2, b'b', b'b', ITEM_FINAL, 0];
+        body.extend([0, ITEM_IPCIDR, 1]);
+        body.extend(1u64.to_be_bytes());
+        body.extend([4, 10, 0, 0, 0, 4, 10, 0, 0, 255, ITEM_FINAL, 0]);
+        body.extend([1, 0, 1, 0, ITEM_KEYWORD, 1, 2, b'z', b'z', ITEM_FINAL, 0, 0]);
         // Truncated after the first rule: what was read, incomplete.
         let got = decode_srs(&srs(&body[..12]), true).unwrap();
         assert_eq!((got.rules.len(), got.complete), (2, false));

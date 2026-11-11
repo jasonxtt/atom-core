@@ -517,6 +517,42 @@ pub(crate) fn parse(
     }
 }
 
+/// Reads a download whose kind the file decides (atom: a ruleset holds names
+/// or prefixes): a `.mrs` by its `behavior`, a `.dat` as a geosite category
+/// and, when it is not one, as a geoip category (each reader rejects the
+/// other's entries by their wire types).
+///
+/// # Errors
+///
+/// A message when the file cannot be used either way.
+pub(crate) fn parse_any(
+    bytes: &[u8],
+    is_dat: bool,
+    category: &str,
+    regexp: bool,
+) -> Result<Parsed, String> {
+    if !is_dat {
+        let want = if mrs_behavior(bytes) == Some(1) {
+            Want::Ips
+        } else {
+            Want::Domains
+        };
+        return parse_mrs(bytes, want, regexp);
+    }
+    parse(bytes, true, category, Want::Domains, regexp).or_else(|names| {
+        parse(bytes, true, category, Want::Ips, regexp)
+            .map_err(|ips| format!("not a geosite category ({names}) nor a geoip one ({ips})"))
+    })
+}
+
+/// The `behavior` byte of an `.mrs` file (read without inflating the rest).
+fn mrs_behavior(bytes: &[u8]) -> Option<u8> {
+    let decoder = StreamingDecoder::new_with_max_window_size(bytes, MAX_INFLATED_BYTES).ok()?;
+    let mut head = Vec::new();
+    decoder.take(5).read_to_end(&mut head).ok()?;
+    (head.len() == 5 && head[..4] == MRS_MAGIC).then(|| head[4])
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
