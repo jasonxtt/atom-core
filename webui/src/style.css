@@ -204,3 +204,10 @@ a.nav{text-decoration:none}
 .srow{display:flex;align-items:center;gap:8px;background:var(--fill);border-radius:12px;padding:6px 8px 6px 10px;cursor:grab;touch-action:pan-y}
 .srow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .field>.label{font-size:13px;color:var(--muted)}
+/* A member tile: the member (selects it) and its delay tag (tests it) are two buttons side by side */
+.mtile{flex-direction:row;align-items:flex-end;gap:6px}
+.mpick{flex:1;min-width:0;border:0;background:none;padding:0;color:inherit;text-align:left;display:flex;flex-direction:column;gap:2px}
+.mpick:disabled{cursor:default}
+.mtile .mpick .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mtile .mpick .sub{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mtile.cur .mpick .sub{color:color-mix(in srgb,var(--on-sel) 65%,transparent)}

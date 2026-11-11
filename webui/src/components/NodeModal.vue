@@ -37,9 +37,13 @@ const busy = ref(false)
 const formVersion = ref(version.value)
 // After a 409 on an edit: the node as it is saved now (null when it was deleted).
 const conflict = ref<Node | null | undefined>(undefined)
+// The node the form edits from: the one opened, or the one saved now after "载入最新内容" or
+// "仍然保存" (what a change of name is compared with, and the connection shown).
+const base = ref<Node | undefined>(props.node)
 
 /** Drops the edits and starts again from the node as saved now. */
 function reload(current: Node) {
+  base.value = current
   form.name = current.name
   form.replace = false
   form.content = ''
@@ -48,7 +52,7 @@ function reload(current: Node) {
   error.value = ''
 }
 const joinTargets = computed(() => [...groups.value.map((group) => ({ id: group.id, name: group.name })), { id: FINAL, name: FINAL_NAME }])
-const outbound = computed(() => JSON.stringify(props.node?.outbound ?? {}, null, 2))
+const outbound = computed(() => JSON.stringify(base.value?.outbound ?? {}, null, 2))
 
 function stale(failure: unknown) {
   return failure instanceof ApiError && failure.status === 409 && failure.body?.version !== undefined
@@ -67,7 +71,7 @@ async function join(ids: string[]) {
     return
   }
   const group = groups.value.find((item) => item.id === form.joinGroup)
-  if (!group) return
+  if (!group) throw new Error('这个节点组已不存在')
   const { name, type, selected, url, interval, tolerance } = group
   await call(
     client.PUT('/groups/{id}', {
@@ -80,6 +84,7 @@ async function join(ids: string[]) {
 async function submit(overwrite = false) {
   error.value = ''
   if (overwrite) {
+    if (conflict.value) base.value = conflict.value
     formVersion.value = version.value
     conflict.value = undefined
   }
@@ -88,7 +93,7 @@ async function submit(overwrite = false) {
   try {
     if (props.node) {
       const body: { name?: string; format?: Format; content?: string; version: number } = { version: formVersion.value }
-      if (form.name.trim() && form.name.trim() !== props.node.name) body.name = form.name.trim()
+      if (form.name.trim() && form.name.trim() !== base.value?.name) body.name = form.name.trim()
       if (form.replace) {
         if (!content) throw new Error('请粘贴新的连接')
         body.format = form.format
@@ -106,7 +111,7 @@ async function submit(overwrite = false) {
           await join(ids)
           joined = `，已加入「${joinTargets.value.find((item) => item.id === form.joinGroup)?.name ?? ''}」`
         } catch (failure) {
-          toast('bad', `节点已导入，但加入节点组失败：${describe(failure)}`)
+          toast('bad', `节点已导入，但没有加入节点组：${failure instanceof ApiError ? describe(failure) : failure instanceof Error ? failure.message : String(failure)}`)
         }
       }
       toast('ok', `导入了 ${ids.length} 个节点${joined}`)
@@ -143,7 +148,7 @@ async function submit(overwrite = false) {
       </div>
       <div class="tile">
         <div class="k">当前连接</div>
-        <div class="v mono" style="font-size: 13px">{{ node.type }} · {{ node.server }}:{{ node.server_port }}</div>
+        <div class="v mono" style="font-size: 13px">{{ base?.type }} · {{ base?.server }}:{{ base?.server_port }}</div>
       </div>
       <details>
         <summary class="t2">连接参数</summary>

@@ -88,28 +88,19 @@ const memberTesting = (member: string) => testing[isGroup(member) ? `m:${member}
       <span v-if="!view.members.length" class="hint" style="color: var(--bad)">空组</span>
     </div>
     <div v-else class="mtiles">
-      <button
-        v-for="member in view.members"
-        :key="member"
-        type="button"
-        class="mtile"
-        :class="{ cur: member === current, static: view.type !== 'selector' }"
-        @click="select(member)"
-      >
-        <span class="nm">{{ nameOf(member) }}</span>
-        <span class="ft">
+      <div v-for="member in view.members" :key="member" class="mtile" :class="{ cur: member === current, static: view.type !== 'selector' }">
+        <button type="button" class="mpick" :aria-pressed="member === current" :disabled="view.type !== 'selector'" @click="select(member)">
+          <span class="nm">{{ nameOf(member) }}</span>
           <span class="sub">{{ subOf(member) }}</span>
-          <span
-            class="lat"
-            :class="lat(member).kind"
-            role="button"
-            tabindex="0"
-            :title="isGroup(member) ? `测速：${nameOf(leafOf(member))}` : '测速'"
-            @click.stop="testMember(member)"
-            @keydown.enter.stop.prevent="testMember(member)"
-          >{{ memberTesting(member) ? '…' : lat(member).kind === 'idle' ? '测速' : lat(member).text }}</span>
-        </span>
-      </button>
+        </button>
+        <button
+          type="button"
+          class="lat"
+          :class="lat(member).kind"
+          :aria-label="isGroup(member) ? `测速：${nameOf(leafOf(member))}` : `测速：${nameOf(member)}`"
+          @click="testMember(member)"
+        >{{ memberTesting(member) ? '…' : lat(member).kind === 'idle' ? '测速' : lat(member).text }}</button>
+      </div>
       <span v-if="!view.members.length" class="hint" style="color: var(--bad)">空组</span>
     </div>
   </div>
