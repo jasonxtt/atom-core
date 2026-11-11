@@ -1014,7 +1014,7 @@ export interface components {
              *     ledger) meets no client condition, inverted or not.
              * @default false
              */
-            client_invert: boolean;
+            client_invert?: boolean;
             ip_cidr?: string[];
             /**
              * @description Rulesets whose IP prefixes the rule takes (`ruleset` takes their
@@ -1033,9 +1033,9 @@ export interface components {
         };
         RuleInput: {
             /** @default true */
-            enabled: boolean;
+            enabled?: boolean;
             /** @default  */
-            remark: string;
+            remark?: string;
             match: components["schemas"]["Match"];
             action: components["schemas"]["Action"];
             /**
@@ -1049,7 +1049,7 @@ export interface components {
              *     name). Left out of answers when true.
              * @default true
              */
-            cache: boolean;
+            cache?: boolean;
         };
         Rule: {
             id: string;
@@ -1068,7 +1068,7 @@ export interface components {
              *     name). Left out of answers when true.
              * @default true
              */
-            cache: boolean;
+            cache?: boolean;
         };
         RuleTable: {
             version: components["schemas"]["Version"];

@@ -47,5 +47,5 @@ test('one build makes a package that works under any mount name', () => {
 
 test('the API types are generated from the specification as it is', () => {
   const pkg = JSON.parse(read('../package.json'))
-  assert.equal(pkg.scripts['gen:api'], 'openapi-typescript ../docs/api/openapi.yaml -o src/api/schema.ts')
+  assert.equal(pkg.scripts['gen:api'], 'openapi-typescript ../docs/api/openapi.yaml --default-non-nullable false -o src/api/schema.ts')
 })

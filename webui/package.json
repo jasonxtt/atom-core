@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "gen:api": "openapi-typescript ../docs/api/openapi.yaml -o src/api/schema.ts",
+    "gen:api": "openapi-typescript ../docs/api/openapi.yaml --default-non-nullable false -o src/api/schema.ts",
     "typecheck": "vue-tsc --noEmit",
     "test": "node --test tests/*.test.mjs",
     "build": "node ../scripts/build-webui.mjs",
