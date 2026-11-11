@@ -24,6 +24,7 @@ const error = ref('')
 const busy = ref(false)
 const loading = ref(false)
 // A local list being edited must have been read: saving sends the whole list.
+const loadedText = ref('')
 const listRead = ref(!(props.mode === 'edit' && custom?.type === 'local'))
 
 async function readList() {
@@ -33,6 +34,7 @@ async function readList() {
   try {
     const set = (await call(client.GET('/rulesets/{id}', { params: { path: { id: custom.id } } }))) as { rules?: string[] }
     form.text = (set.rules ?? []).join('\n')
+    loadedText.value = form.text
     listRead.value = true
   } catch (failure) {
     error.value = `读取名单失败：${describe(failure)}`
@@ -60,9 +62,19 @@ async function submit() {
         form.type === 'remote'
           ? { type: 'remote' as const, url: form.url.trim(), format: form.format, ...(form.format === 'dat' ? { category: form.category.trim() } : {}) }
           : { type: 'local' as const, rules: lines(form.text) }
-      const body = { name: form.name.trim(), ...source }
-      if (props.mode === 'new') await call(client.POST('/rulesets', { body }))
-      else if (custom) await call(client.PUT('/rulesets/{id}', { params: { path: { id: custom.id } }, body }))
+      if (props.mode === 'new') await call(client.POST('/rulesets', { body: { name: form.name.trim(), ...source } }))
+      else if (custom) {
+        // Rulesets carry no version: only what changed here is sent, so a change made elsewhere
+        // to the rest (its address, say) is not put back.
+        const body: Record<string, unknown> = {}
+        if (form.name.trim() !== custom.name) body.name = form.name.trim()
+        const sourceChanged =
+          form.type === 'remote'
+            ? form.url.trim() !== (custom.url ?? '') || form.format !== (custom.format || 'auto') || (form.format === 'dat' && form.category.trim() !== (custom.category ?? ''))
+            : form.text !== loadedText.value
+        if (sourceChanged) Object.assign(body, source)
+        if (Object.keys(body).length) await call(client.PUT('/rulesets/{id}', { params: { path: { id: custom.id } }, body }))
+      }
       toast('ok', '已保存')
     }
     emit('close')

@@ -50,10 +50,7 @@ function fill() {
     return
   }
   const group = groups.value.find((item) => item.id === id.value)
-  if (!group) {
-    if (id.value) error.value = '节点组不存在'
-    return
-  }
+  if (!group) return
   Object.assign(form, {
     name: group.name,
     type: group.type,
@@ -66,15 +63,25 @@ function fill() {
   })
 }
 
-onMounted(async () => {
+// A save replaces the whole group: the form opens only once the state was read and the group
+// edited exists; else the error and a retry.
+async function load() {
+  loaded.value = false
+  error.value = ''
   try {
     await loadProxy()
-    fill()
   } catch (failure) {
-    error.value = describe(failure)
+    error.value = `读取失败：${describe(failure)}`
+    return
   }
+  if (id.value && !isFinal.value && !groups.value.some((item) => item.id === id.value)) {
+    error.value = '节点组不存在'
+    return
+  }
+  fill()
   loaded.value = true
-})
+}
+onMounted(load)
 
 // Candidates: nodes and the other groups (Final is never a member; Final itself takes groups).
 const filter = ref<'all' | 'node' | 'group'>('all')
@@ -276,5 +283,8 @@ async function save(overwrite = false) {
       </div>
     </div>
   </div>
-  <div v-else-if="error" class="err">{{ error }}</div>
+  <div v-else-if="error" class="row">
+    <div class="err" style="flex: 1">{{ error }}</div>
+    <button class="btn" type="button" @click="load">重试</button>
+  </div>
 </template>

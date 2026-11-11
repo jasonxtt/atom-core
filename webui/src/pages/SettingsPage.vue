@@ -88,6 +88,7 @@ const uiVersion = __UI_VERSION__
 <template>
   <div class="grid g2" style="align-items: start">
     <form class="card grid" style="gap: 12px" @submit.prevent="save">
+      <!-- The fields open once the settings were read. -->
       <div class="hd" style="margin: 0">
         <h2>代理（sing-box）</h2>
         <span class="sp"></span>
@@ -95,7 +96,7 @@ const uiVersion = __UI_VERSION__
       </div>
       <div class="field">
         <label for="fakeip">FakeIP 网段</label>
-        <input id="fakeip" v-model="form.fakeip_range" class="inp mono" autocomplete="off" :disabled="saving" />
+        <input id="fakeip" v-model="form.fakeip_range" class="inp mono" autocomplete="off" :disabled="saving || !settings" />
       </div>
       <div class="field">
         <label for="resolver">解析节点域名用的 DNS</label>
@@ -104,15 +105,18 @@ const uiVersion = __UI_VERSION__
           v-model="form.resolver"
           class="inp mono"
           autocomplete="off"
-          :disabled="saving"
+          :disabled="saving || !settings"
           :placeholder="settings ? `留空：${settings.resolver_effective}` : ''"
         />
       </div>
       <div class="field">
         <label for="mixed">mixed 代理端口</label>
-        <input id="mixed" v-model="form.mixed_port" class="inp mono" inputmode="numeric" autocomplete="off" :disabled="saving" />
+        <input id="mixed" v-model="form.mixed_port" class="inp mono" inputmode="numeric" autocomplete="off" :disabled="saving || !settings" />
       </div>
-      <div v-if="error" class="err">{{ error }}</div>
+      <div v-if="error" class="row">
+        <div class="err" style="flex: 1">{{ error }}</div>
+        <button v-if="!settings" class="btn" type="button" @click="load">重试</button>
+      </div>
     </form>
 
     <div class="grid" style="gap: 16px">

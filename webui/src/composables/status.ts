@@ -5,12 +5,23 @@ import { call, client, type Schemas } from '../api/client'
 export const status = ref<Schemas['Status'] | null>(null)
 export const statusError = ref('')
 
+// Status reads apply in the order they were sent (a late answer is dropped).
+let ticket = 0
+let applied = 0
+
 export async function refreshStatus() {
+  const mine = ++ticket
   try {
-    status.value = await call(client.GET('/status'))
+    const answer = await call(client.GET('/status'))
+    if (mine < applied) return
+    applied = mine
+    status.value = answer
     statusError.value = ''
   } catch (error) {
-    statusError.value = error instanceof Error ? error.message : String(error)
+    if (mine >= applied) {
+      applied = mine
+      statusError.value = error instanceof Error ? error.message : String(error)
+    }
     throw error
   }
 }

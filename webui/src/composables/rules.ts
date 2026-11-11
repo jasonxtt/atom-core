@@ -15,14 +15,23 @@ export const builtins = ref<Builtin[]>([])
 export const rulesets = ref<Ruleset[]>([])
 export const upstreamGroups = ref<UpstreamGroup[]>([])
 
+/** The rule table; an answer older than the table shown (a late one) is dropped. */
 export async function loadRules() {
   const table = await call(client.GET('/rules'))
+  if (table.version < rulesVersion.value) return
   rules.value = table.rules
   rulesVersion.value = table.version
 }
 
+// Ruleset lists carry no version: reads apply in the order they were sent.
+let rulesetsTicket = 0
+let rulesetsApplied = 0
+
 export async function loadRulesets() {
+  const ticket = ++rulesetsTicket
   const list = (await call(client.GET('/rulesets'))) as (Builtin | Ruleset)[]
+  if (ticket < rulesetsApplied) return
+  rulesetsApplied = ticket
   builtins.value = list.filter((item): item is Builtin => item.type === 'builtin')
   rulesets.value = list.filter((item): item is Ruleset => item.type !== 'builtin')
 }

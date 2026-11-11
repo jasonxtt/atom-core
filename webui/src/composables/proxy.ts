@@ -30,6 +30,8 @@ export const runtime = ref<Runtime | null>(null)
 /**
  * Reads nodes, groups and Final. They share one version, so the three answers are one
  * snapshot only when their versions agree; a write between the reads makes them read again.
+ * A snapshot older than the state already shown (a late answer, after a newer read or a
+ * write's answer) is dropped.
  */
 export async function loadProxy() {
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -39,6 +41,7 @@ export async function loadProxy() {
       call(client.GET('/final'))
     ])
     if (nodeList.version === groupList.version && groupList.version === finalState.version) {
+      if (nodeList.version < version.value) return
       nodes.value = nodeList.nodes
       groups.value = groupList.groups
       order.value = groupList.order
@@ -54,12 +57,22 @@ export async function loadProxy() {
 // is kept here until sing-box reports a newer result for that node.
 const failures = new Map<string, string>()
 
+// Runtime reads apply in the order they were sent (a late answer is dropped).
+let runtimeTicket = 0
+let runtimeApplied = 0
+
 /** `GET runtime`; null while sing-box has no configuration or does not answer. */
 export async function loadRuntime() {
-  let answer: Runtime
+  const ticket = ++runtimeTicket
+  let answer: Runtime | null
   try {
     answer = (await call(client.GET('/runtime'))) as Runtime
   } catch {
+    answer = null
+  }
+  if (ticket < runtimeApplied) return
+  runtimeApplied = ticket
+  if (!answer) {
     runtime.value = null
     return
   }
