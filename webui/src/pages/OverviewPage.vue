@@ -35,6 +35,7 @@ async function sampleSystem() {
     shares.value = { atomdns: null, singbox: null }
     throw error
   }
+  if (!now.cpu) shares.value = { atomdns: null, singbox: null }
   if (previous?.cpu && now.cpu) {
     const total = now.cpu.total_seconds - previous.cpu.total_seconds
     if (total > 0) {
@@ -213,7 +214,7 @@ async function reapply() {
       <div class="hd">
         <h2>CPU 使用率</h2>
         <span class="sp"></span>
-        <span class="big tnum">{{ system && cpu.length ? `${cpu[cpu.length - 1].toFixed(1)}%` : '—' }}</span>
+        <span class="big tnum">{{ system?.cpu && cpu.length ? `${cpu[cpu.length - 1].toFixed(1)}%` : '—' }}</span>
       </div>
       <svg class="spark" viewBox="0 0 300 70" preserveAspectRatio="none">
         <polygon :points="sparkArea(cpu, 100)" fill="var(--accent-soft)" />
@@ -230,7 +231,7 @@ async function reapply() {
       <div class="hd">
         <h2>内存</h2>
         <span class="sp"></span>
-        <span class="big tnum">{{ system && memory.length ? bytes(memory[memory.length - 1]) : '—' }}</span>
+        <span class="big tnum">{{ system?.memory && memory.length ? bytes(memory[memory.length - 1]) : '—' }}</span>
         <span class="muted" v-if="system?.memory">/ {{ bytes(system.memory.total_bytes) }}</span>
       </div>
       <svg class="spark" viewBox="0 0 300 70" preserveAspectRatio="none">
@@ -254,7 +255,8 @@ async function reapply() {
         <RouterLink class="btn sm ghost" to="/nodes">查看 →</RouterLink>
       </div>
       <div class="big">{{ nodes.length }}</div>
-      <div class="row" style="margin-top: 6px">
+      <div v-if="!runtime" class="t2" style="margin-top: 6px">延迟不可用</div>
+      <div v-else class="row" style="margin-top: 6px">
         <span class="pill ok">正常 {{ nodeStats.ok }}</span>
         <span class="pill warn">偏高 {{ nodeStats.warn }}</span>
         <span class="pill bad">失败 {{ nodeStats.bad }}</span>

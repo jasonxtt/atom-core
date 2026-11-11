@@ -3,7 +3,7 @@
 从 v0.4.0 起程序不内嵌 WebUI：WebUI 是配置根目录下的 `ui/main/`（由 `/` 提供）。**没有 `ui/main/` 就是纯后端**：
 `/` 只返回一段"没有安装 WebUI"的说明（404），接口、`/metrics` 与其它 `ui/<名字>/` 照常；在线更新也不会创建它
 （`ui/main/` 存在时才随程序一起替换）。全新安装包 `config_rust.zip` 自带 `ui/main/`，不要界面就删掉它。
-之后需要界面时，把同版本 Release 的 `atomdns-webui.tar.gz` 解到 `ui/main/` 再重启一次即可（见 [external-ui.md](external-ui.md)）。
+之后需要界面时，把同版本 Release 的 `atom-webui.tar.gz` 解到 `ui/main/` 再重启一次即可（见 [external-ui.md](external-ui.md)）。
 
 YAML 提供默认值。通过 `config_rust_up.zip` 管理的 `config_custom.yaml` 和
 `sub_config/*.yaml` 会随配置包更新替换；希望更新后保留的代理、上游列表和 ECS

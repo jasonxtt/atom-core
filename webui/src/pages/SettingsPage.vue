@@ -95,7 +95,7 @@ const uiVersion = __UI_VERSION__
       </div>
       <div class="field">
         <label for="fakeip">FakeIP 网段</label>
-        <input id="fakeip" v-model="form.fakeip_range" class="inp mono" autocomplete="off" />
+        <input id="fakeip" v-model="form.fakeip_range" class="inp mono" autocomplete="off" :disabled="saving" />
       </div>
       <div class="field">
         <label for="resolver">解析节点域名用的 DNS</label>
@@ -104,12 +104,13 @@ const uiVersion = __UI_VERSION__
           v-model="form.resolver"
           class="inp mono"
           autocomplete="off"
+          :disabled="saving"
           :placeholder="settings ? `留空：${settings.resolver_effective}` : ''"
         />
       </div>
       <div class="field">
         <label for="mixed">mixed 代理端口</label>
-        <input id="mixed" v-model="form.mixed_port" class="inp mono" inputmode="numeric" autocomplete="off" />
+        <input id="mixed" v-model="form.mixed_port" class="inp mono" inputmode="numeric" autocomplete="off" :disabled="saving" />
       </div>
       <div v-if="error" class="err">{{ error }}</div>
     </form>

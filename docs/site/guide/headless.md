@@ -1,7 +1,7 @@
 # 纯后端运行
 
 不需要 WebUI 时，删除配置目录下的 `ui/main/` 即可。程序照常提供 DNS 与管理接口，`/` 只显示「没有安装 WebUI」。
-以后需要界面时，把同版本的 `atomdns-webui.tar.gz` 解压到 `ui/main/` 并重启一次。
+以后需要界面时，把同版本的 `atom-webui.tar.gz` 解压到 `ui/main/` 并重启一次。
 
 ## 修改设置
 

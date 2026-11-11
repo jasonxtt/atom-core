@@ -13,7 +13,7 @@
 
 ```bash
 mkdir -p /cus/atomdns/ui/main
-tar -xzf atomdns-webui.tar.gz -C /cus/atomdns/ui/main
+tar -xzf atom-webui.tar.gz -C /cus/atomdns/ui/main
 ```
 
 安装或更换后**重启一次**，程序在启动时登记各个目录。替换已挂载目录里的文件则立即生效。
