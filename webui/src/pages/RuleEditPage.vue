@@ -26,7 +26,7 @@ import {
 } from '../composables/rules'
 import { refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
-import { parseHeadlessRule, parsePorts, portsText, TRANSPORT_WITH_NAMES } from '../singboxRule'
+import { parsePorts, portsText, TRANSPORT_WITH_NAMES } from '../ports'
 
 const route = useRoute()
 const router = useRouter()
@@ -234,33 +234,6 @@ function toggleNet(cond: Cond, network: string) {
   cond.nets = cond.nets.includes(network) ? cond.nets.filter((item) => item !== network) : [...cond.nets, network].sort()
 }
 
-// ---- a pasted sing-box headless rule -------------------------------------------------
-const pasting = ref(false)
-const pasted = ref('')
-const pasteError = ref('')
-function importRule() {
-  const result = parseHeadlessRule(pasted.value)
-  if ('error' in result) {
-    pasteError.value = result.error
-    return
-  }
-  const fields = result.fields
-  // One client block per rule (its addresses share one in-list / not-in-list choice).
-  if (fields.client.length && form.conds.some((cond) => cond.t === 'client')) {
-    pasteError.value = '已经有客户端条件，请把地址加到那一块里'
-    return
-  }
-  const names = namesText({ domain: fields.domain, suffix: fields.suffix, keyword: fields.keyword, regex: fields.regex })
-  if (names) form.conds.push({ ...blank('domain'), text: names })
-  if (fields.ip_cidr.length) form.conds.push({ ...blank('ip'), text: fields.ip_cidr.join('\n') })
-  if (fields.port.length || fields.port_range.length) form.conds.push({ ...blank('port'), text: portsText(fields.port, fields.port_range) })
-  if (fields.network.length) form.conds.push({ ...blank('network'), nets: [...fields.network].sort() })
-  if (fields.client.length) form.conds.push({ ...blank('client'), text: fields.client.join('\n') })
-  pasted.value = ''
-  pasteError.value = ''
-  pasting.value = false
-}
-
 const creating = ref(false)
 async function createSub(cond: Cond) {
   const { name, url, format, category } = cond.sub
@@ -450,16 +423,6 @@ const kindLabel: Record<Kind, string> = { source: '内置规则集', set: '自�
             <button class="btn sm" type="button" @click="add('source')">＋ 内置规则集</button>
             <button class="btn sm" type="button" @click="add('set')">＋ 自定义规则集</button>
             <button class="btn sm" type="button" @click="add(hasTransport ? 'ip' : 'domain')">＋ 自定义条件</button>
-            <button class="btn sm ghost" type="button" @click="pasting = !pasting">粘贴 sing-box 规则</button>
-          </div>
-        </div>
-
-        <div v-if="pasting" class="cond">
-          <textarea v-model="pasted" class="inp mono" placeholder='{"ip_cidr": ["91.108.4.0/22"], "port": [443], "network": "tcp"}' aria-label="sing-box 规则"></textarea>
-          <div v-if="pasteError" class="err">{{ pasteError }}</div>
-          <div class="row" style="justify-content: flex-end">
-            <button class="btn sm" type="button" @click="pasting = false">取消</button>
-            <button class="btn sm pri" type="button" :disabled="!pasted.trim()" @click="importRule">导入</button>
           </div>
         </div>
 

@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue'
 import { call, client, type Schemas } from '../api/client'
 import { FINAL, FINAL_NAME, groups } from './proxy'
-import { portsText } from '../singboxRule'
+import { portsText } from '../ports'
 
 export type Rule = Schemas['Rule']
 export type Match = Schemas['Match']
