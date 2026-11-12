@@ -9,7 +9,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Rust
         # Pinned to the toolchain the code is linted with locally; newer clippy
         # releases add lints. Bump deliberately together with the lint fixes.
@@ -26,7 +26,7 @@ jobs:
   webui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
