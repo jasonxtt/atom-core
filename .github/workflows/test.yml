@@ -13,7 +13,7 @@ jobs:
       - name: Set up Rust
         # Pinned to the toolchain the code is linted with locally; newer clippy
         # releases add lints. Bump deliberately together with the lint fixes.
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: clippy,rustfmt
       - name: Format, lint and test
