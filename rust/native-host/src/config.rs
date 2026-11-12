@@ -3860,6 +3860,11 @@ fn compile_singbox_host(
             "redirect_port",
             "tproxy_port",
             "resolver_group",
+            // Before 2026-11-12 atomdns kept the nft sets (`nft_table`,
+            // `nft`); a configuration written then still loads, the keys are
+            // ignored.
+            "nft_table",
+            "nft",
         ],
         path,
     )?;

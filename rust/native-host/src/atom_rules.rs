@@ -767,6 +767,28 @@ fn port_range_entry(value: &str) -> Result<String, Refusal> {
     }
 }
 
+/// The first `ip_cidr` entry of `rule` overlapping the FakeIP range
+/// `fakeip_range`, as a refusal. A FakeIP destination is decided by its
+/// binding or Final, never by an IP rule (the sing-box patch): a rule over the
+/// range would never apply there.
+pub(crate) fn fakeip_overlap(rule: &Rule, fakeip_range: &str) -> Option<Refusal> {
+    let (IpAddr::V4(network), bits) = crate::rule_formats::parse_prefix(fakeip_range)? else {
+        return None;
+    };
+    rule.matches.ip_cidr.iter().find_map(|value| {
+        let entry = ip_entry(value).ok()?;
+        match crate::rule_formats::parse_prefix(&entry)? {
+            (IpAddr::V4(address), length) if overlaps_v4((address, length), (network, bits)) => {
+                Some(Refusal::invalid(format!(
+                    "规则 {}: ip_cidr 条目 `{value}` 和 FakeIP 网段 `{fakeip_range}` 重叠",
+                    rule.id
+                )))
+            }
+            _ => None,
+        }
+    })
+}
+
 /// Whether two IPv4 prefixes share an address.
 fn overlaps_v4(a: (std::net::Ipv4Addr, u8), b: (std::net::Ipv4Addr, u8)) -> bool {
     let bits = a.1.min(b.1);
@@ -1082,28 +1104,8 @@ impl AtomRules {
                     "ip_cidr 条目超过 {MAX_LIST_RULES}"
                 ))));
             }
-            // A FakeIP destination is decided by its binding or Final, never
-            // by an IP rule (the sing-box patch): a rule over the FakeIP
-            // range would never apply there.
-            let fakeip = proxy.and_then(|proxy| {
-                match crate::rule_formats::parse_prefix(&proxy.settings.fakeip_range)? {
-                    (IpAddr::V4(network), bits) => {
-                        Some((network, bits, proxy.settings.fakeip_range.as_str()))
-                    }
-                    _ => None,
-                }
-            });
             for value in &m.ip_cidr {
-                let entry = ip_entry(value).map_err(at)?;
-                if let (Some((network, bits, range)), Some((IpAddr::V4(address), length))) =
-                    (fakeip, crate::rule_formats::parse_prefix(&entry))
-                {
-                    if overlaps_v4((address, length), (network, bits)) {
-                        return Err(at(Refusal::invalid(format!(
-                            "ip_cidr 条目 `{value}` 和 FakeIP 网段 `{range}` 重叠"
-                        ))));
-                    }
-                }
+                ip_entry(value).map_err(at)?;
             }
             for id in &m.ip_ruleset {
                 if !state.rulesets.iter().any(|set| &set.id == id) {

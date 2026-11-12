@@ -2624,14 +2624,16 @@ components:
         conditions the rule matches either (the names in DNS, the prefixes in
         sing-box). A rule with `client` cannot proxy and cannot have an IP
         part (400). `port`, `port_range` and `network` are matched by sing-box
-        on real addresses only, like a sing-box headless rule: different
-        fields and-ed (with the IP part too), the values of one field or-ed.
+        on real addresses only, like a sing-box headless rule: the target
+        port (`port` and `port_range` together), `network` and the IP part
+        are and-ed, the values within each or-ed.
         A DNS query has no port, so they never go with name or client
         conditions (400). sing-box routes a FakeIP destination by its
         binding or Final before any rule, and the generated rules leave the
-        FakeIP range out; an `ip_cidr` entry overlapping the FakeIP range is
-        refused (400), as is a `fakeip_range` change overlapping an
-        `ip_cidr` entry.
+        FakeIP range out; a new or changed `ip_cidr` entry overlapping the
+        FakeIP range is refused (400), as is a `fakeip_range` change
+        overlapping any `ip_cidr` entry (a table saved before this check
+        still loads).
       properties:
         domain:
           type: array

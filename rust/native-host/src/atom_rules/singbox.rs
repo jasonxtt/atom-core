@@ -343,8 +343,35 @@ impl AtomRules {
         self.transact(None, None, "rulesets").await
     }
 
+    /// Refuses an `ip_cidr` entry over the FakeIP range, for what a change
+    /// writes: the rules it adds or changes (`rules`), or every rule when it
+    /// changes the range (`proxy`). Checked on writes only, so a table saved
+    /// before the check still loads; the generated sing-box rules leave the
+    /// FakeIP range out anyway.
+    fn check_fakeip_overlap(
+        &self,
+        rules: Option<&State>,
+        proxy: Option<&ProxyState>,
+    ) -> Result<(), Refusal> {
+        let Some(owner) = &self.proxy else {
+            return Ok(());
+        };
+        let current_range = owner.state.borrow().settings.fakeip_range.clone();
+        let range = proxy.map_or(current_range.as_str(), |next| next.settings.fakeip_range.as_str());
+        let range_changed = range != current_range;
+        let current = self.state.borrow();
+        for rule in &rules.unwrap_or(&current).rules {
+            let changed = range_changed || !current.rules.iter().any(|old| old == rule);
+            if let Some(refusal) = changed.then(|| super::fakeip_overlap(rule, range)).flatten() {
+                return Err(refusal);
+            }
+        }
+        Ok(())
+    }
+
     /// Commits a rules change: through sing-box when its IP rules differ.
     pub(crate) async fn commit_rules(&self, next: State) -> Result<(), Refusal> {
+        self.check_fakeip_overlap(Some(&next), None)?;
         if self.proxy.is_none() || ip_rules(&next) == ip_rules(&self.state.borrow()) {
             return self.commit(next, true, false);
         }
@@ -368,6 +395,7 @@ impl AtomRules {
             .clone()
             .unwrap_or_else(|| owner.state.borrow().clone());
         next_proxy.validate(&owner.host.reserved_ports())?;
+        self.check_fakeip_overlap(rules.as_ref(), proxy.as_ref())?;
         self.compile(&next_rules, Some(&next_proxy))?;
         let in_memory = self.root.as_os_str().is_empty();
         let host = owner.host.clone();

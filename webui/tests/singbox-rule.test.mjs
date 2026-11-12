@@ -12,7 +12,7 @@ test('ports and ranges', () => {
 
 test('a headless rule is split into the form fields', () => {
   const result = parseHeadlessRule(
-    JSON.stringify({ domain: 'a.example', domain_suffix: ['.b.example', 'c.example'], domain_keyword: 'ads', domain_regex: ['^x\\.'], source_ip_cidr: '192.168.1.0/24' })
+    JSON.stringify({ domain: 'a.example', domain_suffix: ['b.example', 'c.example'], domain_keyword: 'ads', domain_regex: ['^x\\.'], source_ip_cidr: '192.168.1.0/24' })
   )
   assert.deepEqual(result.fields, {
     domain: ['a.example'],
@@ -46,6 +46,10 @@ test('what the form cannot take is an error, never dropped', () => {
   assert.match(error('{"port_range": "1000-2000"}'), /port_range/)
   assert.match(error('{"network": "icmp"}'), /tcp 或 udp/)
   assert.match(error('{"domain": 5}'), /不是字符串/)
+  assert.match(error('{"domain_suffix": ".b.example"}'), /以点开头/)
+  assert.match(error(JSON.stringify({ domain: 'safe.example\nregexp:.*' })), /换行/)
+  assert.match(error('{"domain": "a.example", "toString": "x"}'), /不支持的字段：toString/)
+  assert.match(error('{"domain": "a.example", "constructor": []}'), /不支持的字段：constructor/)
   assert.equal(error('{"port": 443, "domain_suffix": "a.example"}'), TRANSPORT_WITH_NAMES)
   assert.equal(error('{"network": "udp", "source_ip_cidr": "10.0.0.1"}'), TRANSPORT_WITH_NAMES)
   assert.match(error('{"ip_cidr": "1.1.1.1", "source_ip_cidr": "10.0.0.1"}'), /客户端/)

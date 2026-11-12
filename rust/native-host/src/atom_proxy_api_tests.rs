@@ -614,6 +614,20 @@ fn port_and_network_rules_go_to_sing_box() {
     );
     assert_eq!(status, 400, "{refused}");
     assert!(refused["error"].as_str().unwrap().contains("FakeIP 网段"), "{refused}");
+    // A table saved before the check (an ip_cidr over the range) still
+    // loads; other rules stay editable, the overlapping entry is refused
+    // when that rule is written again.
+    let file = api.root.join("webinfo/atom_rules.json");
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let legacy = saved["rules"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|rule| rule["match"]["ip_cidr"].is_array())
+        .unwrap();
+    legacy["match"]["ip_cidr"] = serde_json::json!(["28.0.0.0/8"]);
+    std::fs::write(&file, serde_json::to_vec(&saved).unwrap()).unwrap();
+    api.reloads_from_disk().unwrap();
     // The FakeIP exclusion follows the range.
     let (status, changed) = api.call(
         "PUT",

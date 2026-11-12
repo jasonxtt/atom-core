@@ -240,6 +240,11 @@ function importRule() {
     return
   }
   const fields = result.fields
+  // One client block per rule (its addresses share one in-list / not-in-list choice).
+  if (fields.client.length && form.conds.some((cond) => cond.t === 'client')) {
+    pasteError.value = '已经有客户端条件，请把地址加到那一块里'
+    return
+  }
   const names = namesText({ domain: fields.domain, suffix: fields.suffix, keyword: fields.keyword, regex: fields.regex })
   if (names) form.conds.push({ ...blank('domain'), text: names })
   if (fields.ip_cidr.length) form.conds.push({ ...blank('ip'), text: fields.ip_cidr.join('\n') })

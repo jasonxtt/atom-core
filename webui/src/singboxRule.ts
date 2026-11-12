@@ -86,7 +86,7 @@ export function parseHeadlessRule(text: string): { fields: HeadlessFields } | { 
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { error: '要一条 sing-box 无头规则（JSON 对象）' }
   const rule = value as Record<string, unknown>
-  const unsupported = Object.keys(rule).filter((key) => !(key in FIELDS))
+  const unsupported = Object.keys(rule).filter((key) => !Object.prototype.hasOwnProperty.call(FIELDS, key))
   if (unsupported.length) return { error: `不支持的字段：${unsupported.join('、')}` }
   if (!Object.keys(rule).length) return { error: '规则里没有条件' }
   const fields: HeadlessFields = { domain: [], suffix: [], keyword: [], regex: [], ip_cidr: [], port: [], port_range: [], network: [], client: [] }
@@ -100,6 +100,8 @@ export function parseHeadlessRule(text: string): { fields: HeadlessFields } | { 
         continue
       }
       if (typeof item !== 'string' || !item.trim()) return { error: `${key} 的值 ${JSON.stringify(item)} 不是字符串` }
+      // The form keeps one entry per line: a line break inside a value would become more entries.
+      if (/[\u0000-\u001f\u007f]/.test(item)) return { error: `${key} 的值 ${JSON.stringify(item)} 里有换行或控制字符` }
       let entry = item.trim()
       if (field === 'port_range') {
         const range = portRange(entry)
@@ -108,10 +110,9 @@ export function parseHeadlessRule(text: string): { fields: HeadlessFields } | { 
       } else if (field === 'network') {
         entry = entry.toLowerCase()
         if (entry !== 'tcp' && entry !== 'udp') return { error: `network 的值 ${JSON.stringify(item)} 无效：只能是 tcp 或 udp` }
-      } else if (field === 'suffix') {
+      } else if (field === 'suffix' && entry.startsWith('.')) {
         // `.example.com` in sing-box is only the subdomains; a suffix here also takes the name itself.
-        entry = entry.replace(/^\.+/, '')
-        if (!entry) return { error: `domain_suffix 的值 ${JSON.stringify(item)} 无效` }
+        return { error: `domain_suffix 的值 ${JSON.stringify(item)} 以点开头（只匹配子域名），这里表示不了，请去掉点或改用正则` }
       }
       const list = fields[field] as string[]
       if (!list.includes(entry)) list.push(entry)
