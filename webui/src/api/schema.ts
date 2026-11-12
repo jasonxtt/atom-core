@@ -1208,10 +1208,10 @@ export interface components {
          *     A DNS query has no port, so they never go with name or client
          *     conditions (400). sing-box routes a FakeIP destination by its
          *     binding or Final before any rule, and the generated rules leave the
-         *     FakeIP range out; a new or changed `ip_cidr` entry overlapping the
-         *     FakeIP range is refused (400), as is a `fakeip_range` change
-         *     overlapping any `ip_cidr` entry (a table saved before this check
-         *     still loads).
+         *     FakeIP range out; an `ip_cidr` entry overlapping the FakeIP range is
+         *     refused (400) when a write adds it, as is a `fakeip_range` change
+         *     overlapping any `ip_cidr` entry (an entry saved before this check
+         *     stays: the table loads and its rule can still be edited).
          */
         Match: {
             domain?: string[];

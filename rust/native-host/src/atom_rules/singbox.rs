@@ -343,11 +343,12 @@ impl AtomRules {
         self.transact(None, None, "rulesets").await
     }
 
-    /// Refuses an `ip_cidr` entry over the FakeIP range, for what a change
-    /// writes: the rules it adds or changes (`rules`), or every rule when it
-    /// changes the range (`proxy`). Checked on writes only, so a table saved
-    /// before the check still loads; the generated sing-box rules leave the
-    /// FakeIP range out anyway.
+    /// Refuses an `ip_cidr` entry over the FakeIP range that a change brings
+    /// in: an entry its rules (`rules`) add, or any entry when it changes the
+    /// range (`proxy`). An entry saved before the check stays: the table
+    /// still loads, and its rule can still be edited, moved, switched or lose
+    /// a ruleset; the generated sing-box rules leave the FakeIP range out
+    /// anyway.
     fn check_fakeip_overlap(
         &self,
         rules: Option<&State>,
@@ -361,8 +362,12 @@ impl AtomRules {
         let range_changed = range != current_range;
         let current = self.state.borrow();
         for rule in &rules.unwrap_or(&current).rules {
-            let changed = range_changed || !current.rules.iter().any(|old| old == rule);
-            if let Some(refusal) = changed.then(|| super::fakeip_overlap(rule, range)).flatten() {
+            let kept = if range_changed {
+                None
+            } else {
+                current.rules.iter().find(|old| old.id == rule.id)
+            };
+            if let Some(refusal) = super::fakeip_overlap(rule, kept, range) {
                 return Err(refusal);
             }
         }

@@ -54,6 +54,12 @@ plugins:
         }
     }
 
+    /// Loads the configuration and the state files again, as a restart does.
+    fn restart(&mut self) {
+        let config = crate::config::compile_yaml_with_base(&self.yaml, &self.root).expect("config");
+        self.assembly = HostAssembly::with_options(config, HostOptions::default()).unwrap();
+    }
+
     /// A request as a future, to run two at once.
     async fn request(&self, method: &str, target: &str, body: &str) -> (u16, Value) {
         let reply = crate::atom_rules_api::handle(
@@ -557,7 +563,7 @@ fn node_views_hide_credentials_and_edits_replace_the_connection() {
 /// name or client conditions; compiled beside IP prefixes, FakeIP left out.
 #[test]
 fn port_and_network_rules_go_to_sing_box() {
-    let api = Api::new("ports");
+    let mut api = Api::new("ports");
     let refused = |body: &str| {
         let (status, view) = api.call("POST", "/api/v1/atom/rules", body);
         assert_eq!(status, 400, "{body}: {view}");
@@ -626,8 +632,34 @@ fn port_and_network_rules_go_to_sing_box() {
         .find(|rule| rule["match"]["ip_cidr"].is_array())
         .unwrap();
     legacy["match"]["ip_cidr"] = serde_json::json!(["28.0.0.0/8"]);
+    let legacy_id = legacy["id"].as_str().unwrap().to_owned();
     std::fs::write(&file, serde_json::to_vec(&saved).unwrap()).unwrap();
     api.reloads_from_disk().unwrap();
+    api.restart();
+    let version = || api.call("GET", "/api/v1/atom/rules", "").1["version"].as_u64().unwrap();
+    // The legacy rule can still be edited (its entry stays), not given a
+    // new overlapping entry; a range change still checks every entry.
+    let (status, body) = api.call(
+        "PUT",
+        &format!("/api/v1/atom/rules/{legacy_id}"),
+        &format!(r#"{{"remark": "旧规则", "match": {{"ip_cidr": ["28.0.0.0/8", "1.1.1.1"], "network": ["udp"]}}, "action": {{"type": "direct"}}, "version": {}}}"#, version()),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = api.call(
+        "PUT",
+        &format!("/api/v1/atom/rules/{legacy_id}"),
+        &format!(r#"{{"match": {{"ip_cidr": ["28.0.0.0/8", "28.1.0.0/16"]}}, "action": {{"type": "direct"}}, "version": {}}}"#, version()),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("28.1.0.0/16"), "{body}");
+    let (status, body) = api.call("PUT", "/api/v1/atom/settings", r#"{"fakeip_range": "28.0.0.0/16"}"#);
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = api.call(
+        "PUT",
+        &format!("/api/v1/atom/rules/{legacy_id}"),
+        &format!(r#"{{"match": {{"ip_cidr": ["1.1.1.1"], "network": ["udp"]}}, "action": {{"type": "direct"}}, "version": {}}}"#, version()),
+    );
+    assert_eq!(status, 200, "{body}");
     // The FakeIP exclusion follows the range.
     let (status, changed) = api.call(
         "PUT",

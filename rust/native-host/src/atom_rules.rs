@@ -768,14 +768,22 @@ fn port_range_entry(value: &str) -> Result<String, Refusal> {
 }
 
 /// The first `ip_cidr` entry of `rule` overlapping the FakeIP range
-/// `fakeip_range`, as a refusal. A FakeIP destination is decided by its
-/// binding or Final, never by an IP rule (the sing-box patch): a rule over the
-/// range would never apply there.
-pub(crate) fn fakeip_overlap(rule: &Rule, fakeip_range: &str) -> Option<Refusal> {
+/// `fakeip_range`, as a refusal, leaving out the entries `kept` (the rule as
+/// it was) already had. A FakeIP destination is decided by its binding or
+/// Final, never by an IP rule (the sing-box patch): a rule over the range
+/// would never apply there.
+pub(crate) fn fakeip_overlap(
+    rule: &Rule,
+    kept: Option<&Rule>,
+    fakeip_range: &str,
+) -> Option<Refusal> {
     let (IpAddr::V4(network), bits) = crate::rule_formats::parse_prefix(fakeip_range)? else {
         return None;
     };
     rule.matches.ip_cidr.iter().find_map(|value| {
+        if kept.is_some_and(|old| old.matches.ip_cidr.contains(value)) {
+            return None;
+        }
         let entry = ip_entry(value).ok()?;
         match crate::rule_formats::parse_prefix(&entry)? {
             (IpAddr::V4(address), length) if overlaps_v4((address, length), (network, bits)) => {

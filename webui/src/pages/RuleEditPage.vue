@@ -172,7 +172,7 @@ const ordered = computed(() => {
   return form.conds
     .map((cond, index) => ({ cond, index, group: first.get(classOf(cond)) ?? index }))
     .sort((a, b) => a.group - b.group || a.index - b.index)
-    .map((item, position, all) => ({ ...item, joint: position ? (all[position - 1].group === item.group ? '或' : '且') : '' }))
+    .map((item, position, all) => ({ ...item, n: position + 1, joint: position ? (all[position - 1].group === item.group ? '或' : '且') : '' }))
 })
 
 const customSets = computed(() => rulesets.value.filter((set) => set.type !== 'catalog'))
@@ -426,7 +426,7 @@ const kindLabel: Record<Kind, string> = { source: '内置规则集', set: '自�
           </div>
         </div>
 
-        <template v-for="{ cond, index, joint } in ordered" :key="cond.key">
+        <template v-for="{ cond, index, n, joint } in ordered" :key="cond.key">
         <div class="cond">
           <div class="row" style="gap: 8px">
             <span v-if="joint" class="pill idle" :style="joint === '且' ? { fontWeight: 600, color: 'var(--text)' } : undefined">{{ joint }}</span>
@@ -435,7 +435,7 @@ const kindLabel: Record<Kind, string> = { source: '内置规则集', set: '自�
               v-if="['domain', 'ip', 'client', 'port', 'network'].includes(cond.t)"
               class="inp sm"
               :value="cond.t"
-              :aria-label="`条件类型 ${index + 1}`"
+              :aria-label="`条件类型 ${n}`"
               @change="setKind(cond, ($event.target as HTMLSelectElement).value as Kind)"
             >
               <option value="domain" :disabled="!kindOk(cond, 'domain')">域名</option>
@@ -445,11 +445,11 @@ const kindLabel: Record<Kind, string> = { source: '内置规则集', set: '自�
               <option value="client" :disabled="!kindOk(cond, 'client')">客户端</option>
             </select>
             <span class="sp"></span>
-            <button class="ico" type="button" :aria-label="`删除条件 ${index + 1}`" @click="form.conds.splice(index, 1)">✕</button>
+            <button class="ico" type="button" :aria-label="`删除条件 ${n}`" @click="form.conds.splice(index, 1)">✕</button>
           </div>
 
           <template v-if="cond.t === 'source'">
-            <SourcePicker v-if="!cond.ref" :label="`搜索内置规则集 ${index + 1}`" :names-only="hasClient" :ips-only="hasTransport" @pick="pickSource(cond, $event)" />
+            <SourcePicker v-if="!cond.ref" :label="`搜索内置规则集 ${n}`" :names-only="hasClient" :ips-only="hasTransport" @pick="pickSource(cond, $event)" />
             <div v-else class="row" style="gap: 8px">
               <span>{{ cond.label }}</span>
               <span class="tag">{{ cond.provider }}</span>
@@ -465,7 +465,7 @@ const kindLabel: Record<Kind, string> = { source: '内置规则集', set: '自�
 
           <template v-if="cond.t === 'set'">
             <div class="row" style="gap: 8px">
-              <select class="inp" style="flex: 1; width: auto" :value="cond.ref" :aria-label="`自定义规则集 ${index + 1}`" @change="pickSet(cond, ($event.target as HTMLSelectElement).value)">
+              <select class="inp" style="flex: 1; width: auto" :value="cond.ref" :aria-label="`自定义规则集 ${n}`" @change="pickSet(cond, ($event.target as HTMLSelectElement).value)">
                 <option value="" disabled>选择规则集</option>
                 <optgroup label="远程订阅">
                   <option v-for="set in customSets.filter((item) => item.type === 'remote')" :key="set.id" :value="set.id">{{ set.name }} · {{ set.rule_count + (set.ip_count ?? 0) }} 条</option>
@@ -498,14 +498,14 @@ const kindLabel: Record<Kind, string> = { source: '内置规则集', set: '自�
           </template>
 
           <template v-if="cond.t === 'domain'">
-            <textarea v-model="cond.text" class="inp" placeholder="domain:google.com&#10;full:www.example.com&#10;keyword:tracker&#10;regexp:^ads?\d*\." :aria-label="`域名 ${index + 1}`"></textarea>
+            <textarea v-model="cond.text" class="inp" placeholder="domain:google.com&#10;full:www.example.com&#10;keyword:tracker&#10;regexp:^ads?\d*\." :aria-label="`域名 ${n}`"></textarea>
             <div class="hint" :style="{ color: parseNames(cond.text).bad.length ? 'var(--bad)' : '' }">每行一个，命中任一即可 · {{ nameStats(cond.text) }}</div>
           </template>
           <template v-if="cond.t === 'ip'">
-            <textarea v-model="cond.text" class="inp" placeholder="91.108.4.0/22&#10;2001:b28:f23d::/48" :aria-label="`目标 IP 网段 ${index + 1}`"></textarea>
+            <textarea v-model="cond.text" class="inp" placeholder="91.108.4.0/22&#10;2001:b28:f23d::/48" :aria-label="`目标 IP 网段 ${n}`"></textarea>
           </template>
           <template v-if="cond.t === 'port'">
-            <textarea v-model="cond.text" class="inp mono" placeholder="443&#10;8000-9000" :aria-label="`目标端口 ${index + 1}`"></textarea>
+            <textarea v-model="cond.text" class="inp mono" placeholder="443&#10;8000-9000" :aria-label="`目标端口 ${n}`"></textarea>
             <div v-if="parsePorts(cond.text).bad.length" class="hint" style="color: var(--bad)">无法识别：{{ parsePorts(cond.text).bad.slice(0, 3).join('、') }}</div>
           </template>
           <template v-if="cond.t === 'network'">
@@ -516,7 +516,7 @@ const kindLabel: Record<Kind, string> = { source: '内置规则集', set: '自�
             </div>
           </template>
           <template v-if="cond.t === 'client'">
-            <textarea v-model="cond.text" class="inp" placeholder="192.168.1.50&#10;192.168.1.0/24" :aria-label="`客户端 ${index + 1}`"></textarea>
+            <textarea v-model="cond.text" class="inp" placeholder="192.168.1.50&#10;192.168.1.0/24" :aria-label="`客户端 ${n}`"></textarea>
             <div class="seg sm" style="align-self: flex-start">
               <button type="button" :class="{ on: !cond.invert }" @click="cond.invert = false">名单内的客户端</button>
               <button type="button" :class="{ on: cond.invert }" @click="cond.invert = true">名单外的客户端</button>
