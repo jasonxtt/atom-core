@@ -2,6 +2,9 @@
 
 <h3 align="center">用 Rust 重写的 MosDNS：带完整 WebUI 的家庭网络 DNS 分流器</h3>
 
+> **atom-core**：[atom](https://github.com/jasonxtt/atom) 分流网关的 DNS 与控制面，基于 [jasonxtt/atomdns](https://github.com/jasonxtt/atomdns) 的 atom 分支（`atom/main`）。
+> 程序名仍是 `atomdns`，服务名 `atom-dns.service`。由 atom 的安装器随配套包安装，不单独发布；下文是 AtomDNS 原有的说明，其中的在线更新、Docker、专属分流组等在这个分支里已经删除。
+
 <p align="center">
   <a href="https://github.com/jasonxtt/atomdns/releases"><img src="https://img.shields.io/github/v/release/jasonxtt/atomdns?label=release" alt="Release"></a>
   <img src="https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64%20%7C%20armv7-blue" alt="Platform">
