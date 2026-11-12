@@ -172,9 +172,9 @@ export const hasNames = (match: Match) =>
 /** The DNS side of a rule (empty for a block rule). */
 export function dnsLabel(rule: Pick<Rule, 'action' | 'match' | 'dns' | 'cache'>): string {
   if (rule.action.type === 'block') return ''
-  if (rule.action.type === 'proxy') return 'FakeIP'
-  // A rule of clients alone meets every name those clients ask.
+  // A rule of clients alone meets every name those clients ask; one of IPs, ports or networks none.
   if (!hasNames(rule.match) && !rule.match.client?.length) return '不经过 DNS'
+  if (rule.action.type === 'proxy') return 'FakeIP'
   return `${upstreamName(rule.dns)}${rule.cache === false ? ' · 不缓存' : ''}`
 }
 
