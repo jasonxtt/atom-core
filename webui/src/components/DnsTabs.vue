@@ -6,7 +6,7 @@ const tabs = [
   ['/dns', '概览'],
   ['/dns/logs', '日志'],
   ['/dns/upstreams', '上游'],
-  ['/dns/settings', '设置']
+  ['/dns/settings', '高级设置']
 ] as const
 </script>
 
