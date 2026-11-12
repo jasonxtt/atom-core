@@ -429,7 +429,7 @@ export interface paths {
          * @description Stored in `webinfo/settings.json` and published as a new generation of
          *     AtomDNS's configuration (no version: the last write wins). Turning a
          *     learning switch off empties that learned list. A `core_mode` change
-         *     starts one re-query run (`requery`).
+         *     empties the global caches and starts one re-query run (`requery`).
          */
         put: operations["putDns"];
         post?: never;
@@ -655,6 +655,141 @@ export interface paths {
         get: operations["getSystem"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/caches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every named cache, its counters and sizes */
+        get: operations["getCaches"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/caches/{tag}/flush": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tag: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Empty one cache */
+        post: operations["flushCache"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stats/upstreams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Counters of every upstream since the process started
+         * @description By group in the configuration's order (the FakeIP group `nocnfake`
+         *     too); only upstreams with a tag have counters. `errors` counts
+         *     failures and timeouts; `winners` the answers that became the group's.
+         */
+        get: operations["getUpstreamStats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/learning": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The learned lists
+         * @description The switches are changed with `PUT dns` (`learning`).
+         */
+        get: operations["getLearning"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/learning/{key}/flush": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: "remember_direct" | "remember_proxy" | "no_v4" | "no_v6";
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Empty one learned list */
+        post: operations["flushLearning"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/requery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The periodic re-query of learned and ranked names */
+        get: operations["getRequery"];
+        /**
+         * Change the schedule
+         * @description Turning it on without a start time counts the interval from now.
+         */
+        put: operations["putRequery"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/requery/trigger": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start one run now */
+        post: operations["triggerRequery"];
         delete?: never;
         options?: never;
         head?: never;
@@ -904,6 +1039,70 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Cache: {
+            tag: string;
+            label: string;
+            /**
+             * @description The `dns` switch the cache is under (none for `cache_google_node`).
+             * @enum {string|null}
+             */
+            switch: "full_cache" | "lazy_cache" | null;
+            /** @description The upstream group whose answers it holds (none for the global caches). */
+            group: string | null;
+            /** @description Live entries. */
+            entries: number;
+            /** @description Lookups since the process started. */
+            queries: number;
+            hits: number;
+            /** @description Hits answered with an expired entry (refreshed in the background). */
+            lazy_hits: number;
+            capacity: number;
+            /** @description Seconds an expired entry is still served (0 none). */
+            lazy_cache_ttl: number;
+            /** @description Seconds between writes of the cache file. */
+            dump_interval: number;
+        };
+        Caches: {
+            caches: components["schemas"]["Cache"][];
+        };
+        UpstreamStats: {
+            tag: string;
+            addr: string | null;
+            queries: number;
+            errors: number;
+            winners: number;
+            latency_count: number;
+            latency_sum_ms: number;
+        };
+        LearningState: {
+            enabled: boolean;
+            categories: {
+                /** @enum {string} */
+                key: "remember_direct" | "remember_proxy" | "no_v4" | "no_v6";
+                label: string;
+                enabled: boolean;
+                entries: number;
+                max_entries: number;
+                ttl_seconds: number;
+            }[];
+        };
+        Requery: {
+            enabled: boolean;
+            interval_minutes: number;
+            status: {
+                /** @description `idle`, `running`, `failed`, `cancelled`. */
+                task_state?: string;
+                last_run_start_time?: string;
+                last_run_end_time?: string;
+                last_run_domain_count?: number;
+                progress?: {
+                    processed?: number;
+                    total?: number;
+                };
+            } & {
+                [key: string]: unknown;
+            };
+        };
         Closed: {
             /** @description The connection's ID; null when every connection was closed. */
             closed: string | null;
@@ -971,6 +1170,11 @@ export interface components {
                 [key: string]: unknown;
             };
             matched_rule_source?: string;
+            /**
+             * @description Whether a cache gave the answer, was asked and missed, was not on the query's path, or the query ended before that was known.
+             * @enum {string}
+             */
+            cache_status?: "hit" | "miss" | "not_applicable" | "undetermined";
         } & {
             [key: string]: unknown;
         };
@@ -1263,10 +1467,12 @@ export interface components {
             block_aaaa?: boolean;
             /** @description No AAAA answer for a name that has A records. */
             prefer_v4?: boolean;
-            /** @description The global cache facing the clients. */
+            /** @description The global caches, which only queries no rule matched reach (they hold FakeIPs). Off empties them. */
             full_cache?: boolean;
-            /** @description The per-upstream-group caches. */
+            /** @description The upstream answer caches (domestic, foreign, every group's rule cache). Off empties them. */
             lazy_cache?: boolean;
+            /** @description An A query for a name learned to have no IPv4 (an AAAA one, no IPv6) is answered empty. */
+            block_empty?: boolean;
             /** @description The ECS address of foreign queries ("" restores the default). */
             ecs?: string;
             learning?: components["schemas"]["Learning"];
@@ -3022,6 +3228,215 @@ export interface operations {
                 };
             };
             404: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    getCaches: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The caches, in the configuration's order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Caches"];
+                };
+            };
+            404: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    flushCache: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tag: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The caches after it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Caches"];
+                };
+            };
+            404: components["responses"]["Error"];
+            500: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    getUpstreamStats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The counters. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        groups: {
+                            tag: string;
+                            upstreams: components["schemas"]["UpstreamStats"][];
+                        }[];
+                    };
+                };
+            };
+            404: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    getLearning: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The master switch and one item per category. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LearningState"];
+                };
+            };
+            404: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    flushLearning: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key: "remember_direct" | "remember_proxy" | "no_v4" | "no_v6";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The learned lists after it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LearningState"];
+                };
+            };
+            404: components["responses"]["Error"];
+            500: components["responses"]["Error"];
+            503: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    getRequery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The schedule and the state of the latest run. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Requery"];
+                };
+            };
+            404: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    putRequery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    enabled?: boolean;
+                    interval_minutes?: number;
+                };
+            };
+        };
+        responses: {
+            /** @description The schedule after the change. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Requery"];
+                };
+            };
+            400: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            500: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    triggerRequery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The run started. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Requery"];
+                };
+            };
+            404: components["responses"]["Error"];
+            /** @description A run is going on. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["Error"];
+            503: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };
     };

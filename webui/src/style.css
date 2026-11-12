@@ -260,3 +260,29 @@ tr.crow:hover td{background:color-mix(in srgb,var(--fill) 60%,transparent)}
 fieldset.plain{border:0;margin:0;padding:0;min-width:0}
 .thsort{border:0;background:none;padding:0;font:inherit;color:inherit}
 .thsort:hover{color:var(--text)}
+
+/* DNS pages: details, rankings, the rule ring */
+:root{--c1:#2f7cf6;--c2:#1f9d55;--c3:#c98a12;--c4:#8b5cf6;--c5:#e0484e;--c6:#a3a3ad}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--c1:#5b9bff;--c2:#3fc27a;--c3:#e8b44a;--c4:#a78bfa;--c5:#ff6b70;--c6:#6d6d79}}
+:root[data-theme="dark"]{--c1:#5b9bff;--c2:#3fc27a;--c3:#e8b44a;--c4:#a78bfa;--c5:#ff6b70;--c6:#6d6d79}
+.modal h4.sec{margin:4px 0 0;font-size:13px;font-weight:500;color:var(--muted)}
+.modal .tblwrap{flex-shrink:0}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 14px;font-size:13px}
+.kv>span:nth-child(2n){overflow-wrap:break-word;min-width:0}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px}
+th.num,td.num{text-align:right}
+td.bad{color:var(--bad)}
+tr.off td{opacity:.5}
+.bar.pick{border:0;background:none;padding:2px 4px;margin:0 -4px;border-radius:8px;text-align:left;width:calc(100% + 8px)}
+.bar.pick:hover{background:var(--fill)}
+.bar .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.ring{display:grid;place-items:center;padding:4px 0 10px}
+.ring svg{width:160px;height:160px}
+.ring-n{font-size:15px;fill:var(--text)}
+.ring-k{font-size:9px;fill:var(--muted)}
+.legend{display:flex;flex-direction:column;gap:2px}
+.lg{display:flex;align-items:center;gap:8px;border:0;background:none;padding:5px 6px;border-radius:8px;text-align:left;width:100%;font-size:13px}
+.lg:hover:not(:disabled){background:var(--fill)}
+.lg:disabled{cursor:default}
+.lg i{width:10px;height:10px;border-radius:3px;flex:none}
+.lg .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

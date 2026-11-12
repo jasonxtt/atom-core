@@ -4,8 +4,8 @@ import { useRoute } from 'vue-router'
 const route = useRoute()
 const tabs = [
   ['/dns', '概览'],
-  ['/dns/upstreams', '上游'],
   ['/dns/logs', '日志'],
+  ['/dns/upstreams', '上游'],
   ['/dns/settings', '设置']
 ] as const
 </script>
