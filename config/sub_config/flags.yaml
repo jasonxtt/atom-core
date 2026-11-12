@@ -69,7 +69,7 @@ plugins:
   - tag: full_cache
     type: feature_flag
     args:
-      label: 未命中规则的缓存
+      label: 全局缓存
       description: 没命中规则的查询先查的全局缓存（兼容模式用「全局缓存·兼容模式」，安全模式用「全局缓存·安全模式」），会缓存 FakeIP。
       section: cache
       kind: bool

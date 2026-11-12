@@ -19,7 +19,7 @@ const RESOLVE: [Toggle, string][] = [
   ['block_empty', '空结果屏蔽']
 ]
 const CACHE: [Toggle, string][] = [
-  ['full_cache', '未命中规则的缓存'],
+  ['full_cache', '全局缓存'],
   ['lazy_cache', '上游应答缓存']
 ]
 const LEARN: Record<LearnKey, string> = { remember_direct: '直连', remember_proxy: '代理', no_v4: '无 V4', no_v6: '无 V6' }
@@ -436,40 +436,37 @@ async function saveRewrite() {
       </div>
 
       <div class="grid dset-side">
-        <div v-if="settings" class="card grid" style="gap: 10px">
+        <div v-if="settings" class="card grid dset-fill" style="gap: 10px">
           <div class="hd" style="margin: 0">
             <h2>TTL 上限</h2>
             <span class="sp"></span>
             <button class="btn sm pri" type="button" :disabled="!!busy || !ttlChanged" @click="saveTtl">保存</button>
           </div>
-          <div class="grid g2" style="gap: 10px">
-            <div class="field">
-              <label for="dttl">直连应答（秒）</label>
-              <input id="dttl" v-model="ttl.direct" class="inp mono" inputmode="numeric" autocomplete="off" />
-            </div>
-            <div class="field">
-              <label for="fttl">FakeIP 应答（秒）</label>
-              <input id="fttl" v-model="ttl.fakeip" class="inp mono" inputmode="numeric" autocomplete="off" />
-            </div>
+          <div class="kvrow">
+            <label for="dttl">直连应答（秒）</label>
+            <input id="dttl" v-model="ttl.direct" class="inp sm mono" inputmode="numeric" autocomplete="off" />
+          </div>
+          <div class="kvrow">
+            <label for="fttl">FakeIP 应答（秒）</label>
+            <input id="fttl" v-model="ttl.fakeip" class="inp sm mono" inputmode="numeric" autocomplete="off" />
           </div>
           <div v-if="errors.ttl" class="err">{{ errors.ttl }}</div>
         </div>
-        <div class="card">
+        <div class="card dset-fill">
           <fieldset class="plain grid" style="gap: 10px" :disabled="!auditRead">
             <div class="hd" style="margin: 0">
               <h2>查询日志</h2>
               <span class="sp"></span>
-              <button class="btn sm danger" type="button" @click="clearLogs">清空日志</button>
+              <button class="btn sm danger" type="button" @click="clearLogs">清空</button>
+              <button class="btn sm pri" type="button" :disabled="!!busy || audit.wanted.trim() === String(audit.capacity)" @click="changeCapacity">保存</button>
             </div>
             <div class="row">
               <div style="flex: 1">记录</div>
               <button class="sw" type="button" :class="{ on: audit.capturing }" :aria-pressed="audit.capturing" aria-label="记录查询日志" @click="toggleAudit"></button>
             </div>
-            <div class="row" style="flex-wrap: nowrap">
-              <label for="capacity" class="t2" style="white-space: nowrap">容量（条）</label>
-              <input id="capacity" v-model="audit.wanted" class="inp sm mono" style="flex: 1; max-width: 140px" inputmode="numeric" autocomplete="off" />
-              <span class="sp"></span>
-              <button class="btn sm pri" type="button" :disabled="!!busy || audit.wanted.trim() === String(audit.capacity)" @click="changeCapacity">保存</button>
+            <div class="kvrow">
+              <label for="capacity">容量（条）</label>
+              <input id="capacity" v-model="audit.wanted" class="inp sm mono" inputmode="numeric" autocomplete="off" />
             </div>
             <div v-if="errors.audit" class="err">{{ errors.audit }}</div>
           </fieldset>

@@ -66,5 +66,5 @@ DNS 页补全（atom 设计文档 4.5.1、4.8）：
 
 - 规则命中的域名不参与学习：直连规则（fast_mark 42）的 A/AAAA 改走新的 `sequence_rule_local_exit`（`forward_1.yaml`），
   它和 `sequence_local_exit` 一样问国内 DNS、过 `cache_cn`，只是不执行 `$learn_nov6_empty`。主流程和刷新流程都改了。
-- `flags.yaml`：`full_cache` 显示为「未命中规则的缓存」，`lazy_cache` 显示为「上游应答缓存」；`lazy_cache` 也管程序生成的
+- `flags.yaml`：`full_cache` 显示为「全局缓存」，`lazy_cache` 显示为「上游应答缓存」；`lazy_cache` 也管程序生成的
   `cache_atom_<组>`（关掉后规则的缓存开关等于关）。`block_empty` 开放到 `PUT /api/v1/atom/dns`。

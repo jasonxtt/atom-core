@@ -289,11 +289,15 @@ tr.off td{opacity:.5}
 
 /* DNS advanced settings: resolution, redirects (stretching to the row) and the TTL caps over the
    query log in one row; caches and learning side by side; fewer columns as the screen narrows */
-.dset-top{display:grid;gap:16px;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr) minmax(0,1fr);grid-template-areas:"resolve hosts side";align-items:stretch}
+.dset-top{display:grid;gap:16px;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr) minmax(0,1fr);grid-template-areas:"resolve hosts side";align-items:stretch}
 .dset-resolve{grid-area:resolve;align-content:start}
 .dset-hosts{grid-area:hosts;display:flex;flex-direction:column;gap:10px}
 .dset-hosts textarea.inp{flex:1;min-height:180px}
-.dset-side{grid-area:side;gap:16px;align-content:start}
+.dset-side{grid-area:side;display:flex;flex-direction:column;gap:16px}
+.dset-side>.dset-fill{flex:1;align-content:start}
+.kvrow{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.kvrow>label{font-size:13px;color:var(--muted);white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.kvrow>.inp{width:96px;flex:none}
 .dset-bottom{display:grid;gap:16px;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
 @media (max-width:1400px){.dset-bottom{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:1100px){.dset-top{grid-template-columns:repeat(2,minmax(0,1fr));grid-template-areas:"resolve side" "hosts hosts"}}
