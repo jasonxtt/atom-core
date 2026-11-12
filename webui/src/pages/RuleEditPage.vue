@@ -157,19 +157,24 @@ const hasTransport = computed(() => form.conds.some(isTransport))
 /** A condition matched on names (DNS). */
 const takesNames = (cond: Cond) => cond.t === 'domain' || ((cond.t === 'source' || cond.t === 'set') && cond.part !== 'ip')
 
-// The blocks shown by how they combine: names, then the IP part (either one matches), then
-// ports and networks, then clients (each and-ed with what is before it).
-const rank = (cond: Cond) => (cond.t === 'client' ? 4 : cond.t === 'network' ? 3 : cond.t === 'port' ? 2 : takesNames(cond) ? 0 : 1)
-const ordered = computed(() =>
-  form.conds
-    .map((cond, index) => ({ cond, index }))
-    .sort((a, b) => rank(a.cond) - rank(b.cond) || a.index - b.index)
-    .map((item, position, all) => {
-      const before = position ? rank(all[position - 1].cond) : -1
-      const own = rank(item.cond)
-      return { ...item, joint: before < 0 ? '' : before === own || own <= 1 ? '或' : '且' }
-    })
-)
+// How the blocks combine: the blocks of one class match either way (或); different classes must
+// all match (且). Name conditions and the IP part are one class, matched either way (the names in
+// DNS, the prefixes in sing-box), except beside ports or networks, where the IP part is its own
+// class (sing-box and-s them). Blocks show in the order they were added, those of one class kept
+// together, so each block's relation is to the one above it.
+const classOf = (cond: Cond) =>
+  cond.t === 'client' || cond.t === 'port' || cond.t === 'network' ? cond.t : hasTransport.value && !takesNames(cond) ? 'ip' : 'name'
+const ordered = computed(() => {
+  const first = new Map<string, number>()
+  form.conds.forEach((cond, index) => {
+    if (!first.has(classOf(cond))) first.set(classOf(cond), index)
+  })
+  return form.conds
+    .map((cond, index) => ({ cond, index, group: first.get(classOf(cond)) ?? index }))
+    .sort((a, b) => a.group - b.group || a.index - b.index)
+    .map((item, position, all) => ({ ...item, joint: position ? (all[position - 1].group === item.group ? '或' : '且') : '' }))
+})
+
 const customSets = computed(() => rulesets.value.filter((set) => set.type !== 'catalog'))
 
 function add(t: Kind) {
@@ -459,9 +464,9 @@ const kindLabel: Record<Kind, string> = { source: '内置规则集', set: '自�
         </div>
 
         <template v-for="{ cond, index, joint } in ordered" :key="cond.key">
-        <div v-if="joint" class="hint" style="text-align: center">{{ joint }}</div>
         <div class="cond">
           <div class="row" style="gap: 8px">
+            <span v-if="joint" class="pill idle" :style="joint === '且' ? { fontWeight: 600, color: 'var(--text)' } : undefined">{{ joint }}</span>
             <span class="pill acc">{{ kindLabel[cond.t] }}</span>
             <select
               v-if="['domain', 'ip', 'client', 'port', 'network'].includes(cond.t)"

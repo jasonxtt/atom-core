@@ -155,10 +155,10 @@ export function summary(match: Match): string {
   const ports = portsText(match.port, match.port_range).split('\n').filter(Boolean)
   if (ports.length) transport.push(`端口 ${some(ports)}`)
   if (match.network?.length) transport.push(match.network.map((network) => network.toUpperCase()).join(' 或 '))
-  if (transport.length) head = head ? `${parts.length > 1 ? `（${head}）` : head}，且${transport.join('，且')}` : transport.join('，且')
+  if (transport.length) head = head ? `${parts.length > 1 ? `（${head}）` : head} 且 ${transport.join(' 且 ')}` : transport.join(' 且 ')
   if (!match.client?.length) return head
   const clients = `${match.client_invert ? '名单外的客户端' : '客户端'} ${some(match.client)}`
-  return head ? `${head}，且${clients}` : clients
+  return head ? `${parts.length > 1 ? `（${head}）` : head} 且 ${clients}` : clients
 }
 
 export function actionLabel(action: Schemas['Action']): string {
