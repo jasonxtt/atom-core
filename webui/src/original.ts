@@ -29,8 +29,8 @@ export function originalBranches(dns: DnsState, finalName: string): Branch[] {
   const empty = [on('no_v4') ? '无 V4' : '', on('no_v6') ? '无 V6' : ''].filter(Boolean)
   return [
     { key: 'empty', name: `学到的${(empty.length ? empty : ['无 V4', '无 V6']).join(' / ')}`, to: LEARNING, result: ['空应答'], off: !dns.block_empty || !empty.length },
-    { key: 'geosite_no_cn', name: 'geosite_no_cn', to: '/rules/sets?set=geosite_no_cn', result: [proxy], off: false },
-    { key: 'geosite_cn', name: 'geosite_cn', to: '/rules/sets?set=geosite_cn', result: ['直连', '国内 DNS'], off: false },
+    { key: 'geosite_no_cn', name: 'geosite 非国内', to: '/rules/sets?set=geosite_no_cn', result: [proxy], off: false },
+    { key: 'geosite_cn', name: 'geosite 国内', to: '/rules/sets?set=geosite_cn', result: ['直连', '国内 DNS'], off: false },
     { key: 'remember_proxy', name: '记忆代理', to: LEARNING, result: [proxy], off: !on('remember_proxy') },
     { key: 'remember_direct', name: '记忆直连', to: LEARNING, result: ['直连', safe ? '国外 DNS' : '国内 DNS'], off: !on('remember_direct') },
     {

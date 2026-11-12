@@ -225,14 +225,25 @@ a.nav{text-decoration:none}
   .li .ops{grid-column:3;grid-row:1}
 }
 .dnstag{font-size:12px;color:var(--muted);white-space:nowrap}
-.orig{border-top:1px dashed var(--line);margin-top:4px;padding:10px 8px;background:var(--fill2);border-radius:0 0 14px 14px}
-.orig.hit{background:var(--accent-soft)}
-.orig-hd{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;padding:0;font:inherit;color:inherit;text-align:left;cursor:pointer}
-.orig-hd .sum{font-size:12.5px;color:var(--muted)}
-.orig-chev{width:22px;text-align:center;color:var(--faint)}
-.orig-list{list-style:none;margin:8px 0 0;padding:0 0 0 32px;display:flex;flex-direction:column;gap:6px;font-size:13px}
-.orig-list li{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
-.orig-list li.off{opacity:.5}
+.li.orig{grid-template-columns:auto auto minmax(0,1fr) auto;align-items:start}
+.li.orig .handle{visibility:hidden;cursor:default}
+.orig-hd{display:inline-flex;align-items:center;gap:6px;border:0;background:none;padding:0;font:inherit;color:inherit;text-align:left;cursor:pointer}
+.orig-chev{color:var(--faint);font-size:12px}
+.orig-act{font-size:12.5px;color:var(--muted);padding-right:72px}
+.orig-list{list-style:none;margin:6px 0 0;padding:0;display:grid;grid-template-columns:max-content auto minmax(0,1fr);column-gap:8px;row-gap:4px;font-size:12.5px;color:var(--muted)}
+.orig-list li{display:contents}
+.orig-list li.off>*{opacity:.5}
+.orig-list a{color:var(--muted);text-decoration:none}
+.orig-list a:hover{color:var(--accent);text-decoration:underline}
+.orig-list .tag{margin-left:6px}
+.orig-res{min-width:0;overflow-wrap:break-word}
+.orig-res>span:not(:last-child)::after{content:"，"}
+.orig-arrow{color:var(--faint)}
+@media (max-width:760px){
+  .li.orig{grid-template-columns:auto minmax(0,1fr) auto}
+  .li.orig>div{grid-column:2/4;grid-row:1}
+  .li.orig .act{grid-column:3;grid-row:1;padding-right:8px}
+}
 tr.hit td{background:var(--accent-soft)}
 .cond{background:var(--fill);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:8px}
 .cond .inp{background:var(--card)}

@@ -246,21 +246,23 @@ async function remove() {
         </div>
       </template>
     </draggable>
-    <div class="orig" :class="{ hit: hitOriginal }">
-      <button type="button" class="orig-hd" :aria-expanded="originalOpen" aria-controls="orig-branches" @click="originalOpen = !originalOpen">
-        <span class="orig-chev" aria-hidden="true">{{ originalOpen ? '▾' : '▸' }}</span>
-        <span>未命中以上规则</span>
-        <span class="pill acc">DNS</span>
-        <span class="sum">原判断</span>
-      </button>
-      <ul v-if="originalOpen" id="orig-branches" class="orig-list">
-        <li v-for="branch in branches" :key="branch.key" :class="{ off: branch.off }">
-          <RouterLink class="mono" :to="branch.to">{{ branch.name }}</RouterLink>
-          <span v-if="branch.off" class="tag">关</span>
-          <span class="t2" aria-hidden="true">→</span>
-          <span v-for="item in branch.result" :key="item" class="tag">{{ item }}</span>
-        </li>
-      </ul>
+    <div class="li orig" :class="{ hit: hitOriginal }">
+      <span class="handle" aria-hidden="true">⠿</span>
+      <span class="idx" aria-hidden="true">—</span>
+      <div style="min-width: 0">
+        <button type="button" class="orig-hd" :aria-expanded="originalOpen" aria-controls="orig-branches" @click="originalOpen = !originalOpen">
+          未命中以上规则<span class="orig-chev" aria-hidden="true">{{ originalOpen ? '▾' : '▸' }}</span>
+        </button>
+        <div class="sum">原判断</div>
+        <ul v-if="originalOpen" id="orig-branches" class="orig-list">
+          <li v-for="branch in branches" :key="branch.key" :class="{ off: branch.off }">
+            <span><RouterLink :to="branch.to">{{ branch.name }}</RouterLink><span v-if="branch.off" class="tag">关</span></span>
+            <span class="orig-arrow" aria-hidden="true">→</span>
+            <span class="orig-res"><span v-for="item in branch.result" :key="item">{{ item }}</span></span>
+          </li>
+        </ul>
+      </div>
+      <span class="act orig-act">DNS</span>
     </div>
   </div>
 
