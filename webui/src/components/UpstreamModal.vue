@@ -12,16 +12,19 @@ const PROTOCOLS = [
   ['udp', 'UDP'],
   ['tcp', 'TCP'],
   ['tls', 'DoT（tls）'],
-  ['https', 'DoH（https）']
+  ['https', 'DoH（https）'],
+  ['quic', 'DoQ（quic）']
 ] as const
 const PLACEHOLDERS: Record<string, string> = {
   udp: '例如 223.5.5.5 或 223.5.5.5:53',
   tcp: '例如 tcp://223.5.5.5',
   tls: '例如 tls://dns.alidns.com',
-  https: '例如 https://dns.alidns.com/dns-query'
+  https: '例如 https://dns.alidns.com/dns-query',
+  quic: '例如 quic://dns.alidns.com'
 }
 const source = props.upstream
-const protocol = source?.protocol === 'dot' ? 'tls' : source?.protocol === 'doh' ? 'https' : (source?.protocol ?? 'udp')
+const ALIASES: Record<string, Upstream['protocol']> = { dot: 'tls', doh: 'https', h3: 'https', doq: 'quic' }
+const protocol = ALIASES[source?.protocol ?? ''] ?? source?.protocol ?? 'udp'
 const form = reactive({
   name: '',
   tag: source?.tag ?? '',
@@ -33,9 +36,12 @@ const form = reactive({
   bootstrap_version: source?.bootstrap_version ?? 0,
   use_proxy: !!source?.use_proxy,
   insecure: !!source?.insecure_skip_verify,
+  http3: source?.protocol === 'h3' || !!source?.enable_http3 || !!source?.addr?.startsWith('h3://'),
   enabled: source?.enabled !== false
 })
 const error = ref('')
+/** UDP, DoQ and DoH over HTTP/3 cannot go through the proxy. */
+const proxyable = () => form.protocol !== 'udp' && form.protocol !== 'quic' && !(form.protocol === 'https' && form.http3)
 
 function submit() {
   if (props.pending) return
@@ -47,16 +53,21 @@ function submit() {
   if (!form.addr.trim()) return void (error.value = '请填写地址')
   const timeout = form.timeout.trim()
   if (timeout && !/^\d+$/.test(timeout)) return void (error.value = '查询超时应为毫秒数')
+  const http3 = form.protocol === 'https' && form.http3
+  // `h3://` is written as `https://` with `enable_http3`.
+  const addr = form.protocol === 'https' ? form.addr.trim().replace(/^h3:\/\//i, 'https://') : form.addr.trim()
   // Fields this form does not show stay as they were.
   const upstream: Upstream = {
     ...(source ?? {}),
     tag,
     protocol: form.protocol,
-    addr: form.addr.trim(),
+    addr,
     enabled: form.enabled,
-    use_proxy: form.protocol !== 'udp' && form.use_proxy,
-    insecure_skip_verify: (form.protocol === 'tls' || form.protocol === 'https') && form.insecure
+    use_proxy: proxyable() && form.use_proxy,
+    insecure_skip_verify: form.protocol !== 'udp' && form.protocol !== 'tcp' && form.insecure
   }
+  if (http3) upstream.enable_http3 = true
+  else delete upstream.enable_http3
   const optional = { dial_addr: form.dial_addr.trim(), bootstrap: form.bootstrap.trim() }
   for (const [key, value] of Object.entries(optional)) {
     if (value) (upstream as Record<string, unknown>)[key] = value
@@ -116,9 +127,13 @@ function submit() {
     </div>
     <div class="row">
       <div style="flex: 1">走代理</div>
-      <button class="sw" type="button" :class="{ on: form.use_proxy && form.protocol !== 'udp' }" :disabled="form.protocol === 'udp'" :aria-pressed="form.use_proxy && form.protocol !== 'udp'" aria-label="走代理" @click="form.use_proxy = !form.use_proxy"></button>
+      <button class="sw" type="button" :class="{ on: form.use_proxy && proxyable() }" :disabled="!proxyable()" :aria-pressed="form.use_proxy && proxyable()" aria-label="走代理" @click="form.use_proxy = !form.use_proxy"></button>
     </div>
-    <div v-if="form.protocol === 'tls' || form.protocol === 'https'" class="row">
+    <div v-if="form.protocol === 'https'" class="row">
+      <div style="flex: 1">HTTP/3</div>
+      <button class="sw" type="button" :class="{ on: form.http3 }" :aria-pressed="form.http3" aria-label="HTTP/3" @click="form.http3 = !form.http3"></button>
+    </div>
+    <div v-if="form.protocol !== 'udp' && form.protocol !== 'tcp'" class="row">
       <div style="flex: 1">跳过证书校验</div>
       <button class="sw" type="button" :class="{ on: form.insecure }" :aria-pressed="form.insecure" aria-label="跳过证书校验" @click="form.insecure = !form.insecure"></button>
     </div>

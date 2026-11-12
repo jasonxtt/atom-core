@@ -1051,7 +1051,7 @@ export interface components {
             group: string | null;
             /** @description Live entries. */
             entries: number;
-            /** @description Lookups since the process started. */
+            /** @description Lookups since this cache started (a new configuration generation starts every cache afresh, counters included). */
             queries: number;
             hits: number;
             /** @description Hits answered with an expired entry (refreshed in the background). */
@@ -1484,18 +1484,19 @@ export interface components {
             tag: string;
             enabled?: boolean;
             /**
-             * @description Required even when `addr` has a scheme (the scheme must then match it).
+             * @description Required even when `addr` has a scheme (the scheme must then match it; `quic` also matches `doq://`). `h3` is DoH over HTTP/3 (same as `https` with `enable_http3`); `quic` (alias `doq`) is DoQ.
              * @enum {string}
              */
-            protocol: "udp" | "tcp" | "tls" | "dot" | "https" | "doh";
+            protocol: "udp" | "tcp" | "tls" | "dot" | "https" | "doh" | "h3" | "quic" | "doq";
             addr: string;
             dial_addr?: string;
-            /** @description Through `main_proxy` (sing-box's mixed inbound); not for UDP. */
+            /** @description Through `main_proxy` (sing-box's mixed inbound); not for UDP, HTTP/3 or DoQ. */
             use_proxy?: boolean;
             bootstrap?: string;
             idle_timeout?: number;
             upstream_query_timeout?: number;
             enable_pipeline?: boolean;
+            /** @description DoH over HTTP/3; only with `https` or `h3`. */
             enable_http3?: boolean;
             insecure_skip_verify?: boolean;
             so_mark?: number;

@@ -42,7 +42,11 @@ const dirty = (group: Group) => {
 }
 const usedBy = (tag: string) => rules.value.filter((rule) => rule.dns === tag)
 const allTags = computed(() => Object.values(drafts).flatMap((draft) => draft.upstreams.map((item) => item.tag)))
-const PROTOCOLS: Record<string, string> = { udp: 'UDP', tcp: 'TCP', tls: 'DoT', dot: 'DoT', https: 'DoH', doh: 'DoH' }
+const PROTOCOLS: Record<string, string> = { udp: 'UDP', tcp: 'TCP', tls: 'DoT', dot: 'DoT', https: 'DoH', doh: 'DoH', h3: 'DoH3', quic: 'DoQ', doq: 'DoQ' }
+const http3 = (upstream: Upstream) => upstream.protocol === 'h3' || (!!upstream.enable_http3 && (upstream.protocol === 'https' || upstream.protocol === 'doh'))
+const protocolName = (upstream: Upstream) => (http3(upstream) ? 'DoH3' : (PROTOCOLS[upstream.protocol] ?? upstream.protocol))
+/** UDP, DoQ and DoH over HTTP/3 cannot go through the proxy. */
+const noProxy = (upstream: Upstream) => ['udp', 'quic', 'doq'].includes(upstream.protocol) || http3(upstream)
 
 /**
  * Applies a write's answer: every group as it is now. The unsaved drafts of the other groups,
@@ -158,11 +162,11 @@ async function createGroup(name: string, upstream: Upstream) {
                 <button class="sw" type="button" :class="{ on: upstream.enabled !== false }" :aria-pressed="upstream.enabled !== false" :aria-label="`启用：${upstream.tag}`" @click="upstream.enabled = upstream.enabled === false"></button>
               </td>
               <td class="mono">{{ upstream.tag }}</td>
-              <td>{{ PROTOCOLS[upstream.protocol] ?? upstream.protocol }}</td>
+              <td>{{ protocolName(upstream) }}</td>
               <td class="mono">{{ upstream.addr }}</td>
               <td class="mono t2">{{ upstream.dial_addr || '—' }}</td>
               <td>
-                <button class="sw" type="button" :class="{ on: !!upstream.use_proxy }" :disabled="upstream.protocol === 'udp'" :aria-pressed="!!upstream.use_proxy" :aria-label="`走代理：${upstream.tag}`" @click="upstream.use_proxy = !upstream.use_proxy"></button>
+                <button class="sw" type="button" :class="{ on: !!upstream.use_proxy }" :disabled="noProxy(upstream)" :aria-pressed="!!upstream.use_proxy" :aria-label="`走代理：${upstream.tag}`" @click="upstream.use_proxy = !upstream.use_proxy"></button>
               </td>
               <td><button class="btn sm" type="button" @click="editing = { group, index }">编辑</button></td>
             </tr>

@@ -3126,15 +3126,15 @@ components:
           type: boolean
         protocol:
           type: string
-          enum: [udp, tcp, tls, dot, https, doh]
-          description: Required even when `addr` has a scheme (the scheme must then match it).
+          enum: [udp, tcp, tls, dot, https, doh, h3, quic, doq]
+          description: Required even when `addr` has a scheme (the scheme must then match it; `quic` also matches `doq://`). `h3` is DoH over HTTP/3 (same as `https` with `enable_http3`); `quic` (alias `doq`) is DoQ.
         addr:
           type: string
         dial_addr:
           type: string
         use_proxy:
           type: boolean
-          description: Through `main_proxy` (sing-box's mixed inbound); not for UDP.
+          description: Through `main_proxy` (sing-box's mixed inbound); not for UDP, HTTP/3 or DoQ.
         bootstrap:
           type: string
         idle_timeout:
@@ -3145,6 +3145,7 @@ components:
           type: boolean
         enable_http3:
           type: boolean
+          description: DoH over HTTP/3; only with `https` or `h3`.
         insecure_skip_verify:
           type: boolean
         so_mark:

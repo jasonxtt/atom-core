@@ -205,6 +205,56 @@ fn upstreams_list_every_group_but_fakeip_and_replace_one() {
     assert_eq!(host.call("PUT", "upstreams", &json!({})).0, 405);
 }
 
+/// DoH over HTTP/3 (`enable_http3`) and DoQ (`quic`) are read and written
+/// like any entry; neither may go through the proxy. Every protocol the
+/// document lists is accepted.
+#[test]
+fn http3_and_doq_upstreams_are_read_and_written() {
+    let host = Host::new("upstreams-quic");
+    let list = json!({"upstreams": [
+        {"tag": "doh3", "enabled": true, "protocol": "https", "addr": "https://127.0.0.1/dns-query", "enable_http3": true},
+        {"tag": "doq", "enabled": true, "protocol": "quic", "addr": "quic://127.0.0.1"},
+    ]});
+    let (status, view) = host.call("PUT", "upstreams/domestic", &list);
+    assert_eq!(status, 200, "{view}");
+    let (status, view) = host.call("GET", "upstreams", &Value::Null);
+    assert_eq!(status, 200, "{view}");
+    let saved = &view["groups"][0]["upstreams"];
+    assert_eq!(saved[0]["enable_http3"], true, "{view}");
+    assert_eq!(saved[1]["protocol"], "quic", "{view}");
+    assert_eq!(saved[1]["addr"], "quic://127.0.0.1", "{view}");
+
+    for proxied in [
+        json!({"tag": "a", "enabled": true, "protocol": "quic", "addr": "127.0.0.1", "use_proxy": true}),
+        json!({"tag": "a", "enabled": true, "protocol": "https", "addr": "127.0.0.1", "enable_http3": true, "use_proxy": true}),
+    ] {
+        let (status, value) = host.call("PUT", "upstreams/domestic", &json!({"upstreams": [proxied]}));
+        assert_eq!(status, 400, "{value}");
+        assert!(value.to_string().contains("SOCKS5"), "{value}");
+    }
+    let (status, value) = host.call(
+        "PUT",
+        "upstreams/domestic",
+        &json!({"upstreams": [{"tag": "a", "enabled": true, "protocol": "tls", "addr": "127.0.0.1", "enable_http3": true}]}),
+    );
+    assert_eq!(status, 400, "{value}");
+
+    let spec: Value = yaml_serde::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/api/openapi.yaml"
+    )))
+    .unwrap();
+    let protocols = spec["components"]["schemas"]["Upstream"]["properties"]["protocol"]["enum"]
+        .as_array()
+        .unwrap();
+    assert!(protocols.contains(&json!("quic")));
+    for protocol in protocols {
+        let entry = json!({"tag": "p", "enabled": true, "protocol": protocol, "addr": "127.0.0.1"});
+        let (status, value) = host.call("PUT", "upstreams/domestic", &json!({"upstreams": [entry]}));
+        assert_eq!(status, 200, "{protocol}: {value}");
+    }
+}
+
 #[test]
 fn rewrite_replaces_its_file() {
     let host = Host::new("fixed");
