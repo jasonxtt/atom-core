@@ -33,7 +33,7 @@ use serde_json::{Map, Value, json};
 
 use crate::atom_proxy::{FINAL, GroupInput, ProxyState};
 use crate::atom_rules::{AtomRules, Refusal};
-use crate::atom_rules_api::{error, flush_caches, json as reply_json, query_version, refusal};
+use crate::atom_rules_api::{error, flush_global_caches, json as reply_json, query_version, refusal};
 use crate::cache::CacheCatalog;
 use crate::config::CompiledConfig;
 use crate::rule_sources::Reply;
@@ -661,11 +661,11 @@ async fn put_settings(
     if let Err(e) = rules.transact(None, Some(next.clone()), "settings").await {
         return fail(&e);
     }
-    // Cached answers hold FakeIPs of the old range; sing-box dropped every
-    // mapping and binding.
+    // The global caches hold FakeIPs of the old range (the upstream answer
+    // caches never hold one); sing-box dropped every mapping and binding.
     if next.settings.fakeip_range != current.settings.fakeip_range {
         crate::atom_ledger::clear();
-        if let Err(e) = flush_caches(config, cache).await {
+        if let Err(e) = flush_global_caches(config, cache).await {
             return error(
                 500,
                 format!("设置已应用，但清空缓存失败，旧网段的 FakeIP 应答可能还会被使用: {e}"),
@@ -825,20 +825,12 @@ pub(crate) async fn handle(
         }
         ("PUT", ["groups", id]) => update_group(rules, id, body).await,
         ("DELETE", ["groups", id]) => match delete_group(rules, id, query).await {
-            // Rules moved to Final: cached answers carry the old SET, and
-            // sing-box still binds names to the deleted group.
+            // Rules moved to Final: sing-box still binds names to the deleted
+            // group. No cache holds an answer of those rules (a proxy rule's
+            // query reaches neither the global cache nor an upstream one).
             Ok((reply, true)) => {
-                let flushed = flush_caches(config, cache).await;
                 crate::atom_ledger::resync(config, rules, "groups").await;
-                match flushed {
-                    Ok(()) => Ok(reply),
-                    Err(e) => Err(error(
-                        500,
-                        format!(
-                            "修改已保存并生效，但清空缓存失败，旧的缓存应答可能还会被使用: {e}"
-                        ),
-                    )),
-                }
+                Ok(reply)
             }
             Ok((reply, false)) => Ok(reply),
             Err(reply) => Err(reply),

@@ -819,6 +819,7 @@ impl RouteLearner {
     fn status(&self) -> Reply {
         let shared = self.shared.borrow();
         let state = shared.borrow();
+        let now = state.now();
         let categories: Vec<serde_json::Value> = self
             .settings
             .categories
@@ -831,6 +832,11 @@ impl RouteLearner {
                     "mark": spec.mark,
                     "enabled": spec.enabled,
                     "entries": state.cats[index].len(),
+                    // Unexpired ones only (an expired row waits for the sweep).
+                    "live_entries": state.cats[index]
+                        .values()
+                        .filter(|entry| now < u64::from(entry.last) + spec.ttl)
+                        .count(),
                     "max_entries": spec.max_entries,
                     "ttl_seconds": spec.ttl,
                 })

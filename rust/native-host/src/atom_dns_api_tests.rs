@@ -42,6 +42,7 @@ impl Host {
             ("prefer_v4", false),
             ("full_cache", true),
             ("lazy_cache", true),
+            ("block_empty", true),
         ] {
             yaml.push_str(&flag(tag, default));
         }
@@ -676,4 +677,195 @@ fn routed_ecs_reaches_the_upstream_and_requery_knows_the_rule_caches() {
         .windows(6)
         .any(|w| w[0] == 0 && w[1] == 8 && w[4] == 0 && w[5] == 2);
     assert!(ecs, "the routed query carries the ECS: {last:?}");
+}
+
+/// Which caches each change empties (atom design 4.5.1): a rule change the
+/// global caches only, a switch acting ahead of every cache none, a cache
+/// switch going off its own caches, an upstream group change that group's.
+#[test]
+fn each_change_empties_only_the_caches_it_touches() {
+    let host = Host::new("cache-scope");
+    let path = host.root.join("config.yaml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "  - tag: entry\n",
+            "  - tag: cache_all\n    type: cache\n    args: {size: 64}\n  - tag: cache_cn\n    type: cache\n    args: {size: 64}\n  - tag: entry\n",
+        )
+        .replace(
+            "{matches: fast_mark 43, exec: [$atom_direct, exit]}, {exec: $domestic}]",
+            "{matches: fast_mark 43, exec: [$atom_direct, exit]}, {exec: $cache_all}, {exec: $cache_cn}, {exec: $domestic}]",
+        );
+    std::fs::write(&path, yaml).unwrap();
+    let host = Host {
+        root: host.root.clone(),
+        host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
+    };
+    let (port, _) = fake_upstream([192, 0, 2, 7]);
+    let upstream = json!({"tag": "up1", "enabled": true, "protocol": "udp", "addr": format!("127.0.0.1:{port}")});
+    let (status, value) = host.call("PUT", "upstreams/domestic", &json!({"upstreams": [upstream]}));
+    assert_eq!(status, 200, "{value}");
+    let fill = || {
+        let control = host.host.control();
+        let local = crate::local_url::LocalApi {
+            control: crate::runtime_snapshot::RuntimeControlWeak::from_control(&control),
+            api: None,
+            roots: None,
+        };
+        host.host.block_on(async move {
+            local
+                .resolve("entry", &query("a.fill.example"), std::time::Duration::from_secs(2))
+                .await
+                .expect("an answer");
+        });
+    };
+    let entries = || {
+        let (status, view) = host.call("GET", "caches", &Value::Null);
+        assert_eq!(status, 200, "{view}");
+        let of = |tag: &str| {
+            view["caches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["tag"] == tag)
+                .unwrap_or_else(|| panic!("{tag} in {view}"))["entries"]
+                .as_u64()
+                .unwrap()
+        };
+        (of("cache_all"), of("cache_cn"))
+    };
+    fill();
+    assert_eq!(entries(), (1, 1));
+    let (_, view) = host.call("GET", "caches", &Value::Null);
+    let cn = view["caches"].as_array().unwrap().iter().find(|item| item["tag"] == "cache_cn").unwrap().clone();
+    assert_eq!((cn["switch"].as_str(), cn["group"].as_str()), (Some("lazy_cache"), Some("domestic")));
+
+    // A rule: the global cache only.
+    let (status, value) = host.call("POST", "rules", &json!({"match": {"suffix": ["x.example"]}, "action": {"type": "block"}}));
+    assert_eq!(status, 201, "{value}");
+    assert_eq!(entries(), (0, 1), "a rule change keeps the upstream answer cache");
+    fill();
+    // The rewrite rules: the global cache only.
+    let (status, value) = host.call("PUT", "rewrite", &json!({"entries": ["full:nas.example 192.0.2.10"]}));
+    assert_eq!(status, 200, "{value}");
+    assert_eq!(entries(), (0, 1));
+    fill();
+    // Switches acting ahead of every cache, and the ECS: nothing.
+    let (status, value) = host.call(
+        "PUT",
+        "dns",
+        &json!({"prefer_v4": true, "block_aaaa": true, "block_qtypes": false, "block_empty": false, "ecs": "203.0.113.1"}),
+    );
+    assert_eq!(status, 200, "{value}");
+    assert_eq!(value["block_empty"], false);
+    assert_eq!(entries(), (1, 1));
+    // The upstream answer caches off: they are emptied.
+    let (status, value) = host.call("PUT", "dns", &json!({"lazy_cache": false}));
+    assert_eq!(status, 200, "{value}");
+    assert_eq!(entries(), (1, 0));
+    let (status, _) = host.call("PUT", "dns", &json!({"lazy_cache": true}));
+    assert_eq!(status, 200);
+    // The core mode: the global caches.
+    let (status, value) = host.call("PUT", "dns", &json!({"core_mode": "safe"}));
+    assert_eq!(status, 200, "{value}");
+    assert_eq!(entries(), (0, 0));
+    fill();
+    assert_eq!(entries(), (1, 1));
+    // One cache by hand.
+    let (status, value) = host.call("POST", "caches/cache_all/flush", &Value::Null);
+    assert_eq!(status, 200, "{value}");
+    assert_eq!(entries(), (0, 1));
+    fill();
+    assert_eq!(entries(), (1, 1));
+    // The domestic group's upstreams: its own cache is emptied. A new
+    // generation also starts every cache whose dependencies changed afresh
+    // (AtomDNS's reuse fingerprint): `cache_all` asks `domestic` here.
+    let other = json!({"tag": "up2", "enabled": true, "protocol": "udp", "addr": format!("127.0.0.1:{port}")});
+    let (status, value) = host.call("PUT", "upstreams/domestic", &json!({"upstreams": [other]}));
+    assert_eq!(status, 200, "{value}");
+    assert_eq!(entries(), (0, 0));
+    fill();
+    assert_eq!(entries(), (1, 1));
+    // The global cache off: emptied.
+    let (status, _) = host.call("PUT", "dns", &json!({"full_cache": false}));
+    assert_eq!(status, 200);
+    assert_eq!(entries(), (0, 1));
+    let (status, value) = host.call("POST", "caches/nothing/flush", &Value::Null);
+    assert_eq!(status, 404, "{value}");
+
+    // The counters of every upstream, the FakeIP group too (in-process
+    // queries are not observed: the counters stay at zero here).
+    let (status, stats) = host.call("GET", "stats/upstreams", &Value::Null);
+    assert_eq!(status, 200, "{stats}");
+    let groups = stats["groups"].as_array().unwrap();
+    let domestic = groups.iter().find(|group| group["tag"] == "domestic").expect("domestic");
+    assert_eq!(domestic["upstreams"][0]["tag"], "up2", "{stats}");
+    assert!(domestic["upstreams"][0]["queries"].is_u64(), "{stats}");
+    assert!(groups.iter().any(|group| group["tag"] == "nocnfake"), "{stats}");
+}
+
+/// `requery`: the schedule is read and changed through the atom API.
+#[test]
+fn requery_schedule_and_learning_are_open() {
+    let host = Host::new("requery");
+    let path = host.root.join("config.yaml");
+    std::fs::write(host.root.join("webinfo/requery.json"), "{}").unwrap();
+    let yaml = std::fs::read_to_string(&path).unwrap().replace(
+        "  - tag: entry\n",
+        "  - tag: refresh\n    type: requery\n    args: {file: webinfo/requery.json}\n  - tag: entry\n",
+    );
+    std::fs::write(&path, yaml).unwrap();
+    let host = Host {
+        root: host.root.clone(),
+        host: crate::HostAssembly::from_config_file_in(&path, None).expect("config"),
+    };
+    let (status, view) = host.call("GET", "requery", &Value::Null);
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["enabled"], false);
+    let (status, value) = host.call("PUT", "requery", &json!({"enabled": true}));
+    assert_eq!(status, 400, "no interval yet: {value}");
+    let (status, view) = host.call("PUT", "requery", &json!({"enabled": true, "interval_minutes": 60}));
+    assert_eq!(status, 200, "{view}");
+    assert_eq!((view["enabled"].as_bool(), view["interval_minutes"].as_i64()), (Some(true), Some(60)));
+    let stored: Value = serde_json::from_slice(&std::fs::read(host.root.join("webinfo/requery.json")).unwrap()).unwrap();
+    assert_eq!(stored["scheduler"]["interval_minutes"], 60);
+    assert!(stored["scheduler"]["start_datetime"].as_str().is_some_and(|text| !text.is_empty()));
+    // Two changes at once both land (they run one after the other).
+    let control = host.host.control();
+    let (first, second) = host.host.block_on(async {
+        let view = control.view();
+        let cancel = TransportCancellation::new();
+        let put = |body: &'static str| {
+            crate::atom_rules_api::handle(
+                Some(&control),
+                &view.config,
+                &view.cache,
+                "PUT",
+                "/api/v1/atom/requery",
+                body.as_bytes(),
+                &cancel,
+            )
+        };
+        let (a, b) = tokio::join!(put(r#"{"enabled": false}"#), put(r#"{"interval_minutes": 90}"#));
+        (a.unwrap().status, b.unwrap().status)
+    });
+    assert_eq!((first, second), (200, 200));
+    let (_, view) = host.call("GET", "requery", &Value::Null);
+    assert_eq!((view["enabled"].as_bool(), view["interval_minutes"].as_i64()), (Some(false), Some(90)), "{view}");
+    // Unknown paths under the new resources are 404, a known path with
+    // another method 405.
+    assert_eq!(host.call("GET", "requery/nope", &Value::Null).0, 404);
+    assert_eq!(host.call("GET", "stats/nope", &Value::Null).0, 404);
+    assert_eq!(host.call("GET", "requery/trigger", &Value::Null).0, 405);
+    assert_eq!(host.call("DELETE", "caches", &Value::Null).0, 405);
+    for bad in [json!({"interval_minutes": 0}), json!({"nope": true})] {
+        let (status, value) = host.call("PUT", "requery", &bad);
+        assert_eq!(status, 400, "{bad}: {value}");
+    }
+    // No route learner in this configuration: no categories.
+    let (status, view) = host.call("GET", "learning", &Value::Null);
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["categories"], json!([]));
+    let (status, _) = host.call("POST", "learning/nope/flush", &Value::Null);
+    assert_eq!(status, 404);
 }

@@ -61,3 +61,10 @@ atom 删除了在线更新和配置包，这份配置随程序一起发布，用
 - `sub_config/cache.yaml` 新增 `cache_atom`（规则缓存的模板，程序给每个上游组复制一份 `cache_atom_<组>`）。自定义上游组存在 `webinfo/settings.json` 的 `atom_groups`，由程序编译成 aliapi 插件。
 - 删除 DDNS：`ddnslist` 名单和 `rule/ddnslist.txt`、`unified_matcher1` 里的 mark 6、主流程和刷新流程的三支 DDNS 分支、
   `prefer_foreign_nocache`、`ddns_foreign` 开关。DDNS 写成规则：直连 + 上游组 + 不缓存，放在规则表最前面。
+
+DNS 页补全（atom 设计文档 4.5.1、4.8）：
+
+- 规则命中的域名不参与学习：直连规则（fast_mark 42）的 A/AAAA 改走新的 `sequence_rule_local_exit`（`forward_1.yaml`），
+  它和 `sequence_local_exit` 一样问国内 DNS、过 `cache_cn`，只是不执行 `$learn_nov6_empty`。主流程和刷新流程都改了。
+- `flags.yaml`：`full_cache` 显示为「未命中规则的缓存」，`lazy_cache` 显示为「上游应答缓存」；`lazy_cache` 也管程序生成的
+  `cache_atom_<组>`（关掉后规则的缓存开关等于关）。`block_empty` 开放到 `PUT /api/v1/atom/dns`。

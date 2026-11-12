@@ -28,7 +28,7 @@ plugins:
         - tag: sing-box
           addr: "udp://127.0.0.1:6666"
 
-#国内 DNS 要真实 IP 并结束（静态直连名单、兼容模式的记忆直连）
+#国内 DNS 要真实 IP 并结束（静态直连名单、兼容模式的记忆直连；规则表的直连规则用下面的 sequence_rule_local_exit）
   - tag: sequence_local_exit
     type: sequence
     args:
@@ -38,6 +38,18 @@ plugins:
       - exec: $domestic                             #定义: sub_config/forward_local.yaml
       - exec: cname_remover
       - exec: $learn_nov6_empty                     #AAAA 无全球单播 IPv6 且 rcode 为 0/3：记忆无V6（A 查询时什么都不做）；定义: sub_config/route_learner.yaml
+      - exec: exit
+
+#规则表的直连规则（没指定上游组、开着缓存）：国内 DNS 要真实 IP 并结束。和 sequence_local_exit 的区别是不记忆无V6：
+#规则命中的域名不参与学习（学习结果只给原判断用，规则命中的域名到不了原判断）
+  - tag: sequence_rule_local_exit
+    type: sequence
+    args:
+      - exec: flow_setter sequence=sequence_rule_local_exit upstream=domestic
+      - matches: flag lazy_cache                    #定义: sub_config/flags.yaml
+        exec: $cache_cn                             #定义: sub_config/cache.yaml
+      - exec: $domestic                             #定义: sub_config/forward_local.yaml
+      - exec: cname_remover
       - exec: exit
 
   - tag: sequence_local_exit_requery

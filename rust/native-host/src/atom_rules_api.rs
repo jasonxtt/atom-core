@@ -18,8 +18,9 @@
 //! the rewrite rules (`rewrite`) in [`crate::atom_dns_api`]. Every
 //! route is listed in [`ROUTES`], which `docs/api/openapi.yaml` must match.
 //!
-//! Every successful change empties all caches (design §4.5, v0: clear
-//! everything), so no cached answer outlives the rule that produced it.
+//! Every successful change empties the global caches (design §4.5.1), so no
+//! cached answer outlives the rule that produced it; the daily update of the
+//! rulesets empties none.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -138,6 +139,14 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("DELETE", "connections"),
     ("DELETE", "connections/{id}"),
     ("GET", "system"),
+    ("GET", "caches"),
+    ("POST", "caches/{tag}/flush"),
+    ("GET", "stats/upstreams"),
+    ("GET", "learning"),
+    ("POST", "learning/{key}/flush"),
+    ("GET", "requery"),
+    ("PUT", "requery"),
+    ("POST", "requery/trigger"),
     ("GET", "audit/status"),
     ("POST", "audit/start"),
     ("POST", "audit/stop"),
@@ -284,17 +293,28 @@ pub(crate) fn query_version(query: Option<&str>) -> Result<Option<u64>, Reply> {
     Ok(None)
 }
 
-/// Empties every cache after a change. A cached answer of the old rules
-/// (a FakeIP that sends no CLEAR) must not outlive them: when a flush cannot
-/// persist its empty dump, the cache is discarded instead (memory cleared,
-/// dump file removed). What still fails is returned, and the change is
-/// reported as applied but not fully flushed.
-pub(crate) async fn flush_caches(
+/// The global caches (`cache_all`, `cache_all_noleak`): ahead of the
+/// original judgement, behind the rule table, so only queries no rule
+/// matched reach them; they also hold FakeIP answers.
+pub(crate) fn is_global_cache(tag: &str) -> bool {
+    tag.starts_with("cache_all")
+}
+
+/// Empties the named caches `wanted` picks (atom design 4.5). A cached answer
+/// the change made wrong must not outlive it: when a flush cannot persist its
+/// empty dump, the cache is discarded instead (memory cleared, dump file
+/// removed). What still fails is returned, and the change is reported as
+/// applied but not fully flushed.
+pub(crate) async fn flush_caches_where(
     config: &CompiledConfig,
     cache: &CacheCatalog,
+    wanted: impl Fn(&str) -> bool,
 ) -> Result<(), String> {
     let mut failed = Vec::new();
     for item in &config.caches {
+        if item.kind != crate::config::CacheKind::Named || !wanted(&item.tag) {
+            continue;
+        }
         let Some(store) = cache.get(item.id) else {
             continue;
         };
@@ -302,7 +322,7 @@ pub(crate) async fn flush_caches(
             continue;
         };
         crate::diag::warn_line!(
-            "atom rules: flushing cache {} failed: {e}; discarding it instead",
+            "atom: flushing cache {} failed: {e}; discarding it instead",
             item.tag
         );
         if let Err(e) = store.discard().await {
@@ -314,6 +334,18 @@ pub(crate) async fn flush_caches(
     } else {
         Err(failed.join("; "))
     }
+}
+
+/// Empties the global caches after a change of the rules, the rulesets or
+/// the rewrite rules. Both sit ahead of the global cache, so a query they
+/// answer never reaches it; what it may still hold is an answer from before
+/// a rule was added or changed. The upstream answer caches hold what an
+/// upstream said, whatever rule sent the query there, and are kept.
+pub(crate) async fn flush_global_caches(
+    config: &CompiledConfig,
+    cache: &CacheCatalog,
+) -> Result<(), String> {
+    flush_caches_where(config, cache, is_global_cache).await
 }
 
 pub(crate) async fn handle(
@@ -389,7 +421,7 @@ pub(crate) async fn handle(
     };
     Some(match reply {
         Ok(reply) => {
-            let flushed = flush_caches(config, cache).await;
+            let flushed = flush_global_caches(config, cache).await;
             // Names clients already hold follow the new rules at once.
             crate::atom_ledger::resync(config, rules, segments[0]).await;
             match flushed {
@@ -561,11 +593,10 @@ async fn update_round(
             return;
         }
         let (reply, installed) = download(rules, &set, cancel).await;
+        // No cache is emptied: a stale global cache entry answered lazily
+        // runs the whole flow again in the background and corrects itself.
         if installed {
             let view = control.view();
-            if let Err(e) = flush_caches(&view.config, &view.cache).await {
-                crate::diag::error_line!("atom_rules: daily update of {}: flushing caches: {e}", set.id);
-            }
             crate::atom_ledger::resync(&view.config, rules, "rulesets").await;
         }
         if reply.status != 200 {

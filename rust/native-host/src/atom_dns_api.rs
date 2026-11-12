@@ -17,12 +17,12 @@
 //! version (the last write wins). Custom groups (`settings.atom_groups`)
 //! become forward plugins of the generation (`config::atom_routes`).
 //! `rewrite` replaces its rule file; every successful change of it empties
-//! all caches.
+//! the global caches.
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::atom_rules_api::{error, flush_caches, json as reply_json};
+use crate::atom_rules_api::{error, flush_caches_where, flush_global_caches, is_global_cache, json as reply_json};
 use crate::cache::CacheCatalog;
 use crate::config::CompiledConfig;
 use crate::config::flags::FlagValue;
@@ -41,6 +41,7 @@ const FLAGS: &[&str] = &[
     "prefer_v4",
     "full_cache",
     "lazy_cache",
+    "block_empty",
 ];
 
 /// Whether a request publishes settings itself: it takes no management
@@ -86,7 +87,22 @@ pub(crate) async fn handle(
             Err(reply) => reply,
         },
         ("PUT", ["rewrite"]) => put_rewrite(config, cache, body).await,
-        (_, ["dns" | "upstreams" | "rewrite", ..]) => error(405, "method not allowed"),
+        ("GET", ["caches"]) => reply_json(200, &caches_view(config, cache)),
+        ("POST", ["caches", tag, "flush"]) => flush_one_cache(config, cache, tag).await,
+        ("GET", ["stats", "upstreams"]) => match control {
+            Some(control) => reply_json(200, &upstream_stats(config, control)),
+            None => error(503, "runtime control is unavailable"),
+        },
+        ("GET", ["learning"]) => learning_view(config).await,
+        ("POST", ["learning", key, "flush"]) => flush_learning(config, key).await,
+        ("GET", ["requery"]) => requery_view(config).await,
+        ("PUT", ["requery"]) => put_requery(config, body).await,
+        ("POST", ["requery", "trigger"]) => trigger(config).await,
+        (_, ["dns" | "upstreams" | "rewrite", ..])
+        | (_, ["caches" | "learning" | "requery"])
+        | (_, ["caches" | "learning", _, "flush"])
+        | (_, ["stats", "upstreams"] | ["requery", "trigger"]) => error(405, "method not allowed"),
+        (_, ["caches" | "stats" | "learning" | "requery", ..]) => error(404, "not found"),
         _ => return None,
     })
 }
@@ -202,14 +218,21 @@ fn dns_view(config: &CompiledConfig) -> Result<Value, String> {
     Ok(Value::Object(map))
 }
 
-/// Builds the settings a `PUT dns` asks for; also returns the learning lists
-/// to empty (switched off) and whether a flag that wants a `requery` changed.
-fn dns_settings(
-    config: &CompiledConfig,
-    mut patch: Map<String, Value>,
-) -> Result<(Settings, Vec<String>, bool), String> {
+/// What a `PUT dns` changes: the settings to publish, the learning lists to
+/// empty (switched off), whether a flag that wants a `requery` changed, and
+/// the flags whose value changed (with the new value).
+struct DnsChange {
+    settings: Settings,
+    flush: Vec<String>,
+    requery: bool,
+    flags: Vec<(&'static str, FlagValue)>,
+}
+
+/// Builds the change a `PUT dns` asks for.
+fn dns_settings(config: &CompiledConfig, mut patch: Map<String, Value>) -> Result<DnsChange, String> {
     let mut settings = config.settings.clone();
     let mut requery = false;
+    let mut changed = Vec::new();
     // Before the first migration the values may come from the legacy switch
     // files; the first change stores all of them.
     let mut stored = settings
@@ -234,6 +257,9 @@ fn dns_settings(
             return Err(format!("`{value}` 不是 {key} 的有效值"));
         }
         requery |= flag.requery_on_change && value != flag.value;
+        if value != flag.value {
+            changed.push((*key, value.clone()));
+        }
         if value == flag.default {
             stored.remove(*key);
         } else {
@@ -332,7 +358,47 @@ fn dns_settings(
     if let Some(key) = patch.keys().next() {
         return Err(format!("invalid request body: unknown field `{key}`"));
     }
-    Ok((settings, flush, requery))
+    Ok(DnsChange {
+        settings,
+        flush,
+        requery,
+        flags: changed,
+    })
+}
+
+/// The caches the upstream answer cache switch (`lazy_cache`) covers: the
+/// domestic and foreign query caches and every rule cache of an upstream
+/// group (`cache_atom_<group>`). `cache_google_node` (the ECS query cache of
+/// the original judgement) is not under it.
+fn is_upstream_cache(tag: &str) -> bool {
+    matches!(tag, "cache_cn" | "cache_google") || tag.starts_with("cache_atom_")
+}
+
+/// The upstream group a cache holds the answers of, if any.
+fn cache_group(tag: &str) -> Option<&str> {
+    match tag {
+        "cache_cn" => Some("domestic"),
+        "cache_google" => Some("foreign"),
+        "cache_google_node" => Some("foreignecs"),
+        _ => tag.strip_prefix("cache_atom_"),
+    }
+}
+
+/// The caches a `PUT dns` empties: the global ones when the core mode
+/// changes (they hold the other mode's conclusions) or their switch goes
+/// off, the upstream answer caches when theirs goes off (to free the
+/// memory). The other switches act ahead of every cache (`block_qtypes`,
+/// `block_aaaa`, `block_empty` answer before the global cache;
+/// `prefer_v4` holds back an answer around the rest of the flow, so the
+/// caches keep the real one), and a cached answer carries its ECS in its key.
+fn caches_to_empty(flags: &[(&str, FlagValue)]) -> (bool, bool) {
+    let off = |key: &str| {
+        flags
+            .iter()
+            .any(|(flag, value)| *flag == key && *value == FlagValue::Bool(false))
+    };
+    let mode = flags.iter().any(|(flag, _)| *flag == "core_mode");
+    (mode || off("full_cache"), off("lazy_cache"))
 }
 
 async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
@@ -341,7 +407,12 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
         Err(reply) => return reply,
     };
     let current = control.view();
-    let (settings, flush, requery) = match dns_settings(&current.config, patch) {
+    let DnsChange {
+        settings,
+        flush,
+        requery,
+        flags,
+    } = match dns_settings(&current.config, patch) {
         Ok(built) => built,
         Err(reason) => return error(400, reason),
     };
@@ -365,10 +436,18 @@ async fn put_dns(control: &RuntimeControl, body: &[u8]) -> Reply {
             None => failed.push(format!("{tag}: no such plugin route")),
         }
     }
+    let (global, upstream) = caches_to_empty(&flags);
+    let emptied = flush_caches_where(&view.config, &view.cache, |tag| {
+        (global && is_global_cache(tag)) || (upstream && is_upstream_cache(tag))
+    })
+    .await;
+    if let Err(e) = emptied {
+        failed.push(format!("清空缓存: {e}"));
+    }
     if !failed.is_empty() {
         return error(
             500,
-            format!("设置已应用，但清空学习名单失败: {}", failed.join("; ")),
+            format!("设置已应用，但清空学习名单或缓存失败: {}", failed.join("; ")),
         );
     }
     if requery {
@@ -513,8 +592,22 @@ async fn put_upstreams(control: &RuntimeControl, tag: &str, body: &[u8]) -> Repl
     } else {
         settings.upstreams.insert(tag.to_owned(), entries);
     }
+    let changed = settings.upstreams.get(tag) != current.config.settings.upstreams.get(tag);
     drop(current);
-    publish(control, settings, None).await
+    let reply = publish(control, settings, None).await;
+    if reply.status != 200 || !changed {
+        return reply;
+    }
+    // The group's own caches hold what its old upstreams said; no other
+    // cache is emptied.
+    let view = control.view();
+    match flush_caches_where(&view.config, &view.cache, |cache| cache_group(cache) == Some(tag)).await {
+        Ok(()) => reply,
+        Err(e) => error(
+            500,
+            format!("上游已保存并生效，但清空这个组的缓存失败，旧的缓存应答可能还会被使用: {e}"),
+        ),
+    }
 }
 
 /// `POST upstreams`: a custom group (`u-` and eight hexadecimal digits).
@@ -614,10 +707,11 @@ fn rewrite_runtime(
         .ok_or_else(|| error(404, format!("配置里没有重写插件 `{REWRITE}`")))
 }
 
-/// The answer after a fixed list changed: caches are emptied, so no cached
-/// answer of the old list outlives it.
+/// The answer after the rewrite rules changed: the global caches are
+/// emptied (the rewrite rules answer ahead of them; an upstream answer cache
+/// holds no rewritten answer), so no cached answer of the old list outlives it.
 async fn after_change(config: &CompiledConfig, cache: &CacheCatalog, value: &Value) -> Reply {
-    match flush_caches(config, cache).await {
+    match flush_global_caches(config, cache).await {
         Ok(()) => reply_json(200, value),
         Err(e) => error(
             500,
@@ -638,6 +732,293 @@ async fn put_rewrite(config: &CompiledConfig, cache: &CacheCatalog, body: &[u8])
     match runtime.replace(&values).await {
         Ok(()) => after_change(config, cache, &json!({ "entries": runtime.lines() })).await,
         Err((status, reason)) => error(status, reason),
+    }
+}
+
+// ----- caches ---------------------------------------------------------------
+
+/// The switch a cache is under (`full_cache`, `lazy_cache`), if any.
+fn cache_switch(tag: &str) -> Option<&'static str> {
+    if is_global_cache(tag) {
+        Some("full_cache")
+    } else if is_upstream_cache(tag) {
+        Some("lazy_cache")
+    } else {
+        None
+    }
+}
+
+/// `GET caches`: every named cache with its counters (since the process
+/// started) and its sizes.
+fn caches_view(config: &CompiledConfig, cache: &CacheCatalog) -> Value {
+    let caches: Vec<Value> = config
+        .caches
+        .iter()
+        .filter(|item| item.kind == crate::config::CacheKind::Named)
+        .filter_map(|item| {
+            let [queries, hits, lazy_hits, entries] = cache.get(item.id)?.metrics().ok()?;
+            Some(json!({
+                "tag": item.tag,
+                "label": item.label,
+                "switch": cache_switch(&item.tag),
+                "group": cache_group(&item.tag),
+                "entries": entries,
+                "queries": queries,
+                "hits": hits,
+                "lazy_hits": lazy_hits,
+                "capacity": item.capacity,
+                "lazy_cache_ttl": item.lazy_cache_ttl_secs,
+                "dump_interval": item.dump_interval_secs,
+            }))
+        })
+        .collect();
+    json!({ "caches": caches })
+}
+
+/// `POST caches/{tag}/flush`: empties one named cache.
+async fn flush_one_cache(config: &CompiledConfig, cache: &CacheCatalog, tag: &str) -> Reply {
+    let known = config
+        .caches
+        .iter()
+        .any(|item| item.kind == crate::config::CacheKind::Named && item.tag == tag);
+    if !known {
+        return error(404, format!("缓存 `{tag}` 不存在"));
+    }
+    match flush_caches_where(config, cache, |name| name == tag).await {
+        Ok(()) => reply_json(200, &caches_view(config, cache)),
+        Err(e) => error(500, format!("清空缓存失败: {e}")),
+    }
+}
+
+// ----- upstream statistics --------------------------------------------------
+
+/// `GET stats/upstreams`: the counters of every upstream (since the process
+/// started), by group in the configuration's order; the FakeIP group too.
+fn upstream_stats(config: &CompiledConfig, control: &RuntimeControl) -> Value {
+    let snapshot = control.observer().metrics_snapshot();
+    let groups: Vec<Value> = config
+        .forward_definitions
+        .iter()
+        .map(|definition| {
+            let upstreams: Vec<Value> = definition
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    let tag = entry.tag.as_deref()?;
+                    let counters = snapshot
+                        .forward_attempts_by_upstream
+                        .get(&entry.identity)
+                        .cloned()
+                        .unwrap_or_default();
+                    Some(json!({
+                        "tag": tag,
+                        "addr": entry.metrics_addr,
+                        "queries": counters.attempts_total,
+                        "errors": counters.failures_total.saturating_add(counters.timeouts_total),
+                        "winners": counters.winners_total,
+                        "latency_count": counters.latency_count,
+                        "latency_sum_ms": counters.latency_sum_ms,
+                    }))
+                })
+                .collect();
+            json!({ "tag": definition.tag, "upstreams": upstreams })
+        })
+        .collect();
+    json!({ "groups": groups })
+}
+
+// ----- learning -------------------------------------------------------------
+
+/// The learning categories `learning` shows, by their key in `dns.learning`.
+const CATEGORIES: [(&str, &str); 4] = [
+    ("remember_direct", REMEMBER_DIRECT),
+    ("remember_proxy", REMEMBER_PROXY),
+    ("no_v4", NO_V4),
+    ("no_v6", NO_V6),
+];
+
+fn learner_of<'a>(
+    config: &'a CompiledConfig,
+    tag: &str,
+) -> Option<&'a crate::route_learner::RouteLearnerConfig> {
+    config
+        .local
+        .learners
+        .iter()
+        .find(|learner| learner.runtime.owns(tag))
+}
+
+/// `GET learning`: the switches and, per category, how many names it holds.
+async fn learning_view(config: &CompiledConfig) -> Reply {
+    let switches = Learning::of(config);
+    let mut categories = Vec::new();
+    for ((key, tag), (_, enabled)) in CATEGORIES.iter().zip(switches.switches()) {
+        let Some(learner) = learner_of(config, tag) else {
+            continue;
+        };
+        let reply = learner.runtime.handle(&learner.tag, "GET", "status", "").await;
+        let status: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+        let Some(category) = status["categories"]
+            .as_array()
+            .and_then(|all| all.iter().find(|item| item["tag"] == *tag))
+        else {
+            continue;
+        };
+        categories.push(json!({
+            "key": key,
+            "label": category["label"],
+            "enabled": enabled,
+            "entries": category["live_entries"],
+            "max_entries": category["max_entries"],
+            "ttl_seconds": category["ttl_seconds"],
+        }));
+    }
+    reply_json(
+        200,
+        &json!({ "enabled": switches.enabled, "categories": categories }),
+    )
+}
+
+/// `POST learning/{key}/flush`: empties one learned list.
+async fn flush_learning(config: &CompiledConfig, key: &str) -> Reply {
+    let Some((_, tag)) = CATEGORIES.iter().find(|(name, _)| *name == key) else {
+        return error(404, format!("学习类别 `{key}` 不存在"));
+    };
+    let Some(learner) = learner_of(config, tag) else {
+        return error(404, format!("配置里没有学习类别 `{tag}`"));
+    };
+    let reply = learner.runtime.handle(tag, "GET", "flush", "").await;
+    if reply.status != 200 {
+        return error(
+            reply.status,
+            format!("清空失败: {}", String::from_utf8_lossy(&reply.body).trim()),
+        );
+    }
+    learning_view(config).await
+}
+
+// ----- requery --------------------------------------------------------------
+
+fn requery_of(config: &CompiledConfig) -> Result<&std::rc::Rc<crate::requery::Requery>, Reply> {
+    config
+        .local
+        .requeries
+        .first()
+        .map(|requery| &requery.runtime)
+        .ok_or_else(|| error(404, "配置里没有 requery 插件"))
+}
+
+/// The requery plugin's whole configuration (`requeryconfig.json`).
+async fn requery_config(requery: &std::rc::Rc<crate::requery::Requery>) -> Result<Value, Reply> {
+    let reply = requery.handle("GET", "", &[]).await;
+    if reply.status != 200 {
+        return Err(error(500, "读取刷新设置失败"));
+    }
+    serde_json::from_slice(&reply.body).map_err(|e| error(500, format!("刷新设置无效: {e}")))
+}
+
+/// `GET requery`: the schedule and the state of the latest run.
+async fn requery_view(config: &CompiledConfig) -> Reply {
+    let requery = match requery_of(config) {
+        Ok(requery) => requery,
+        Err(reply) => return reply,
+    };
+    match requery_config(requery).await {
+        Ok(value) => reply_json(
+            200,
+            &json!({
+                "enabled": value["scheduler"]["enabled"].as_bool().unwrap_or(false),
+                "interval_minutes": value["scheduler"]["interval_minutes"].as_i64().unwrap_or(0),
+                "status": value["status"],
+            }),
+        ),
+        Err(reply) => reply,
+    }
+}
+
+/// Serializes `PUT requery` (read, merge, store).
+static REQUERY_WRITES: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+/// The longest interval `PUT requery` takes: a year.
+const MAX_INTERVAL_MINUTES: i64 = 525_600;
+
+/// `PUT requery {enabled?, interval_minutes?}`: the schedule. Turning it on
+/// without a start time starts the count now.
+async fn put_requery(config: &CompiledConfig, body: &[u8]) -> Reply {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Payload {
+        enabled: Option<bool>,
+        interval_minutes: Option<i64>,
+    }
+    let payload: Payload = match serde_json::from_slice(body) {
+        Ok(payload) => payload,
+        Err(e) => return error(400, format!("invalid request body: {e}")),
+    };
+    if let Some(minutes) = payload.interval_minutes {
+        if !(1..=MAX_INTERVAL_MINUTES).contains(&minutes) {
+            return error(400, format!("interval_minutes 是 1 到 {MAX_INTERVAL_MINUTES}"));
+        }
+    }
+    let requery = match requery_of(config) {
+        Ok(requery) => requery,
+        Err(reply) => return reply,
+    };
+    // One change at a time, from reading the schedule to storing it: the
+    // plugin changes its configuration before writing it and puts the old
+    // one back when the write fails, so an interleaved change could read a
+    // value that is then undone, or be undone itself.
+    let _one = REQUERY_WRITES
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let current = match requery_config(requery).await {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    let scheduler = &current["scheduler"];
+    let enabled = payload
+        .enabled
+        .unwrap_or_else(|| scheduler["enabled"].as_bool().unwrap_or(false));
+    let interval = payload
+        .interval_minutes
+        .unwrap_or_else(|| scheduler["interval_minutes"].as_i64().unwrap_or(0));
+    if enabled && interval <= 0 {
+        return error(400, "开启定期刷新要先设好间隔");
+    }
+    let mut start = scheduler["start_datetime"].as_str().unwrap_or("").to_owned();
+    if start.is_empty() {
+        start = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+    }
+    let update = json!({ "enabled": enabled, "start_datetime": start, "interval_minutes": interval });
+    let reply = requery
+        .handle("POST", "scheduler/config", &serde_json::to_vec(&update).unwrap_or_default())
+        .await;
+    if reply.status != 200 {
+        return error(reply.status, "保存刷新设置失败");
+    }
+    requery_view(config).await
+}
+
+/// `POST requery/trigger`: starts one run now.
+async fn trigger(config: &CompiledConfig) -> Reply {
+    let requery = match requery_of(config) {
+        Ok(requery) => requery,
+        Err(reply) => return reply,
+    };
+    let reply = requery.handle("POST", "trigger", &[]).await;
+    match reply.status {
+        200 => requery_view(config).await,
+        409 => error(409, "已经有一次刷新在运行"),
+        status => {
+            let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+            error(
+                status,
+                format!("启动刷新失败: {}", value["message"].as_str().unwrap_or("")),
+            )
+        }
     }
 }
 

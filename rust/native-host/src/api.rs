@@ -1284,6 +1284,10 @@ struct AuditLogResponse {
     upstream_diagnostics: Option<AuditUpstreamDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     matched_rule_source: Option<String>,
+    /// atom fork: whether a cache gave the final answer (`hit`), was asked
+    /// and missed (`miss`), was not on the query's path (`not_applicable`),
+    /// or the query ended before that was known (`undetermined`).
+    cache_status: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1586,6 +1590,12 @@ fn project_log(record: &AuditRecord) -> AuditLogResponse {
             .as_ref()
             .map(project_upstream_diagnostics),
         matched_rule_source: record.matched_rule_source.clone(),
+        cache_status: match record.cache_status {
+            crate::observer::CacheStatus::Hit => "hit",
+            crate::observer::CacheStatus::Miss => "miss",
+            crate::observer::CacheStatus::NotApplicable => "not_applicable",
+            crate::observer::CacheStatus::Undetermined => "undetermined",
+        },
     }
 }
 

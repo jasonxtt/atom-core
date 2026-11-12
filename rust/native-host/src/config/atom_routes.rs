@@ -31,6 +31,8 @@ pub(crate) const CACHE: &str = "cache_atom";
 /// `BASE + 2i + 1` (uncached).
 const MARK_BASE: u32 = 70_000;
 const MAX_NAME_CHARS: usize = 32;
+/// The feature flag of the upstream answer caches (`flags.yaml`).
+const LAZY_CACHE_FLAG: &str = "lazy_cache";
 
 fn error(path: &str, reason: impl Into<String>) -> ConfigError {
     ConfigError::new(format!("settings.json: {path}"), reason)
@@ -203,6 +205,11 @@ pub(super) fn synthesize(
         .iter()
         .position(|p| p.tag == CACHE && p.kind == "cache")
         .map(|at| definitions.remove(at));
+    // The upstream answer cache switch (`lazy_cache`) covers the rule caches
+    // too: a rule's `cache` is its own switch and that one.
+    let switched = definitions
+        .iter()
+        .any(|p| p.kind == "feature_flag" && p.tag == LAZY_CACHE_FLAG);
     let mut steps = Vec::new();
     let mut routes = Vec::new();
     let mut caches = Vec::new();
@@ -235,8 +242,14 @@ pub(super) fn synthesize(
         if let Some(template) = &template {
             let cache_tag = format!("{CACHE}_{tag}");
             caches.push(cache_for(template, &cache_tag, tag, group_ecs.is_some()));
+            let mark = string(&format!("mark {cached}"));
+            let matches = if switched {
+                RawValue::Sequence(vec![mark, string(&format!("flag {LAZY_CACHE_FLAG}"))])
+            } else {
+                mark
+            };
             steps.push(map(vec![
-                ("matches", string(&format!("mark {cached}"))),
+                ("matches", matches),
                 ("exec", string(&format!("${cache_tag}"))),
             ]));
         }
@@ -330,5 +343,28 @@ mod tests {
         );
         assert_eq!(direct.matches("ecs $client_ecs").count(), 1, "{direct}");
         assert!(!direct.contains("nocnfake"));
+    }
+
+    /// With the `lazy_cache` flag declared, a rule cache is looked up only
+    /// while the flag is on.
+    #[test]
+    fn the_upstream_answer_cache_switch_covers_the_rule_caches() {
+        let empty = || RawValue::Map(RawMap { entries: Vec::new() });
+        let mut definitions = vec![
+            plugin("cache_atom", "cache", empty()),
+            plugin("lazy_cache", "feature_flag", empty()),
+            plugin("domestic", "aliapi", empty()),
+            plugin(
+                "atom_rules",
+                "atom_rules",
+                map(vec![("marks", map(vec![("route", RawValue::Number(RawNumber::Unsigned(43)))]))]),
+            ),
+        ];
+        synthesize(&mut definitions, &Settings::default()).unwrap();
+        let direct = text(&definitions.iter().find(|p| p.tag == SEQUENCE).unwrap().args);
+        assert!(
+            direct.contains("matches=mark 70000 | flag lazy_cache, exec=$cache_atom_domestic"),
+            "{direct}"
+        );
     }
 }

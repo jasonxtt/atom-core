@@ -1085,7 +1085,11 @@ fn the_openapi_document_matches_the_routes() {
     assert_eq!(documented, routes, "openapi.yaml and ROUTES differ");
 
     let api = Api::new("openapi");
-    let concrete = |path: &str| path.replace("{id}", "x-none").replace("{tag}", "domestic");
+    let concrete = |path: &str| {
+        path.replace("{id}", "x-none")
+            .replace("{tag}", "domestic")
+            .replace("{key}", "no_v6")
+    };
     for (method, path) in &routes {
         if path.starts_with("audit/") {
             // AtomDNS's audit API: `api.rs` serves it (tested there).

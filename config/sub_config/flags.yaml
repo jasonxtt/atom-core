@@ -2,7 +2,7 @@ plugins:
 #功能开关（feature_flag），取代原 switch1–switch17（配置 schema 3）
 #流程里用 `flag 名字`（开关）或 `flag 名字=选项`（多选一）引用，关闭用 "!flag 名字"
 #当前值存 webinfo/settings.json 的 flags 段，只存与这里 default 不同的值；
-#atom：其中 core_mode、block_qtypes、block_aaaa、prefer_v4、full_cache、lazy_cache 用 GET/PUT /api/v1/atom/dns 修改；
+#atom：其中 core_mode、block_qtypes、block_aaaa、prefer_v4、full_cache、lazy_cache、block_empty 用 GET/PUT /api/v1/atom/dns 修改；
 #其余不开放（AtomDNS 原有的 /api/v1/flags 在 atom 第 6 步删除）
 #requery_on_change: true（可选，默认 false）：该开关的值实际改变并发布后，若配置里有 requery 插件，程序随即启动一次 requery
 #（requery 按自己的 flush_rules 清缓存，再预热）；值没变、更新试运行（503）、没有 requery 插件时都不触发
@@ -69,18 +69,19 @@ plugins:
   - tag: full_cache
     type: feature_flag
     args:
-      label: 全局缓存
-      description: 启用直面客户端的全局缓存（兼容模式用「全局缓存·兼容模式」，安全模式用「全局缓存·安全模式」），会缓存 FakeIP。
+      label: 未命中规则的缓存
+      description: 没命中规则的查询先查的全局缓存（兼容模式用「全局缓存·兼容模式」，安全模式用「全局缓存·安全模式」），会缓存 FakeIP。
       section: cache
       kind: bool
       default: true
 
 #原 switch4：强烈建议打开；cache_google_node（表外 ECS 查询缓存）不受此开关控制
+#atom：也管程序给每个上游组生成的规则缓存 cache_atom_<组>（规则的缓存开关 = 规则自己的开关且本开关）
   - tag: lazy_cache
     type: feature_flag
     args:
-      label: 分组缓存
-      description: 启用分组缓存：国内查询缓存、国外查询缓存。国外查询缓存·带 ECS 不受它控制。
+      label: 上游应答缓存
+      description: 缓存上游的原始应答：国内查询缓存、国外查询缓存、各上游组的规则缓存。国外查询缓存·带 ECS 不受它控制。
       section: cache
       kind: bool
       default: true

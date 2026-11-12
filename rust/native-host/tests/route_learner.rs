@@ -841,6 +841,7 @@ fn show_save_flush_entries_and_status() {
         );
         assert_eq!(tree.text("gen/route_learner.json"), before);
 
+        assert_eq!(direct["live_entries"], 3);
         // Expired names are neither listed nor counted.
         learner.advance_clock(101);
         assert_eq!(
@@ -849,6 +850,18 @@ fn show_save_flush_entries_and_status() {
                 .body,
             ""
         );
+        let status = json(
+            &api(&host, "GET", "/plugins/route_learner/status", "")
+                .await
+                .body,
+        );
+        let direct = status["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["tag"] == "my_realiplist")
+            .unwrap();
+        assert_eq!(direct["live_entries"], 0, "expired rows wait for the sweep: {direct}");
         // `flush` clears one category only and writes at once.
         a(ports.dns, "direct-d.test").await;
         a(ports.dns, "proxy-d.test").await;

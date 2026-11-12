@@ -34,9 +34,15 @@ info:
       back on the old configuration); saving atom's state failing is 500. While
       one application runs, other writes are refused with 409 (they are not
       queued).
-    * Every successful change of rules, rulesets and `rewrite` empties
-      every DNS cache; rule and ruleset changes also bring sing-box's bindings
-      of names clients already hold up to date before the answer. A change that
+    * Caches (atom design 4.5.1). Every successful change of rules, rulesets
+      and `rewrite` empties the global caches (`cache_all*`, which only
+      queries no rule matched reach); rule and ruleset changes also bring
+      sing-box's bindings of names clients already hold up to date before the
+      answer. A FakeIP range change and a `core_mode` change empty the global
+      caches too; an upstream group's new list empties that group's caches;
+      a cache switch turned off empties the caches it covers. Nodes, groups,
+      Final, the mixed port, the TTL caps, the ECS and the other `dns`
+      switches empty none, nor does the daily ruleset update. A change that
       was saved but whose caches could not be emptied answers 500.
     * Paths outside a resource's methods: a known resource with a method it
       does not serve answers 405; an unknown path under `/api/v1/atom/` answers
@@ -71,6 +77,8 @@ tags:
     description: Status of both processes and of the latest application.
   - name: runtime
     description: What sing-box runs right now (current members, delays, connections) and the machine's load.
+  - name: state
+    description: What the DNS side holds right now (caches, upstream counters, learned names, re-query runs).
   - name: audit
     description: AtomDNS's query audit (DNS logs and statistics), also served at `/api/v2/audit/` and `/api/v1/audit/` in their original form.
 
@@ -1156,7 +1164,7 @@ paths:
         Stored in `webinfo/settings.json` and published as a new generation of
         AtomDNS's configuration (no version: the last write wins). Turning a
         learning switch off empties that learned list. A `core_mode` change
-        starts one re-query run (`requery`).
+        empties the global caches and starts one re-query run (`requery`).
       operationId: putDns
       requestBody:
         required: true
@@ -1684,6 +1692,202 @@ paths:
           $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
+  /caches:
+    get:
+      tags: [state]
+      summary: Every named cache, its counters and sizes
+      operationId: getCaches
+      responses:
+        "200":
+          description: The caches, in the configuration's order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Caches"
+        "404":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /caches/{tag}/flush:
+    parameters:
+      - name: tag
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [state]
+      summary: Empty one cache
+      operationId: flushCache
+      responses:
+        "200":
+          description: The caches after it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Caches"
+        "404":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /stats/upstreams:
+    get:
+      tags: [state]
+      summary: Counters of every upstream since the process started
+      description: |
+        By group in the configuration's order (the FakeIP group `nocnfake`
+        too); only upstreams with a tag have counters. `errors` counts
+        failures and timeouts; `winners` the answers that became the group's.
+      operationId: getUpstreamStats
+      responses:
+        "200":
+          description: The counters.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups]
+                properties:
+                  groups:
+                    type: array
+                    items:
+                      type: object
+                      required: [tag, upstreams]
+                      properties:
+                        tag:
+                          type: string
+                        upstreams:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/UpstreamStats"
+        "404":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /learning:
+    get:
+      tags: [state]
+      summary: The learned lists
+      description: The switches are changed with `PUT dns` (`learning`).
+      operationId: getLearning
+      responses:
+        "200":
+          description: The master switch and one item per category.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningState"
+        "404":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /learning/{key}/flush:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [remember_direct, remember_proxy, no_v4, no_v6]
+    post:
+      tags: [state]
+      summary: Empty one learned list
+      operationId: flushLearning
+      responses:
+        "200":
+          description: The learned lists after it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningState"
+        "404":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /requery:
+    get:
+      tags: [state]
+      summary: The periodic re-query of learned and ranked names
+      operationId: getRequery
+      responses:
+        "200":
+          description: The schedule and the state of the latest run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Requery"
+        "404":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [state]
+      summary: Change the schedule
+      description: Turning it on without a start time counts the interval from now.
+      operationId: putRequery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                enabled:
+                  type: boolean
+                interval_minutes:
+                  type: integer
+                  minimum: 1
+                  maximum: 525600
+      responses:
+        "200":
+          description: The schedule after the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Requery"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /requery/trigger:
+    post:
+      tags: [state]
+      summary: Start one run now
+      operationId: triggerRequery
+      responses:
+        "200":
+          description: The run started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Requery"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: A run is going on.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
   /audit/status:
     get:
       tags: [audit]
@@ -2117,6 +2321,122 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
+    Cache:
+      type: object
+      required: [tag, label, switch, group, entries, queries, hits, lazy_hits, capacity, lazy_cache_ttl, dump_interval]
+      properties:
+        tag:
+          type: string
+        label:
+          type: string
+        switch:
+          type: string
+          nullable: true
+          enum: [full_cache, lazy_cache, null]
+          description: The `dns` switch the cache is under (none for `cache_google_node`).
+        group:
+          type: string
+          nullable: true
+          description: The upstream group whose answers it holds (none for the global caches).
+        entries:
+          type: integer
+          description: Live entries.
+        queries:
+          type: integer
+          description: Lookups since this cache started (a new configuration generation starts every cache afresh, counters included).
+        hits:
+          type: integer
+        lazy_hits:
+          type: integer
+          description: Hits answered with an expired entry (refreshed in the background).
+        capacity:
+          type: integer
+        lazy_cache_ttl:
+          type: integer
+          description: Seconds an expired entry is still served (0 none).
+        dump_interval:
+          type: integer
+          description: Seconds between writes of the cache file.
+    Caches:
+      type: object
+      required: [caches]
+      properties:
+        caches:
+          type: array
+          items:
+            $ref: "#/components/schemas/Cache"
+    UpstreamStats:
+      type: object
+      required: [tag, addr, queries, errors, winners, latency_count, latency_sum_ms]
+      properties:
+        tag:
+          type: string
+        addr:
+          type: string
+          nullable: true
+        queries:
+          type: integer
+        errors:
+          type: integer
+        winners:
+          type: integer
+        latency_count:
+          type: integer
+        latency_sum_ms:
+          type: integer
+    LearningState:
+      type: object
+      required: [enabled, categories]
+      properties:
+        enabled:
+          type: boolean
+        categories:
+          type: array
+          items:
+            type: object
+            required: [key, label, enabled, entries, max_entries, ttl_seconds]
+            properties:
+              key:
+                type: string
+                enum: [remember_direct, remember_proxy, no_v4, no_v6]
+              label:
+                type: string
+              enabled:
+                type: boolean
+              entries:
+                type: integer
+              max_entries:
+                type: integer
+              ttl_seconds:
+                type: integer
+    Requery:
+      type: object
+      required: [enabled, interval_minutes, status]
+      properties:
+        enabled:
+          type: boolean
+        interval_minutes:
+          type: integer
+        status:
+          type: object
+          additionalProperties: true
+          properties:
+            task_state:
+              type: string
+              description: "`idle`, `running`, `failed`, `cancelled`."
+            last_run_start_time:
+              type: string
+            last_run_end_time:
+              type: string
+            last_run_domain_count:
+              type: integer
+            progress:
+              type: object
+              properties:
+                processed:
+                  type: integer
+                total:
+                  type: integer
     Closed:
       type: object
       required: [closed]
@@ -2253,6 +2573,10 @@ components:
           additionalProperties: true
         matched_rule_source:
           type: string
+        cache_status:
+          type: string
+          enum: [hit, miss, not_applicable, undetermined]
+          description: Whether a cache gave the answer, was asked and missed, was not on the query's path, or the query ended before that was known.
     AuditLogPage:
       type: object
       required: [pagination, logs]
@@ -2773,10 +3097,13 @@ components:
           description: No AAAA answer for a name that has A records.
         full_cache:
           type: boolean
-          description: The global cache facing the clients.
+          description: The global caches, which only queries no rule matched reach (they hold FakeIPs). Off empties them.
         lazy_cache:
           type: boolean
-          description: The per-upstream-group caches.
+          description: The upstream answer caches (domestic, foreign, every group's rule cache). Off empties them.
+        block_empty:
+          type: boolean
+          description: An A query for a name learned to have no IPv4 (an AAAA one, no IPv6) is answered empty.
         ecs:
           type: string
           description: The ECS address of foreign queries ("" restores the default).
@@ -2786,7 +3113,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/DnsPatch"
         - type: object
-          required: [core_mode, block_qtypes, block_aaaa, prefer_v4, full_cache, lazy_cache, ecs, learning]
+          required: [core_mode, block_qtypes, block_aaaa, prefer_v4, full_cache, lazy_cache, block_empty, ecs, learning]
     Upstream:
       type: object
       required: [tag, protocol, addr]

@@ -1039,6 +1039,12 @@ impl RuntimeControl {
         self.0.current.borrow().clone()
     }
 
+    /// The query observer every generation reports to (atom: the upstream
+    /// statistics of `GET /api/v1/atom/stats/upstreams`).
+    pub(crate) fn observer(&self) -> &Arc<QueryObserver> {
+        &self.0.observer
+    }
+
     pub(crate) fn capture(
         &self,
         tag: &str,

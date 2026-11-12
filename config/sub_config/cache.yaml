@@ -52,7 +52,7 @@ plugins:
       dump_interval: 21600
 
 #规则缓存模板：直连规则指定了上游组时用（程序生成的 atom_direct 序列）。程序给每个上游组复制一份 cache_atom_<组>（转储文件 cache_atom_<组>.dump），
-#这一份本身不编译；规则关了缓存时不经过它们
+#这一份本身不编译；规则关了缓存、或「上游应答缓存」（lazy_cache）关掉时不经过它们
   - tag: cache_atom
     type: cache
     args:
@@ -62,7 +62,7 @@ plugins:
       dump_file: cache/cache_atom.dump
       dump_interval: 21600
 
-#国外查询缓存·带 ECS：列表外域名首次查询（安全模式）和安全模式记忆直连（sequence_google_node），不受「分组缓存」开关控制
+#国外查询缓存·带 ECS：列表外域名首次查询（安全模式）和安全模式记忆直连（sequence_google_node），不受「上游应答缓存」开关控制
   - tag: cache_google_node
     type: cache
     args:

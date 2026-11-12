@@ -113,7 +113,7 @@ plugins:
       - matches:                                #规则：直连，A/AAAA 问国内 DNS 要真实 IP
         - fast_mark 42
         - qtype 1 28
-        exec: [$sequence_local_exit, exit]      #定义: sub_config/forward_1.yaml
+        exec: [$sequence_rule_local_exit, exit] #不记忆无V6：规则命中的域名不参与学习；定义: sub_config/forward_1.yaml
       - matches: fast_mark 42                   #规则：直连，其他类型问国内 DNS
         exec: [$sequence_local, exit]           #定义: sub_config/forward_1.yaml
       - matches:                                #记忆无V4 的域名，A 查询直接返回空（排在规则表后面：规则命中代理的域名不受学习结果影响）
@@ -196,7 +196,7 @@ plugins:
       - matches:                                #规则：直连，A/AAAA 问国内 DNS 要真实 IP
         - fast_mark 42
         - qtype 1 28
-        exec: [$sequence_local_exit, exit]      #定义: sub_config/forward_1.yaml
+        exec: [$sequence_rule_local_exit, exit] #不记忆无V6：规则命中的域名不参与学习；定义: sub_config/forward_1.yaml
       - matches: fast_mark 42                   #规则：直连，其他类型问国内 DNS
         exec: [$sequence_local, exit]           #定义: sub_config/forward_1.yaml
       - matches:                                #全局缓存：兼容模式用 cache_all，安全模式用 cache_all_noleak（分开存，切换模式时互不影响）
