@@ -1076,6 +1076,10 @@ pub struct ForwardCatalog {
     /// Invocations of the FakeIP upstream group (atom: EDNS0 65001 CLEAR).
     fakeip: BTreeSet<atomdns_sequence_core::ExecutableId>,
     rotation: RefCell<u64>,
+    /// Set while the dry run starts an exchange: the dry run's own copy of
+    /// the rotation, advanced instead of the shared one
+    /// ([`Self::with_rotation`]).
+    rotation_held: std::cell::Cell<Option<u64>>,
 }
 
 impl ForwardCatalog {
@@ -1120,6 +1124,7 @@ impl ForwardCatalog {
             concurrent,
             fakeip,
             rotation: RefCell::new(seed),
+            rotation_held: std::cell::Cell::new(None),
         })
     }
 
@@ -1215,6 +1220,7 @@ impl ForwardCatalog {
             concurrent,
             fakeip,
             rotation: RefCell::new(seed),
+            rotation_held: std::cell::Cell::new(None),
         })
     }
 
@@ -1238,11 +1244,18 @@ impl ForwardCatalog {
         if len == 0 {
             return 0;
         }
+        let next = |value: u64| {
+            value
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407)
+        };
+        if let Some(value) = self.rotation_held.get() {
+            self.rotation_held.set(Some(next(value)));
+            return (value as usize) % len;
+        }
         let mut state = self.rotation.borrow_mut();
         let value = *state;
-        *state = value
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
+        *state = next(value);
         (value as usize) % len
     }
 
@@ -1388,6 +1401,35 @@ impl ExchangeExecutor for ForwardCatalog {
 }
 
 impl ForwardCatalog {
+    /// The shared rotation's current value: where a dry run's own copy
+    /// starts ([`Self::with_rotation`]).
+    pub(crate) fn rotation_now(&self) -> u64 {
+        *self.rotation.borrow()
+    }
+
+    /// Runs `work` (which starts an exchange: the upstreams are picked
+    /// synchronously, when the future is made) on the dry run's own copy of
+    /// the rotation, `rotation`, which advances as the shared one would; the
+    /// shared one, which picks for the real queries, is left as it was.
+    pub(crate) fn with_rotation<T>(
+        &self,
+        rotation: &std::cell::Cell<u64>,
+        work: impl FnOnce() -> T,
+    ) -> T {
+        let held = self.rotation_held.replace(Some(rotation.get()));
+        let value = work();
+        if let Some(advanced) = self.rotation_held.replace(held) {
+            rotation.set(advanced);
+        }
+        value
+    }
+
+    /// Whether `executable` is an invocation of the FakeIP upstream group
+    /// (sing-box; the dry run never asks it).
+    pub(crate) fn is_fakeip(&self, executable: atomdns_sequence_core::ExecutableId) -> bool {
+        self.fakeip.contains(&executable)
+    }
+
     /// The question name of an A query for the FakeIP upstream (`None` for
     /// any other query or upstream). sing-box's FakeIP range is IPv4 only: it
     /// answers AAAA with an empty response before it reads the directive, so

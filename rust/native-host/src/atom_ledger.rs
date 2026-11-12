@@ -50,7 +50,7 @@ pub(crate) enum Binding {
 }
 
 impl Binding {
-    fn tag(&self) -> Option<&str> {
+    pub(crate) fn tag(&self) -> Option<&str> {
         match self {
             Self::Set(tag) => Some(tag),
             Self::Clear => None,
@@ -182,6 +182,24 @@ pub(crate) fn record(name: &[u8], outbound: Option<&str>) {
         None => Binding::Clear,
     };
     ledger().record(name, binding);
+}
+
+/// The directive recorded for `name` (presentation form, compared in ASCII
+/// lower case: the ledger keeps the case a client asked with), read only:
+/// the entry's place in the LRU order stays as it is (the dry run).
+pub(crate) fn binding_of(name: &str) -> Option<Binding> {
+    let name = name.trim_end_matches('.');
+    let ledger = ledger();
+    ledger
+        .order
+        .values()
+        .rev()
+        .find(|wire| {
+            crate::matchers::wire_name_to_ascii_domain(wire)
+                .is_some_and(|recorded| recorded.eq_ignore_ascii_case(name))
+        })
+        .and_then(|wire| ledger.entries.get(wire))
+        .map(|(binding, _)| binding.clone())
 }
 
 /// Forgets every name (the FakeIP range changed).

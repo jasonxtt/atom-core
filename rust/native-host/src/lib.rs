@@ -5,6 +5,7 @@ mod api;
 mod assembly;
 mod atom_catalog;
 mod atom_dns_api;
+mod atom_dryrun;
 mod atom_ledger;
 mod atom_links;
 mod atom_proxy;

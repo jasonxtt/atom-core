@@ -540,6 +540,63 @@ async fn runtime(rules: &AtomRules) -> Answer {
     Ok(reply_json(200, &value))
 }
 
+/// What sing-box uses now for the outbound `start` (a group ID or
+/// [`FINAL`]): `start` and every group's current member after it, to the
+/// node (or one of sing-box's own outbounds), each `{id, name, kind}`
+/// (`kind`: `final`, `selector`, `urltest`, `node` or `other`). The members
+/// come from the Clash API (`now`, an automatic group's choice included), on
+/// the blocking pool; nothing is changed. The rule dry run uses it.
+pub(crate) async fn outbound_chain(rules: &AtomRules, start: &str) -> Result<Vec<Value>, String> {
+    let current = state(rules);
+    let start = start.to_owned();
+    let value = with_clash(rules, crate::atom_singbox::proxies)
+        .await
+        .map_err(|reply| {
+            serde_json::from_slice::<Value>(&reply.body)
+                .ok()
+                .and_then(|body| body["error"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| format!("Clash API 失败（{}）", reply.status))
+        })?;
+    let proxies = value.get("proxies").and_then(Value::as_object);
+    let now = |id: &str| {
+        proxies
+            .and_then(|proxies| proxies.get(id))
+            .and_then(|proxy| proxy.get("now"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let mut chain = Vec::new();
+    let mut id = start;
+    loop {
+        let (name, kind) = if id == FINAL {
+            // Named by the UI ("兜底分组").
+            (id.clone(), "final")
+        } else if let Some(group) = current.group(&id) {
+            let kind = match group.kind {
+                crate::atom_proxy::GroupKind::Selector => "selector",
+                crate::atom_proxy::GroupKind::Urltest => "urltest",
+            };
+            (group.name.clone(), kind)
+        } else if let Some(node) = current.nodes.iter().find(|node| node.id == id) {
+            (node.name.clone(), "node")
+        } else {
+            (id.clone(), "other")
+        };
+        let group = matches!(kind, "final" | "selector" | "urltest");
+        chain.push(json!({ "id": id, "name": name, "kind": kind }));
+        // A group's member is never itself (sing-box refuses loops); the
+        // bound only guards a broken answer.
+        if !group || chain.len() > 16 {
+            break;
+        }
+        match now(&id) {
+            Some(next) => id = next,
+            None => break,
+        }
+    }
+    Ok(chain)
+}
+
 /// `GET connections` (sing-box's snapshot, as it is) and `DELETE
 /// connections[/{id}]` (`closed`: the ID, null for all).
 async fn connections(rules: &AtomRules, method: &str, id: Option<&str>) -> Answer {

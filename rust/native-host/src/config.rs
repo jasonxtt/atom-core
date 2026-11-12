@@ -408,6 +408,8 @@ pub struct LocalPlugins {
     pub learns: Vec<crate::route_learner::RouteLearnConfig>,
     /// atom fork: the user rule table (`atom_rules`), at most one.
     pub(crate) atom_rules: Option<Rc<crate::atom_rules::AtomRules>>,
+    /// The `atom_rules` plugin's tag (a step trace names its rule by it).
+    pub(crate) atom_rules_tag: String,
 }
 
 impl LocalPlugins {
@@ -2477,6 +2479,7 @@ fn compile_definitions(
         ));
     }
     let mut atom_rules: Option<Rc<crate::atom_rules::AtomRules>> = None;
+    let mut atom_rules_tag = String::new();
     for (index, plugin) in definitions.iter().enumerate() {
         if kinds[index].1 != PluginKind::AtomRules {
             continue;
@@ -2496,6 +2499,7 @@ fn compile_definitions(
             rules.executor(),
         ));
         atom_rules = Some(rules);
+        atom_rules_tag.clone_from(&plugin.tag);
     }
     let resolved_fallback_definitions = fallback_definitions
         .into_iter()
@@ -2899,6 +2903,7 @@ fn compile_definitions(
             learners,
             learns,
             atom_rules,
+            atom_rules_tag,
         },
         sequence: SequenceConfig {
             tag: listener.entry.clone(),

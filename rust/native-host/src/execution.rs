@@ -259,16 +259,16 @@ impl RefreshEnvironment {
 /// Current request wire and its parsed view. Admission remains immutable in
 /// ExecutionRequest/checkpoint; each scoped branch owns its own query view.
 #[derive(Clone)]
-struct QueryView {
-    raw: Rc<Vec<u8>>,
+pub(crate) struct QueryView {
+    pub(crate) raw: Rc<Vec<u8>>,
     incoming: Rc<Vec<u8>>,
     policy_ecs: bool,
     echo_ecs: Option<crate::ecs::Subnet>,
-    header: QueryHeader,
-    question: QuestionInfo,
+    pub(crate) header: QueryHeader,
+    pub(crate) question: QuestionInfo,
 }
 impl QueryView {
-    fn new(raw: Vec<u8>, header: QueryHeader, question: QuestionInfo) -> Self {
+    pub(crate) fn new(raw: Vec<u8>, header: QueryHeader, question: QuestionInfo) -> Self {
         Self {
             incoming: Rc::new(raw.clone()),
             raw: Rc::new(raw),
@@ -278,7 +278,7 @@ impl QueryView {
             question,
         }
     }
-    fn redirect(&self, target: &str) -> Result<Self, ExecutorError> {
+    pub(crate) fn redirect(&self, target: &str) -> Result<Self, ExecutorError> {
         let mut message = hickory_proto::op::Message::from_vec(&self.raw)
             .map_err(|error| ExecutorError::new(format!("invalid redirect query: {error}")))?;
         let name = hickory_proto::rr::Name::from_ascii(target)
@@ -3377,11 +3377,11 @@ fn run_target<'a, E: ExchangeExecutor + ?Sized>(
     })
 }
 
-enum ScopedQueryPolicy {
+pub(crate) enum ScopedQueryPolicy {
     Redirect(String),
     Ecs(crate::ecs::EcsPolicy),
 }
-fn query_policy_target(
+pub(crate) fn query_policy_target(
     policy: &crate::policy::ResponsePolicy,
     state: &ExecutionState,
 ) -> Option<ScopedQueryPolicy> {
@@ -3404,7 +3404,7 @@ fn query_policy_target(
     }
 }
 impl QueryView {
-    fn with_ecs(
+    pub(crate) fn with_ecs(
         &self,
         policy: &crate::ecs::EcsPolicy,
         client: atomdns_sequence_core::ClientContext,
@@ -4096,7 +4096,7 @@ fn run_preference<'a, E: ExchangeExecutor + ?Sized>(
     })
 }
 
-fn response_has_type(wire: &[u8], qtype: u16) -> bool {
+pub(crate) fn response_has_type(wire: &[u8], qtype: u16) -> bool {
     observe_answer_records(wire)
         .map(|answers| answers.into_iter().any(|answer| answer.rrtype == qtype))
         .unwrap_or(false)
@@ -4109,7 +4109,7 @@ fn response_raw(response: &MachineResponseState) -> Option<&[u8]> {
     }
 }
 
-fn preference_cache_key(question: &QuestionInfo) -> String {
+pub(crate) fn preference_cache_key(question: &QuestionInfo) -> String {
     question
         .qname_wire
         .iter()
@@ -4132,7 +4132,7 @@ fn remember_preference(policy: &PreferenceConfig, key: String) {
     evidence.insert(key, now + std::time::Duration::from_secs(60 * 60));
 }
 
-fn rewrite_query_qtype(raw: &[u8], qtype: u16) -> Option<Vec<u8>> {
+pub(crate) fn rewrite_query_qtype(raw: &[u8], qtype: u16) -> Option<Vec<u8>> {
     if raw.len() < 12 {
         return None;
     }
@@ -4161,7 +4161,7 @@ fn rewrite_query_qtype(raw: &[u8], qtype: u16) -> Option<Vec<u8>> {
     Some(rewritten)
 }
 
-fn upstream_identity(config: &CompiledConfig, executable: ExecutableId) -> Option<String> {
+pub(crate) fn upstream_identity(config: &CompiledConfig, executable: ExecutableId) -> Option<String> {
     config
         .forwards
         .iter()
@@ -4187,7 +4187,7 @@ fn upstream_identity(config: &CompiledConfig, executable: ExecutableId) -> Optio
         })
 }
 
-fn invocation_identity(
+pub(crate) fn invocation_identity(
     config: &CompiledConfig,
     executable: ExecutableId,
     entry_index: usize,

@@ -299,6 +299,13 @@ impl Rewrite {
         }
     }
 
+    /// The target the rule matching `qname_wire` names, if one does; no
+    /// lookup is made (the dry run).
+    pub(crate) fn peek(&self, qname_wire: &[u8]) -> Option<Target> {
+        let name = crate::matchers::wire_name_to_ascii_domain(qname_wire)?;
+        self.current().lookup(&name).cloned()
+    }
+
     fn current(&self) -> Rc<RuleSet> {
         Rc::clone(&self.rules.borrow())
     }

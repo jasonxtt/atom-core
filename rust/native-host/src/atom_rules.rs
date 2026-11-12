@@ -1031,6 +1031,15 @@ impl AtomRules {
             .collect()
     }
 
+    /// The fast-mark mask of a builtin set the mapper marks (`geosite_cn`,
+    /// …); `None` for other sets (the dry run names original branches by it).
+    pub(crate) fn builtin_mask(&self, name: &str) -> Option<u64> {
+        match self.builtin.iter().find(|(builtin, _)| builtin == name)?.1 {
+            BuiltinSet::Mark(mask) => Some(mask),
+            BuiltinSet::Handle(_) => None,
+        }
+    }
+
     fn builtin(&self, name: &str) -> Option<&BuiltinSet> {
         if self.removed.borrow().contains(name) {
             return None;
@@ -2093,15 +2102,69 @@ struct RulesExecutor {
     rules: Rc<AtomRules>,
 }
 
+/// The query names the rules match a state's question on: the hostname and
+/// the presentation form (see [`Query`]).
+fn query_names(state: &ExecutionState) -> (Option<String>, Option<String>) {
+    let wire = &state.query.question.qname_wire;
+    (
+        crate::matchers::wire_name_to_ascii_domain(wire),
+        crate::config::presentation_name(wire),
+    )
+}
+
+/// How the dry run saw one rule (`crate::atom_dryrun`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuleCheck {
+    Hit,
+    Miss,
+    /// Disabled.
+    Off,
+    /// Matched by sing-box only (IP, port or network conditions).
+    SingBox,
+}
+
+impl AtomRules {
+    /// The rules in table order up to the one the [`RulesExecutor`] picks
+    /// for `state` (the state it runs on), each with how it went. The hit is
+    /// [`Table::first`], the executor's own choice.
+    pub(crate) fn explain(&self, state: &ExecutionState) -> Vec<(Rule, RuleCheck)> {
+        let table = self.table.get();
+        let (hostname, presentation) = query_names(state);
+        let query = Query {
+            hostname: hostname.as_deref(),
+            presentation: presentation.as_deref(),
+            fast_flags: state.fast_flags,
+            client: state.query.client.peer_ip(),
+        };
+        let hit = table.first(&query).map(|rule| rule.index);
+        let rules = self.state.borrow().rules.clone();
+        let mut out = Vec::new();
+        for (index, rule) in rules.into_iter().enumerate() {
+            let check = if Some(index) == hit {
+                RuleCheck::Hit
+            } else if !rule.enabled {
+                RuleCheck::Off
+            } else if table.rules.iter().any(|compiled| compiled.index == index) {
+                RuleCheck::Miss
+            } else {
+                RuleCheck::SingBox
+            };
+            out.push((rule, check));
+            if check == RuleCheck::Hit {
+                break;
+            }
+        }
+        out
+    }
+}
+
 impl Executor for RulesExecutor {
     fn execute(&self, state: &mut ExecutionState) -> Result<ExecutorOutcome, ExecutorError> {
         let table = self.rules.table.get();
         if table.rules.is_empty() {
             return Ok(ExecutorOutcome::Continue);
         }
-        let wire = &state.query.question.qname_wire;
-        let hostname = crate::matchers::wire_name_to_ascii_domain(wire);
-        let presentation = crate::config::presentation_name(wire);
+        let (hostname, presentation) = query_names(state);
         let query = Query {
             hostname: hostname.as_deref(),
             presentation: presentation.as_deref(),

@@ -233,6 +233,9 @@ impl RouteLearner {
     /// The learned facts of a presentation-form name (a trailing dot is
     /// ignored; compared in ASCII lower case). Expired entries are dropped.
     pub(crate) fn lookup(&self, presentation: &str) -> Option<LearnedHit> {
+        // A dry run (`crate::atom_dryrun`) only reads: no hit is counted and
+        // an expired entry is skipped, not dropped.
+        let peek = PEEK.with(Cell::get);
         let mut buffer = [0_u8; MAX_NAME];
         let key = normalise(presentation, &mut buffer)?;
         let shared = self.shared.borrow();
@@ -253,12 +256,16 @@ impl RouteLearner {
                 continue;
             };
             if now >= u64::from(entry.last) + spec.ttl {
-                map.remove(key);
-                expired += 1;
+                if !peek {
+                    map.remove(key);
+                    expired += 1;
+                }
                 continue;
             }
-            entry.hits = entry.hits.saturating_add(1);
-            touched = true;
+            if !peek {
+                entry.hits = entry.hits.saturating_add(1);
+                touched = true;
+            }
             let found = hit.get_or_insert_with(|| LearnedHit {
                 flags: 0,
                 tags: String::new(),
@@ -923,13 +930,8 @@ impl RouteLearn {
     /// Evaluates the conditions against the current state and learns. A
     /// matcher error fails the query, as it would in a sequence rule.
     pub(crate) fn run(&self, state: &ExecutionState) -> Result<(), ExecutorError> {
-        for (matcher, reverse) in &self.when {
-            let outcome = matcher
-                .evaluate(state)
-                .map_err(|error| ExecutorError::new(format!("{}: {error:?}", self.tag)))?;
-            if outcome.matched == *reverse {
-                return Ok(());
-            }
+        if !self.applies(state)? {
+            return Ok(());
         }
         self.learner.learn(
             &self.categories,
@@ -938,6 +940,52 @@ impl RouteLearn {
         );
         Ok(())
     }
+
+    fn applies(&self, state: &ExecutionState) -> Result<bool, ExecutorError> {
+        for (matcher, reverse) in &self.when {
+            let outcome = matcher
+                .evaluate(state)
+                .map_err(|error| ExecutorError::new(format!("{}: {error:?}", self.tag)))?;
+            if outcome.matched == *reverse {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// What [`Self::run`] would learn for `state`, without learning: the
+    /// labels of the enabled categories (empty: nothing).
+    pub(crate) fn would_learn(&self, state: &ExecutionState) -> Result<Vec<String>, ExecutorError> {
+        if !self.applies(state)? {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .categories
+            .iter()
+            .filter_map(|&index| self.learner.settings.categories.get(index))
+            .filter(|spec| spec.enabled)
+            .map(|spec| spec.label.clone())
+            .collect())
+    }
+}
+
+thread_local! {
+    /// Set while a dry run drives the sequence machine ([`peeking`]).
+    static PEEK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `work` with every learner lookup read-only (no hit counted, no
+/// expired entry dropped). `work` is synchronous, so a query served on the
+/// same thread meanwhile cannot see the flag.
+pub(crate) fn peeking<T>(work: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PEEK.with(|peek| peek.set(self.0));
+        }
+    }
+    let _reset = Reset(PEEK.with(|peek| peek.replace(true)));
+    work()
 }
 
 // ----- helpers ---------------------------------------------------------------------------

@@ -81,6 +81,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/rules/dryrun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dry run of one query
+         * @description What the main flow would do with an A or AAAA query for the name
+         *     now, step by step: the live configuration's own sequence runs with
+         *     the side effects left out. No cache is read or written, nothing is
+         *     learned, sing-box is not asked (no SET or CLEAR), the binding ledger,
+         *     the query log, the statistics and the top domains are untouched.
+         *     Other upstreams are really asked (the probe included), past the
+         *     caches. A proxy conclusion is followed through sing-box's current
+         *     group members (Clash API) to the node.
+         */
+        post: operations["dryRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/rulesets": {
         parameters: {
             query?: never;
@@ -1315,6 +1342,86 @@ export interface components {
              */
             fallthrough?: "original";
         };
+        DryRunUpstream: {
+            /** @description The upstream group's tag. */
+            upstream: string;
+            /** @description The upstream that answered. */
+            entry?: string | null;
+            ecs?: string | null;
+            rcode?: string | null;
+            ips: string[];
+            error?: string | null;
+        };
+        DryRunStep: {
+            /** @enum {string} */
+            key: "rewrite" | "block_qtypes" | "block_aaaa" | "prefer_v4" | "rules" | "no_v4" | "no_v6" | "geosite_no_cn" | "geosite_cn" | "remember_proxy" | "remember_direct" | "rest";
+            name: string;
+            /** @enum {string} */
+            result: "hit" | "miss";
+            detail: string;
+            /** @description `rules`: the rules up to the hit, in table order. */
+            rules?: {
+                index: number;
+                id: string;
+                remark: string;
+                /** @enum {string} */
+                status: "hit" | "miss" | "off" | "singbox";
+            }[];
+            rule?: components["schemas"]["Rule"];
+            probe?: components["schemas"]["DryRunUpstream"];
+            /** @description `rest`: what a real query would learn (nothing is learned). */
+            would_learn?: string[];
+        };
+        DryRun: {
+            domain: string;
+            /** @enum {string} */
+            qtype: "A" | "AAAA";
+            client?: string | null;
+            steps: components["schemas"]["DryRunStep"][];
+            /**
+             * @description The original judgement's branch that decided, when no rule did.
+             * @enum {string|null}
+             */
+            branch?: "empty" | "geosite_no_cn" | "geosite_cn" | "remember_proxy" | "remember_direct" | "rest" | null;
+            conclusion: {
+                /** @enum {string} */
+                kind: "direct" | "proxy" | "block" | "empty" | "fail";
+                /** @description `rule`, `rewrite`, a step key or a branch. */
+                via: string;
+                detail?: string | null;
+                rcode?: string;
+                ips?: string[];
+                upstream?: string;
+                entry?: string | null;
+                ecs?: string | null;
+                /** @description The caches a real query would use (labels). */
+                caches?: string[];
+                /** @description proxy: the group, or `final`. */
+                outbound?: string;
+                /** @description proxy: `SET <group>` or `CLEAR`. */
+                directive?: string;
+                /** @description proxy: the outbound and each group's current member, to the node. */
+                chain?: {
+                    id: string;
+                    name: string;
+                    /** @enum {string} */
+                    kind: "final" | "selector" | "urltest" | "node" | "other";
+                }[];
+                chain_error?: string;
+                rule?: {
+                    id?: string;
+                    remark?: string;
+                };
+            };
+            upstreams: components["schemas"]["DryRunUpstream"][];
+            binding: {
+                /** @description The binding ledger's directive for the name. */
+                recorded: string | null;
+                /** @description What this decision sends to sing-box (none for a direct or empty original judgement). */
+                expected: string | null;
+                match: boolean;
+            };
+        };
         BuiltinRuleset: {
             /** @description `adguard`, `geosite_cn`, `geosite_no_cn`, `cuscn`, `cusnocn`, and the IP set `geoip_cn`, in atom's configuration. */
             id: string;
@@ -1844,6 +1951,42 @@ export interface operations {
                 };
             };
             400: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    dryRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    domain: string;
+                    /** @description The client address the query would come from (without one, no client rule matches). */
+                    client?: string;
+                    /**
+                     * @default A
+                     * @enum {string}
+                     */
+                    qtype?: "A" | "AAAA";
+                };
+            };
+        };
+        responses: {
+            /** @description The steps and the conclusion. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DryRun"];
+                };
+            };
+            400: components["responses"]["Error"];
+            503: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };
     };

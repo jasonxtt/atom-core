@@ -130,6 +130,11 @@ pub trait StepTrace: std::fmt::Debug {
     fn matcher(&self, sequence: &str, name: &str, matched: bool, state: &ExecutionState);
     /// Every matcher of a rule matched; its action runs next.
     fn plugin(&self, sequence: &str, name: &str, state: &ExecutionState);
+    /// Rule `pc` of `sequence` was evaluated: `matched` when every matcher
+    /// matched (its action runs next), after the [`Self::matcher`] and
+    /// [`Self::plugin`] calls for it. The atom dry run uses it; the default
+    /// does nothing.
+    fn rule(&self, _sequence: SequenceId, _pc: usize, _matched: bool) {}
 }
 
 impl ExecutionControl {
@@ -1174,12 +1179,21 @@ fn next_step(
         // reported origin instead of inventing an execution position.
         scopes.rule_origin = Some(sequence_id);
     }
-    run_rule(program, rule, &sequence.trace_name, scopes, state, control)
+    run_rule(
+        program,
+        rule,
+        (sequence_id, pc),
+        &sequence.trace_name,
+        scopes,
+        state,
+        control,
+    )
 }
 
 fn run_rule(
     program: &ValidatedProgram,
     rule: &ValidatedRule,
+    position: (SequenceId, usize),
     sequence_name: &str,
     scopes: &mut ScopeStack,
     state: &mut ExecutionState,
@@ -1217,6 +1231,9 @@ fn run_rule(
             }
         }
         if !effective_match {
+            if let Some(trace) = &control.step_trace {
+                trace.rule(position.0, position.1, false);
+            }
             return Ok(Step::Continue);
         }
         if !matcher.reverse {
@@ -1230,6 +1247,7 @@ fn run_rule(
         if let Some(name) = &rule.plugin_name {
             trace.plugin(sequence_name, name, state);
         }
+        trace.rule(position.0, position.1, true);
     }
     let Some(executable) = &rule.executable else {
         return Ok(Step::Continue);

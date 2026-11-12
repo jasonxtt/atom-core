@@ -80,6 +80,7 @@ pub(crate) fn mutates(method: &str, path: &str) -> bool {
         let segments: Vec<&str> = rest.split('/').collect();
         matches!(method, "POST" | "PUT" | "DELETE")
             && rest != "rules/test"
+            && rest != "rules/dryrun"
             && !(method == "PUT" && rest == "settings")
             && !crate::atom_dns_api::applies_settings(method, &segments)
     })
@@ -97,6 +98,7 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("DELETE", "rules/{id}"),
     ("POST", "rules/move"),
     ("POST", "rules/test"),
+    ("POST", "rules/dryrun"),
     ("GET", "rulesets"),
     ("POST", "rulesets"),
     ("GET", "rulesets/{id}"),
@@ -383,6 +385,9 @@ pub(crate) async fn handle(
         ("POST", ["rules"]) => create_rule(rules, request_body, shutdown).await,
         ("POST", ["rules", "move"]) => move_rule(rules, request_body).await,
         ("POST", ["rules", "test"]) => return Some(test_rule(config, rules, request_body)),
+        ("POST", ["rules", "dryrun"]) => {
+            return Some(dry_run(control, config, rules, request_body).await);
+        }
         ("PUT", ["rules", id]) => update_rule(rules, id, request_body, shutdown).await,
         ("GET", ["catalog"]) => return Some(list_catalog(rules, query)),
         // Not a rule change: no cache flush, no ledger pass.
@@ -907,6 +912,70 @@ fn test_rule(config: &CompiledConfig, rules: &AtomRules, bytes: &[u8]) -> Reply 
                 "fallthrough": "original",
             }),
         ),
+    }
+}
+
+/// `POST rules/dryrun {domain, client?, qtype?}`: what the main flow would
+/// do with the query now, step by step, leaving no trace
+/// ([`crate::atom_dryrun`]). It runs on the live generation's upstreams.
+pub(crate) async fn dry_run(
+    control: Option<&crate::runtime_snapshot::RuntimeControl>,
+    config: &CompiledConfig,
+    rules: &AtomRules,
+    bytes: &[u8],
+) -> Reply {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DryRun {
+        domain: String,
+        client: Option<String>,
+        qtype: Option<String>,
+    }
+    let request: DryRun = match body(bytes) {
+        Ok(request) => request,
+        Err(reply) => return reply,
+    };
+    let domain = request
+        .domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if domain.is_empty() {
+        return error(400, "需要 domain");
+    }
+    let client = match request.client.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(text) => match text.parse::<IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(_) => return error(400, format!("client `{text}` 不是 IP 地址")),
+        },
+    };
+    let qtype = match request.qtype.as_deref().map(str::trim) {
+        None | Some("" | "A" | "a") => 1,
+        Some("AAAA" | "aaaa") => 28,
+        Some(other) => return error(400, format!("qtype 只能是 A 或 AAAA（`{other}`）")),
+    };
+    let Some(view) = control.map(crate::runtime_snapshot::RuntimeControl::view) else {
+        return error(503, "DNS 没有在运行");
+    };
+    if view.config.generation != config.generation {
+        return error(503, "配置正在切换，请重试");
+    }
+    let request = crate::atom_dryrun::Request {
+        domain,
+        client,
+        qtype,
+    };
+    match crate::atom_dryrun::run(
+        &view.config,
+        &view.forwards,
+        rules,
+        &request,
+        view.options.request_deadline,
+    )
+    .await {
+        Ok(value) => json(200, &value),
+        Err(message) => error(400, message),
     }
 }
 

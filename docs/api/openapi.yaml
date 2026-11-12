@@ -274,6 +274,52 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /rules/dryrun:
+    post:
+      tags: [rules]
+      summary: Dry run of one query
+      description: |
+        What the main flow would do with an A or AAAA query for the name
+        now, step by step: the live configuration's own sequence runs with
+        the side effects left out. No cache is read or written, nothing is
+        learned, sing-box is not asked (no SET or CLEAR), the binding ledger,
+        the query log, the statistics and the top domains are untouched.
+        Other upstreams are really asked (the probe included), past the
+        caches. A proxy conclusion is followed through sing-box's current
+        group members (Clash API) to the node.
+      operationId: dryRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [domain]
+              properties:
+                domain:
+                  type: string
+                client:
+                  type: string
+                  description: The client address the query would come from (without one, no client rule matches).
+                qtype:
+                  type: string
+                  enum: [A, AAAA]
+                  default: A
+      responses:
+        "200":
+          description: The steps and the conclusion.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DryRun"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
   /rulesets:
     get:
       tags: [rulesets]
@@ -2811,6 +2857,169 @@ components:
           type: string
           enum: [original]
           description: No rule matched; the original judgement decides.
+    DryRunUpstream:
+      type: object
+      required: [upstream, ips]
+      properties:
+        upstream:
+          type: string
+          description: The upstream group's tag.
+        entry:
+          type: string
+          nullable: true
+          description: The upstream that answered.
+        ecs:
+          type: string
+          nullable: true
+        rcode:
+          type: string
+          nullable: true
+        ips:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+          nullable: true
+    DryRunStep:
+      type: object
+      required: [key, name, result, detail]
+      properties:
+        key:
+          type: string
+          enum: [rewrite, block_qtypes, block_aaaa, prefer_v4, rules, no_v4, no_v6, geosite_no_cn, geosite_cn, remember_proxy, remember_direct, rest]
+        name:
+          type: string
+        result:
+          type: string
+          enum: [hit, miss]
+        detail:
+          type: string
+        rules:
+          type: array
+          description: "`rules`: the rules up to the hit, in table order."
+          items:
+            type: object
+            required: [index, id, remark, status]
+            properties:
+              index:
+                type: integer
+              id:
+                type: string
+              remark:
+                type: string
+              status:
+                type: string
+                enum: [hit, miss, "off", singbox]
+        rule:
+          $ref: "#/components/schemas/Rule"
+        probe:
+          $ref: "#/components/schemas/DryRunUpstream"
+        would_learn:
+          type: array
+          description: "`rest`: what a real query would learn (nothing is learned)."
+          items:
+            type: string
+    DryRun:
+      type: object
+      required: [domain, qtype, steps, conclusion, upstreams, binding]
+      properties:
+        domain:
+          type: string
+        qtype:
+          type: string
+          enum: [A, AAAA]
+        client:
+          type: string
+          nullable: true
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/DryRunStep"
+        branch:
+          type: string
+          nullable: true
+          enum: [empty, geosite_no_cn, geosite_cn, remember_proxy, remember_direct, rest]
+          description: The original judgement's branch that decided, when no rule did.
+        conclusion:
+          type: object
+          required: [kind, via]
+          properties:
+            kind:
+              type: string
+              enum: [direct, proxy, block, empty, fail]
+            via:
+              type: string
+              description: "`rule`, `rewrite`, a step key or a branch."
+            detail:
+              type: string
+              nullable: true
+            rcode:
+              type: string
+            ips:
+              type: array
+              items:
+                type: string
+            upstream:
+              type: string
+            entry:
+              type: string
+              nullable: true
+            ecs:
+              type: string
+              nullable: true
+            caches:
+              type: array
+              description: The caches a real query would use (labels).
+              items:
+                type: string
+            outbound:
+              type: string
+              description: "proxy: the group, or `final`."
+            directive:
+              type: string
+              description: "proxy: `SET <group>` or `CLEAR`."
+            chain:
+              type: array
+              description: "proxy: the outbound and each group's current member, to the node."
+              items:
+                type: object
+                required: [id, name, kind]
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  kind:
+                    type: string
+                    enum: [final, selector, urltest, node, other]
+            chain_error:
+              type: string
+            rule:
+              type: object
+              properties:
+                id:
+                  type: string
+                remark:
+                  type: string
+        upstreams:
+          type: array
+          items:
+            $ref: "#/components/schemas/DryRunUpstream"
+        binding:
+          type: object
+          required: [recorded, expected, match]
+          properties:
+            recorded:
+              type: string
+              nullable: true
+              description: The binding ledger's directive for the name.
+            expected:
+              type: string
+              nullable: true
+              description: What this decision sends to sing-box (none for a direct or empty original judgement).
+            match:
+              type: boolean
     BuiltinRuleset:
       type: object
       required: [id, name, type, refreshable, required, usable]
