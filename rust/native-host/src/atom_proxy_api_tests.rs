@@ -642,7 +642,7 @@ fn port_and_network_rules_go_to_sing_box() {
     let (status, body) = api.call(
         "PUT",
         &format!("/api/v1/atom/rules/{legacy_id}"),
-        &format!(r#"{{"remark": "旧规则", "match": {{"ip_cidr": ["28.0.0.0/8", "1.1.1.1"], "network": ["udp"]}}, "action": {{"type": "direct"}}, "version": {}}}"#, version()),
+        &format!(r#"{{"remark": "旧规则", "match": {{"ip_cidr": [" 28.0.0.1/8", "1.1.1.1"], "network": ["udp"]}}, "action": {{"type": "direct"}}, "version": {}}}"#, version()),
     );
     assert_eq!(status, 200, "{body}");
     let (status, body) = api.call(

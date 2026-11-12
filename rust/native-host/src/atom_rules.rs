@@ -780,11 +780,16 @@ pub(crate) fn fakeip_overlap(
     let (IpAddr::V4(network), bits) = crate::rule_formats::parse_prefix(fakeip_range)? else {
         return None;
     };
+    // Compared in canonical form: `28.0.0.1/8` and ` 28.0.0.0/8` are the
+    // entry `28.0.0.0/8` had.
+    let had: Vec<String> = kept.map_or_else(Vec::new, |old| {
+        old.matches.ip_cidr.iter().filter_map(|value| ip_entry(value).ok()).collect()
+    });
     rule.matches.ip_cidr.iter().find_map(|value| {
-        if kept.is_some_and(|old| old.matches.ip_cidr.contains(value)) {
+        let entry = ip_entry(value).ok()?;
+        if had.contains(&entry) {
             return None;
         }
-        let entry = ip_entry(value).ok()?;
         match crate::rule_formats::parse_prefix(&entry)? {
             (IpAddr::V4(address), length) if overlaps_v4((address, length), (network, bits)) => {
                 Some(Refusal::invalid(format!(
