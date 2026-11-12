@@ -1132,8 +1132,6 @@ fn answers_have_their_ttls_capped() {
         redirect_port: 7892,
         tproxy_port: 7893,
         resolver_group: "domestic".into(),
-        nft_table: None,
-        nft: vec!["nft".into()],
     };
     let rules = AtomRules::load(
         Path::new(""),

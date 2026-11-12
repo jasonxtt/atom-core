@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { call, client, type Schemas } from '../api/client'
 import { FINAL, FINAL_NAME, groups } from './proxy'
+import { portsText } from '../singboxRule'
 
 export type Rule = Schemas['Rule']
 export type Match = Schemas['Match']
@@ -148,7 +149,13 @@ export function summary(match: Match): string {
   if (both.length) parts.push(`规则集（全部） ${some(both.map(setName))}`)
   if (ipsOnly.length) parts.push(`规则集（IP） ${some(ipsOnly.map(setName))}`)
   if (match.ip_cidr?.length) parts.push(`目标 IP ${some(match.ip_cidr)}`)
-  const head = parts.join(' 或 ')
+  let head = parts.join(' 或 ')
+  // Ports and networks go with the IP part (and-ed), never with names or clients.
+  const transport: string[] = []
+  const ports = portsText(match.port, match.port_range).split('\n').filter(Boolean)
+  if (ports.length) transport.push(`端口 ${some(ports)}`)
+  if (match.network?.length) transport.push(match.network.map((network) => network.toUpperCase()).join(' 或 '))
+  if (transport.length) head = head ? `${parts.length > 1 ? `（${head}）` : head}，且${transport.join('，且')}` : transport.join('，且')
   if (!match.client?.length) return head
   const clients = `${match.client_invert ? '名单外的客户端' : '客户端'} ${some(match.client)}`
   return head ? `${head}，且${clients}` : clients

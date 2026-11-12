@@ -262,8 +262,6 @@ fn host(dns_in: SocketAddr) -> crate::atom_singbox::Host {
         redirect_port: 7892,
         tproxy_port: 7893,
         resolver_group: "domestic".into(),
-        nft_table: None,
-        nft: vec!["nft".into()],
     }
 }
 

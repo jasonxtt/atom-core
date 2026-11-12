@@ -206,32 +206,14 @@ fn import_groups_rules_and_ip_rules_reach_sing_box() {
     let telegram = rule["rule"]["id"].as_str().unwrap().to_owned();
     let routes = api.live()["route"]["rules"].clone();
     assert_eq!(
-        routes[2],
-        serde_json::json!({"ip_cidr": ["91.108.4.0/22", "2001:b28:f23d::/48"], "action": "route", "outbound": media})
+        routes[2]["rules"][1],
+        serde_json::json!({"ip_cidr": ["91.108.4.0/22", "2001:b28:f23d::/48"]})
     );
+    assert_eq!(routes[2]["outbound"], media.as_str());
     let (_, status_view) = api.call("GET", "/api/v1/atom/status", "");
     assert_eq!(status_view["singbox"]["in_sync"], true, "{status_view}");
     assert_eq!(status_view["singbox"]["version"], "sing-box 1.14.4-atom");
-    assert_eq!(
-        status_view["nft"]["ip_cidr"]["inet4"],
-        serde_json::json!(["91.108.4.0/22"])
-    );
-    assert_eq!(status_view["nft"]["fakeip_range"], "28.0.0.0/8");
-    // The nft sets follow the IP rules (IPv4 only), in one script.
-    let scripts = api.fake.nft_scripts();
-    assert!(
-        scripts
-            .last()
-            .unwrap()
-            .contains("add element inet atom iprule4 { 91.108.4.0/22 }\n"),
-        "{scripts:?}"
-    );
-    assert_eq!(status_view["nft"]["table"], "atom");
-    assert_eq!(status_view["nft"]["sync"]["ok"], true, "{status_view}");
-    assert_eq!(
-        status_view["nft"]["sync"]["sets"]["iprule4"],
-        serde_json::json!(["91.108.4.0/22"])
-    );
+    assert!(status_view.get("nft").is_none(), "{status_view}");
     // The IP rule takes no part in the DNS table.
     let (_, test) = api.call(
         "POST",
@@ -281,93 +263,6 @@ fn import_groups_rules_and_ip_rules_reach_sing_box() {
         serde_json::from_slice(&std::fs::read(api.root.join("webinfo/atom_proxy.json")).unwrap())
             .unwrap();
     assert_eq!(saved["nodes"].as_array().unwrap().len(), 2);
-}
-
-#[test]
-fn a_failed_nft_update_keeps_the_change_and_is_reported() {
-    let api = Api::new("nft");
-    let before = api.fake.nft_scripts().len();
-    let (status, _) = api.call(
-        "POST",
-        "/api/v1/atom/rules",
-        r#"{"match": {"suffix": ["example.com"]}, "action": {"type": "direct"}}"#,
-    );
-    assert_eq!(status, 201);
-    assert_eq!(
-        api.fake.nft_scripts().len(),
-        before,
-        "domain rules leave nft alone"
-    );
-    std::fs::write(api.fake.host.dir.join("nftfail"), "").unwrap();
-    let (status, rule) = api.call(
-        "POST",
-        "/api/v1/atom/rules",
-        r#"{"match": {"ip_cidr": ["1.1.1.1/32"]}, "action": {"type": "block"}}"#,
-    );
-    assert_eq!(status, 201, "{rule}");
-    let (_, view) = api.call("GET", "/api/v1/atom/status", "");
-    assert_eq!(view["nft"]["sync"]["ok"], false, "{view}");
-    assert!(
-        view["nft"]["sync"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("No such file")
-    );
-    assert_eq!(
-        api.live()["route"]["rules"][2]["ip_cidr"],
-        serde_json::json!(["1.1.1.1/32"])
-    );
-    std::fs::remove_file(api.fake.host.dir.join("nftfail")).unwrap();
-    let (status, _) = api.call("POST", "/api/v1/atom/apply", "");
-    assert_eq!(status, 200);
-    let (_, view) = api.call("GET", "/api/v1/atom/status", "");
-    assert_eq!(view["nft"]["sync"]["ok"], true, "{view}");
-    assert!(
-        api.fake
-            .nft_scripts()
-            .last()
-            .unwrap()
-            .contains("add element inet atom iprule4 { 1.1.1.1/32 }")
-    );
-}
-
-/// A start whose application fails (rolled back) fills nft from what
-/// sing-box runs, not from the atom state it could not apply.
-#[test]
-fn a_failed_startup_application_keeps_nft_on_the_running_configuration() {
-    let api = Api::new("nft-startup");
-    let (status, _) = api.call(
-        "POST",
-        "/api/v1/atom/rules",
-        r#"{"match": {"ip_cidr": ["1.1.1.1/32"]}, "action": {"type": "block"}}"#,
-    );
-    assert_eq!(status, 201);
-    // sing-box runs something else (an older range and IP rule) than the state.
-    let mut running = api.live();
-    running["dns"]["servers"][0]["inet4_range"] = "29.0.0.0/8".into();
-    running["route"]["rules"][2]["ip_cidr"] = serde_json::json!(["9.9.9.9/32"]);
-    let bytes = serde_json::to_vec(&running).unwrap();
-    std::fs::write(api.fake.host.config_path(), &bytes).unwrap();
-    std::fs::write(api.fake.host.dir.join("running.json"), &bytes).unwrap();
-    std::fs::write(api.fake.host.dir.join("failreload"), "").unwrap();
-    let rules = api.assembly.config().local.atom_rules.clone().unwrap();
-    api.assembly.block_on(rules.ensure());
-    let last = crate::atom_rules::last_apply().unwrap();
-    assert!(!last.ok, "{last:?}");
-    let script = api.fake.nft_scripts().pop().unwrap();
-    assert!(
-        script.contains("fakeip4 { 29.0.0.0/8 }") && script.contains("iprule4 { 9.9.9.9/32 }"),
-        "{script}"
-    );
-    // Once sing-box takes the state, nft follows.
-    std::fs::remove_file(api.fake.host.dir.join("failreload")).unwrap();
-    let (status, _) = api.call("POST", "/api/v1/atom/apply", "");
-    assert_eq!(status, 200);
-    let script = api.fake.nft_scripts().pop().unwrap();
-    assert!(
-        script.contains("fakeip4 { 28.0.0.0/8 }") && script.contains("iprule4 { 1.1.1.1/32 }"),
-        "{script}"
-    );
 }
 
 #[test]
@@ -658,15 +553,89 @@ fn node_views_hide_credentials_and_edits_replace_the_connection() {
     assert_eq!(status, 404);
 }
 
+/// Port and network conditions (sing-box, real addresses only): never with
+/// name or client conditions; compiled beside IP prefixes, FakeIP left out.
+#[test]
+fn port_and_network_rules_go_to_sing_box() {
+    let api = Api::new("ports");
+    let refused = |body: &str| {
+        let (status, view) = api.call("POST", "/api/v1/atom/rules", body);
+        assert_eq!(status, 400, "{body}: {view}");
+        view["error"].as_str().unwrap().to_owned()
+    };
+    for body in [
+        r#"{"match": {"port": [443], "suffix": ["a.example"]}, "action": {"type": "direct"}}"#,
+        r#"{"match": {"network": ["udp"], "ruleset": ["cuscn"]}, "action": {"type": "block"}}"#,
+        r#"{"match": {"port_range": ["1:2"], "client": ["192.168.1.0/24"]}, "action": {"type": "block"}}"#,
+    ] {
+        assert!(refused(body).contains("DNS 查询时不知道端口"), "{body}");
+    }
+    assert!(refused(r#"{"match": {"port": [0]}, "action": {"type": "block"}}"#).contains("1 到 65535"));
+    for range in ["2000:1000", "1000", ":", "a:b", "0:10"] {
+        let body = format!(r#"{{"match": {{"port_range": ["{range}"]}}, "action": {{"type": "block"}}}}"#);
+        assert!(refused(&body).contains("port_range"), "{range}");
+    }
+    assert!(refused(r#"{"match": {"network": ["icmp"]}, "action": {"type": "block"}}"#).contains("tcp 或 udp"));
+    // An IP rule over the FakeIP range is refused (FakeIP destinations go by
+    // binding or Final); so is a range change over an IP rule.
+    for cidr in ["28.1.0.0/16", "0.0.0.0/0", "28.9.9.9"] {
+        let body = format!(r#"{{"match": {{"ip_cidr": ["{cidr}"]}}, "action": {{"type": "block"}}}}"#);
+        assert!(refused(&body).contains("FakeIP 网段"), "{cidr}");
+    }
+
+    let (status, rule) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"port": [5201, 22, 5201], "port_range": [" 6000:6010 ", "7000:"], "network": ["udp", "tcp"]}, "action": {"type": "proxy", "group_id": "g-default"}}"#,
+    );
+    assert_eq!(status, 201, "{rule}");
+    let (status, rule) = api.call(
+        "POST",
+        "/api/v1/atom/rules",
+        r#"{"match": {"ip_cidr": ["1.1.1.1"], "network": ["udp"]}, "action": {"type": "direct"}}"#,
+    );
+    assert_eq!(status, 201, "{rule}");
+    let routes = api.live()["route"]["rules"].clone();
+    let not_fakeip = serde_json::json!({"ip_cidr": ["28.0.0.0/8"], "invert": true});
+    assert_eq!(
+        routes[2],
+        serde_json::json!({"type": "logical", "mode": "and", "rules": [not_fakeip, {"port": [22, 5201], "port_range": ["6000:6010", "7000:"], "network": ["tcp", "udp"]}], "action": "route", "outbound": "g-default"})
+    );
+    assert_eq!(
+        routes[3],
+        serde_json::json!({"type": "logical", "mode": "and", "rules": [not_fakeip, {"ip_cidr": ["1.1.1.1/32"], "network": ["udp"]}], "action": "route", "outbound": "direct"})
+    );
+    let (_, status_view) = api.call("GET", "/api/v1/atom/status", "");
+    assert_eq!(status_view["singbox"]["in_sync"], true, "{status_view}");
+    let (status, refused) = api.call(
+        "PUT",
+        "/api/v1/atom/settings",
+        r#"{"fakeip_range": "1.0.0.0/8"}"#,
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("FakeIP 网段"), "{refused}");
+    // The FakeIP exclusion follows the range.
+    let (status, changed) = api.call(
+        "PUT",
+        "/api/v1/atom/settings",
+        r#"{"fakeip_range": "29.0.0.0/8"}"#,
+    );
+    assert_eq!(status, 200, "{changed}");
+    assert_eq!(
+        api.live()["route"]["rules"][2]["rules"][0],
+        serde_json::json!({"ip_cidr": ["29.0.0.0/8"], "invert": true})
+    );
+}
+
 fn fail_next_save() {
     crate::atom_proxy::FAIL_NEXT_SAVE.with(|fail| fail.set(true));
 }
 
 /// A failed save whose compensation fails too leaves sing-box on the new
-/// configuration: nft follows it (what is live), not the unsaved state.
+/// configuration, and says so.
 #[test]
-fn a_failed_compensation_leaves_nft_on_the_live_configuration() {
-    let api = Api::new("nft-compensate");
+fn a_failed_compensation_is_reported() {
+    let api = Api::new("compensate-fails");
     let (status, _) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
     assert_eq!(status, 201);
     // The compensation writes config.json through `<file>.tmp-<pid>`: a
@@ -690,13 +659,6 @@ fn a_failed_compensation_leaves_nft_on_the_live_configuration() {
         "{body}"
     );
     assert_eq!(api.live()["dns"]["servers"][0]["inet4_range"], "29.0.0.0/8");
-    let script = api.fake.nft_scripts().pop().unwrap();
-    assert!(script.contains("fakeip4 { 29.0.0.0/8 }"), "{script}");
-    let (_, view) = api.call("GET", "/api/v1/atom/status", "");
-    assert_eq!(
-        view["nft"]["sync"]["sets"]["fakeip4"],
-        serde_json::json!(["29.0.0.0/8"])
-    );
 }
 
 #[test]
@@ -1178,8 +1140,9 @@ fn a_ruleset_ip_part_reaches_sing_box_when_downloaded() {
     assert_eq!(api.fake.reload_count(), reloads + 1, "sing-box followed the prefixes");
     let routes = api.live()["route"]["rules"].clone();
     assert!(
-        routes.as_array().unwrap().iter().any(|rule| rule
-            == &serde_json::json!({"ip_cidr": ["91.108.4.0/22", "2001:b28:f23d::/48"], "action": "route", "outbound": "final"})),
+        routes.as_array().unwrap().iter().any(|rule| rule["rules"][1]
+            == serde_json::json!({"ip_cidr": ["91.108.4.0/22", "2001:b28:f23d::/48"]})
+            && rule["outbound"] == "final"),
         "{routes}"
     );
     let (_, apply) = api.call("GET", "/api/v1/atom/apply", "");

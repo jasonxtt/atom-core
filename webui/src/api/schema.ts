@@ -526,7 +526,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Both processes, the latest application, the binding ledger and nft */
+        /** Both processes, the latest application and the binding ledger */
         get: operations["getStatus"];
         put?: never;
         post?: never;
@@ -1201,7 +1201,15 @@ export interface components {
          *     `ip_ruleset`) is matched by sing-box with the same action; beside name
          *     conditions the rule matches either (the names in DNS, the prefixes in
          *     sing-box). A rule with `client` cannot proxy and cannot have an IP
-         *     part (400).
+         *     part (400). `port`, `port_range` and `network` are matched by sing-box
+         *     on real addresses only, like a sing-box headless rule: different
+         *     fields and-ed (with the IP part too), the values of one field or-ed.
+         *     A DNS query has no port, so they never go with name or client
+         *     conditions (400). sing-box routes a FakeIP destination by its
+         *     binding or Final before any rule, and the generated rules leave the
+         *     FakeIP range out; an `ip_cidr` entry overlapping the FakeIP range is
+         *     refused (400), as is a `fakeip_range` change overlapping an
+         *     `ip_cidr` entry.
          */
         Match: {
             domain?: string[];
@@ -1225,6 +1233,14 @@ export interface components {
              *     names; both: the whole set). A set without prefixes adds nothing.
              */
             ip_ruleset?: string[];
+            /** @description Target ports, 1 to 65535. */
+            port?: number[];
+            /**
+             * @description Target port ranges, `start:end` as sing-box writes them; either
+             *     side may be open (`1000:`, `:2000`), `start` at most `end`.
+             */
+            port_range?: string[];
+            network?: ("tcp" | "udp")[];
         };
         Action: {
             /** @enum {string} */
@@ -1557,23 +1573,6 @@ export interface components {
             };
             warnings: {
                 empty_groups?: string[];
-            };
-            nft: {
-                fakeip_range?: string;
-                ip_cidr?: {
-                    inet4?: string[];
-                    inet6?: string[];
-                };
-                table?: string | null;
-                sync?: {
-                    at?: number;
-                    ok?: boolean;
-                    error?: string;
-                    sets?: {
-                        fakeip4?: string[];
-                        iprule4?: string[];
-                    };
-                } | null;
             };
         };
     };

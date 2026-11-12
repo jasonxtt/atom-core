@@ -26,6 +26,7 @@ import {
 } from '../composables/rules'
 import { refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
+import { parseHeadlessRule, parsePorts, portsText, TRANSPORT_WITH_NAMES } from '../singboxRule'
 
 const route = useRoute()
 const router = useRouter()
@@ -33,7 +34,7 @@ const router = useRouter()
 const id = computed(() => (typeof route.params.id === 'string' ? route.params.id : ''))
 
 type Part = 'domain' | 'ip' | 'all'
-type Kind = 'source' | 'set' | 'domain' | 'ip' | 'client'
+type Kind = 'source' | 'set' | 'domain' | 'ip' | 'client' | 'port' | 'network'
 interface Cond {
   key: number
   t: Kind
@@ -46,6 +47,8 @@ interface Cond {
   ips: boolean | null
   part: Part
   text: string
+  /** network: the networks chosen. */
+  nets: string[]
   invert: boolean
   sub: { name: string; url: string; format: string; category: string }
 }
@@ -61,6 +64,7 @@ const blank = (t: Kind): Cond => ({
   ips: null,
   part: 'domain',
   text: '',
+  nets: [],
   invert: false,
   sub: { name: '', url: '', format: 'auto', category: '' }
 })
@@ -82,14 +86,14 @@ const conflict = ref<Rule | null>(null)
 
 const FORMATS = ['auto', 'text', 'yaml', 'json', 'srs', 'mrs', 'dat']
 
-/** A ruleset reference as a condition: a custom one is "自定义规则集", the rest are sources. */
+/** A ruleset reference as a condition: a custom one is "自定义规则集", the rest are builtin sets. */
 function refCond(refId: string, part: Part): Cond {
   const custom = rulesets.value.find((set) => set.id === refId && set.type !== 'catalog')
   const cond = blank(custom ? 'set' : 'source')
   cond.ref = refId
   cond.part = part
   cond.label = setName(refId)
-  cond.provider = isCatalogId(refId) ? (refId.startsWith('meta:') ? 'MetaCubeX' : 'blackmatrix7') : '内置'
+  cond.provider = isCatalogId(refId) ? (refId.startsWith('meta:') ? 'MetaCubeX' : 'blackmatrix7') : '默认'
   if (!isCatalogId(refId) && !custom) {
     cond.names = true
     cond.ips = false
@@ -110,6 +114,8 @@ function fill(rule: Rule | undefined) {
   const names = namesText(match)
   if (names) conds.push({ ...blank('domain'), text: names })
   if (match.ip_cidr?.length) conds.push({ ...blank('ip'), text: match.ip_cidr.join('\n') })
+  if (match.port?.length || match.port_range?.length) conds.push({ ...blank('port'), text: portsText(match.port, match.port_range) })
+  if (match.network?.length) conds.push({ ...blank('network'), nets: [...match.network] })
   if (match.client?.length) conds.push({ ...blank('client'), text: match.client.join('\n'), invert: !!match.client_invert })
   Object.assign(form, {
     remark: rule.remark,
@@ -146,6 +152,24 @@ onMounted(load)
 
 // ---- conditions -----------------------------------------------------------------
 const hasClient = computed(() => form.conds.some((cond) => cond.t === 'client'))
+const isTransport = (cond: Cond) => cond.t === 'port' || cond.t === 'network'
+const hasTransport = computed(() => form.conds.some(isTransport))
+/** A condition matched on names (DNS). */
+const takesNames = (cond: Cond) => cond.t === 'domain' || ((cond.t === 'source' || cond.t === 'set') && cond.part !== 'ip')
+
+// The blocks shown by how they combine: names, then the IP part (either one matches), then
+// ports and networks, then clients (each and-ed with what is before it).
+const rank = (cond: Cond) => (cond.t === 'client' ? 4 : cond.t === 'network' ? 3 : cond.t === 'port' ? 2 : takesNames(cond) ? 0 : 1)
+const ordered = computed(() =>
+  form.conds
+    .map((cond, index) => ({ cond, index }))
+    .sort((a, b) => rank(a.cond) - rank(b.cond) || a.index - b.index)
+    .map((item, position, all) => {
+      const before = position ? rank(all[position - 1].cond) : -1
+      const own = rank(item.cond)
+      return { ...item, joint: before < 0 ? '' : before === own || own <= 1 ? '或' : '且' }
+    })
+)
 const customSets = computed(() => rulesets.value.filter((set) => set.type !== 'catalog'))
 
 function add(t: Kind) {
@@ -178,9 +202,11 @@ function pickSet(cond: Cond, value: string) {
   fitPart(cond)
 }
 
-/** Whether a source condition may take `part` (a rule with a client takes names only). */
+/** Whether a source condition may take `part` (a rule with a client takes names only, one with
+ * ports or networks IP prefixes only). */
 function partOk(cond: Cond, part: Part) {
   if (part !== 'domain' && hasClient.value) return false
+  if (part !== 'ip' && hasTransport.value) return false
   if (part === 'domain') return cond.names !== false
   if (part === 'ip') return cond.ips !== false
   return cond.names !== false && cond.ips !== false
@@ -188,6 +214,41 @@ function partOk(cond: Cond, part: Part) {
 
 function setKind(cond: Cond, t: Kind) {
   cond.t = t
+}
+
+/** Whether `cond` may become kind `t`, beside the other conditions. */
+function kindOk(cond: Cond, t: Kind) {
+  const others = form.conds.filter((item) => item !== cond)
+  if (t === 'ip') return !others.some((item) => item.t === 'client')
+  if (t === 'client') return !others.some((item) => item.t === 'client' || item.t === 'ip' || item.part !== 'domain' || isTransport(item))
+  if (t === 'domain') return !others.some(isTransport)
+  return !others.some((item) => takesNames(item) || item.t === 'client')
+}
+
+function toggleNet(cond: Cond, network: string) {
+  cond.nets = cond.nets.includes(network) ? cond.nets.filter((item) => item !== network) : [...cond.nets, network].sort()
+}
+
+// ---- a pasted sing-box headless rule -------------------------------------------------
+const pasting = ref(false)
+const pasted = ref('')
+const pasteError = ref('')
+function importRule() {
+  const result = parseHeadlessRule(pasted.value)
+  if ('error' in result) {
+    pasteError.value = result.error
+    return
+  }
+  const fields = result.fields
+  const names = namesText({ domain: fields.domain, suffix: fields.suffix, keyword: fields.keyword, regex: fields.regex })
+  if (names) form.conds.push({ ...blank('domain'), text: names })
+  if (fields.ip_cidr.length) form.conds.push({ ...blank('ip'), text: fields.ip_cidr.join('\n') })
+  if (fields.port.length || fields.port_range.length) form.conds.push({ ...blank('port'), text: portsText(fields.port, fields.port_range) })
+  if (fields.network.length) form.conds.push({ ...blank('network'), nets: [...fields.network].sort() })
+  if (fields.client.length) form.conds.push({ ...blank('client'), text: fields.client.join('\n') })
+  pasted.value = ''
+  pasteError.value = ''
+  pasting.value = false
 }
 
 const creating = ref(false)
@@ -236,23 +297,36 @@ const built = computed((): { match: Match; problem: string } => {
   for (const cond of form.conds) {
     if (cond.t === 'source' || cond.t === 'set') {
       if (!cond.ref || cond.ref === '__new') {
-        problem ||= cond.t === 'source' ? '有规则源还没选' : '有自定义规则集还没选'
+        problem ||= cond.t === 'source' ? '有内置规则集还没选' : '有自定义规则集还没选'
         continue
       }
       if (!partOk(cond, cond.part)) {
-        problem ||= hasClient.value ? `「${cond.label}」只能取域名部分（有客户端条件）` : `「${cond.label}」没有${cond.part === 'ip' ? ' IP' : '域名'}部分`
+        problem ||= hasClient.value
+          ? `「${cond.label}」只能取域名部分（有客户端条件）`
+          : hasTransport.value
+            ? `「${cond.label}」只能取 IP 部分（有端口或网络条件）`
+            : `「${cond.label}」没有${cond.part === 'ip' ? ' IP' : '域名'}部分`
       }
       if (cond.part !== 'ip') push('ruleset', [cond.ref])
       if (cond.part !== 'domain') push('ip_ruleset', [cond.ref])
     } else if (cond.t === 'domain') {
       const parsed = parseNames(cond.text)
       if (parsed.bad.length) problem ||= `域名无法识别：${parsed.bad[0]}`
-      if (!parsed.count) problem ||= '域名匹配器是空的'
+      if (!parsed.count) problem ||= '域名条件是空的'
       for (const [field, values] of Object.entries(parsed.fields)) push(field as keyof Match, values)
     } else if (cond.t === 'ip') {
       const values = lines(cond.text)
       if (!values.length) problem ||= '目标 IP 网段是空的'
       push('ip_cidr', values)
+    } else if (cond.t === 'port') {
+      const parsed = parsePorts(cond.text)
+      if (parsed.bad.length) problem ||= `端口无法识别：${parsed.bad[0]}`
+      if (!parsed.port.length && !parsed.port_range.length) problem ||= '目标端口是空的'
+      for (const port of parsed.port) if (!(match.port ??= []).includes(port)) match.port.push(port)
+      push('port_range', parsed.port_range)
+    } else if (cond.t === 'network') {
+      if (!cond.nets.length) problem ||= '网络没有选'
+      push('network', cond.nets)
     } else {
       const values = lines(cond.text)
       if (!values.length) problem ||= '客户端是空的'
@@ -262,6 +336,7 @@ const built = computed((): { match: Match; problem: string } => {
   }
   if (!form.conds.length) problem ||= '至少要有一个条件'
   if (match.client && (match.ip_cidr || match.ip_ruleset)) problem ||= '有客户端条件时不能带 IP 部分'
+  if ((match.port || match.port_range || match.network) && (match.client || form.conds.some(takesNames))) problem ||= TRANSPORT_WITH_NAMES
   return { match, problem }
 })
 
@@ -337,7 +412,7 @@ async function save(overwrite = false) {
   }
 }
 
-const kindLabel: Record<Kind, string> = { source: '规则源', set: '自定义规则集', domain: '匹配器', ip: '匹配器', client: '匹配器' }
+const kindLabel: Record<Kind, string> = { source: '内置规则集', set: '自定义规则集', domain: '自定义条件', ip: '自定义条件', client: '自定义条件', port: '自定义条件', network: '自定义条件' }
 </script>
 
 <template>
@@ -362,32 +437,46 @@ const kindLabel: Record<Kind, string> = { source: '规则源', set: '自定义�
           <h2>条件</h2>
           <span class="sp"></span>
           <div class="addbar">
-            <button class="btn sm" type="button" @click="add('source')">＋ 规则源</button>
+            <button class="btn sm" type="button" @click="add('source')">＋ 内置规则集</button>
             <button class="btn sm" type="button" @click="add('set')">＋ 自定义规则集</button>
-            <button class="btn sm" type="button" @click="add('domain')">＋ 匹配器</button>
+            <button class="btn sm" type="button" @click="add(hasTransport ? 'ip' : 'domain')">＋ 自定义条件</button>
+            <button class="btn sm ghost" type="button" @click="pasting = !pasting">粘贴 sing-box 规则</button>
           </div>
         </div>
 
-        <div v-for="(cond, index) in form.conds" :key="cond.key" class="cond">
+        <div v-if="pasting" class="cond">
+          <textarea v-model="pasted" class="inp mono" placeholder='{"ip_cidr": ["91.108.4.0/22"], "port": [443], "network": "tcp"}' aria-label="sing-box 规则"></textarea>
+          <div v-if="pasteError" class="err">{{ pasteError }}</div>
+          <div class="row" style="justify-content: flex-end">
+            <button class="btn sm" type="button" @click="pasting = false">取消</button>
+            <button class="btn sm pri" type="button" :disabled="!pasted.trim()" @click="importRule">导入</button>
+          </div>
+        </div>
+
+        <template v-for="{ cond, index, joint } in ordered" :key="cond.key">
+        <div v-if="joint" class="hint" style="text-align: center">{{ joint }}</div>
+        <div class="cond">
           <div class="row" style="gap: 8px">
             <span class="pill acc">{{ kindLabel[cond.t] }}</span>
             <select
-              v-if="['domain', 'ip', 'client'].includes(cond.t)"
+              v-if="['domain', 'ip', 'client', 'port', 'network'].includes(cond.t)"
               class="inp sm"
               :value="cond.t"
-              :aria-label="`匹配器类型 ${index + 1}`"
+              :aria-label="`条件类型 ${index + 1}`"
               @change="setKind(cond, ($event.target as HTMLSelectElement).value as Kind)"
             >
-              <option value="domain">域名</option>
-              <option value="ip" :disabled="form.conds.some((item) => item !== cond && item.t === 'client')">目标 IP 网段</option>
-              <option value="client" :disabled="form.conds.some((item) => item !== cond && (item.t === 'client' || item.t === 'ip' || item.part !== 'domain'))">客户端</option>
+              <option value="domain" :disabled="!kindOk(cond, 'domain')">域名</option>
+              <option value="ip" :disabled="!kindOk(cond, 'ip')">目标 IP 网段</option>
+              <option value="port" :disabled="!kindOk(cond, 'port')">目标端口</option>
+              <option value="network" :disabled="!kindOk(cond, 'network')">网络</option>
+              <option value="client" :disabled="!kindOk(cond, 'client')">客户端</option>
             </select>
             <span class="sp"></span>
             <button class="ico" type="button" :aria-label="`删除条件 ${index + 1}`" @click="form.conds.splice(index, 1)">✕</button>
           </div>
 
           <template v-if="cond.t === 'source'">
-            <SourcePicker v-if="!cond.ref" :label="`搜索规则源 ${index + 1}`" :names-only="hasClient" @pick="pickSource(cond, $event)" />
+            <SourcePicker v-if="!cond.ref" :label="`搜索内置规则集 ${index + 1}`" :names-only="hasClient" :ips-only="hasTransport" @pick="pickSource(cond, $event)" />
             <div v-else class="row" style="gap: 8px">
               <span>{{ cond.label }}</span>
               <span class="tag">{{ cond.provider }}</span>
@@ -437,10 +526,21 @@ const kindLabel: Record<Kind, string> = { source: '规则源', set: '自定义�
 
           <template v-if="cond.t === 'domain'">
             <textarea v-model="cond.text" class="inp" placeholder="domain:google.com&#10;full:www.example.com&#10;keyword:tracker&#10;regexp:^ads?\d*\." :aria-label="`域名 ${index + 1}`"></textarea>
-            <div class="hint" :style="{ color: parseNames(cond.text).bad.length ? 'var(--bad)' : '' }">{{ nameStats(cond.text) }}</div>
+            <div class="hint" :style="{ color: parseNames(cond.text).bad.length ? 'var(--bad)' : '' }">每行一个，命中任一即可 · {{ nameStats(cond.text) }}</div>
           </template>
           <template v-if="cond.t === 'ip'">
             <textarea v-model="cond.text" class="inp" placeholder="91.108.4.0/22&#10;2001:b28:f23d::/48" :aria-label="`目标 IP 网段 ${index + 1}`"></textarea>
+          </template>
+          <template v-if="cond.t === 'port'">
+            <textarea v-model="cond.text" class="inp mono" placeholder="443&#10;8000-9000" :aria-label="`目标端口 ${index + 1}`"></textarea>
+            <div v-if="parsePorts(cond.text).bad.length" class="hint" style="color: var(--bad)">无法识别：{{ parsePorts(cond.text).bad.slice(0, 3).join('、') }}</div>
+          </template>
+          <template v-if="cond.t === 'network'">
+            <div class="seg sm" style="align-self: flex-start">
+              <button v-for="network in ['tcp', 'udp']" :key="network" type="button" :class="{ on: cond.nets.includes(network) }" :aria-pressed="cond.nets.includes(network)" @click="toggleNet(cond, network)">
+                {{ network.toUpperCase() }}
+              </button>
+            </div>
           </template>
           <template v-if="cond.t === 'client'">
             <textarea v-model="cond.text" class="inp" placeholder="192.168.1.50&#10;192.168.1.0/24" :aria-label="`客户端 ${index + 1}`"></textarea>
@@ -450,6 +550,7 @@ const kindLabel: Record<Kind, string> = { source: '规则源', set: '自定义�
             </div>
           </template>
         </div>
+        </template>
       </div>
 
       <div class="card grid" style="gap: 12px">

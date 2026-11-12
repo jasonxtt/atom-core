@@ -153,7 +153,7 @@ async function remove(confirm: boolean) {
 
   <div class="card">
     <div class="hd">
-      <h2>规则源目录</h2>
+      <h2>内置规则集</h2>
       <span class="sp"></span>
       <button class="btn sm" type="button" :disabled="busy === 'catalog'" @click="sync">立即同步</button>
     </div>
@@ -187,7 +187,7 @@ async function remove(confirm: boolean) {
   </div>
 
   <div class="card">
-    <div class="hd"><h2>内置</h2></div>
+    <div class="hd"><h2>默认规则集</h2></div>
     <div class="tblwrap">
       <table>
         <thead>

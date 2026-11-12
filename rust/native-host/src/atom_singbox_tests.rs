@@ -44,17 +44,7 @@ impl FakeSingbox {
             ),
         )
         .unwrap();
-        // nft -f file: keeps a copy of each script in nft.log, fails on `nftfail`.
-        let nft = dir.join("nft.sh");
-        std::fs::write(
-            &nft,
-            format!(
-                "#!/bin/sh\nd={}\nif [ -f $d/nftfail ]; then echo 'Error: No such file or directory' >&2; exit 1; fi\ncat \"$2\" >> $d/nft.log\necho --- >> $d/nft.log\n",
-                dir.join("sb").display()
-            ),
-        )
-        .unwrap();
-        for file in [&binary, &reload, &nft] {
+        for file in [&binary, &reload] {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -164,8 +154,6 @@ impl FakeSingbox {
             redirect_port: 7892,
             tproxy_port: 7893,
             resolver_group: "domestic".to_owned(),
-            nft_table: Some("atom".to_owned()),
-            nft: vec![nft.display().to_string()],
         };
         Self {
             _serial: serial,
@@ -183,15 +171,6 @@ impl FakeSingbox {
         std::fs::read(self.host.dir.join("running.json")).ok()
     }
 
-    /// The nft scripts run so far, oldest first.
-    pub(crate) fn nft_scripts(&self) -> Vec<String> {
-        std::fs::read_to_string(self.host.dir.join("nft.log"))
-            .unwrap_or_default()
-            .split_terminator("---\n")
-            .map(str::to_owned)
-            .collect()
-    }
-
     pub(crate) fn reload_count(&self) -> usize {
         std::fs::read_to_string(self.host.dir.join("reloads"))
             .map(|text| text.lines().count())
@@ -201,12 +180,11 @@ impl FakeSingbox {
     /// The YAML `singbox` section for this stand-in.
     pub(crate) fn yaml(&self) -> String {
         format!(
-            "singbox: {{binary: '{}', dir: '{}', reload: ['{}'], clash_api: '{}', dns_in: '127.0.0.1:6666', atomdns: '127.0.0.1:53', redirect_port: 7892, tproxy_port: 7893, resolver_group: domestic, nft_table: atom, nft: ['{}']}}",
+            "singbox: {{binary: '{}', dir: '{}', reload: ['{}'], clash_api: '{}', dns_in: '127.0.0.1:6666', atomdns: '127.0.0.1:53', redirect_port: 7892, tproxy_port: 7893, resolver_group: domestic}}",
             self.host.binary.display(),
             self.host.dir.display(),
             self.host.reload[0],
             self.host.clash_api,
-            self.host.nft[0]
         )
     }
 }
@@ -329,75 +307,6 @@ fn clash_select_and_delay_go_through_the_api() {
 }
 
 #[test]
-fn nft_sets_replace_both_sets_in_one_script() {
-    let rules = [
-        IpRule {
-            cidrs: vec!["91.108.4.0/22".into(), "2001:b28:f23d::/48".into()],
-            action: Action::Direct,
-        },
-        IpRule {
-            cidrs: vec!["91.108.4.0/22".into(), "1.1.1.1/32".into()],
-            action: Action::Block,
-        },
-    ];
-    let sets = NftSets::of("28.0.0.0/8", &rules);
-    assert_eq!(
-        sets.iprule4,
-        ["91.108.4.0/22", "1.1.1.1/32"],
-        "IPv4 only, once"
-    );
-    assert_eq!(
-        nft_script("atom", &sets),
-        "flush set inet atom fakeip4\nadd element inet atom fakeip4 { 28.0.0.0/8 }\n\
-         flush set inet atom iprule4\nadd element inet atom iprule4 { 91.108.4.0/22, 1.1.1.1/32 }\n"
-    );
-    let empty = NftSets::of("28.0.0.0/8", &[]);
-    assert!(nft_script("atom", &empty).ends_with("flush set inet atom iprule4\n"));
-}
-
-#[test]
-fn nft_sets_follow_a_generated_configuration() {
-    let rules = [IpRule {
-        cidrs: vec!["91.108.4.0/22".into(), "2001:b28:f23d::/48".into()],
-        action: Action::Block,
-    }];
-    let mut state = sample_state();
-    state.settings.fakeip_range = "29.0.0.0/16".into();
-    let fake_host = Host {
-        binary: "/bin/true".into(),
-        dir: "/tmp/sb".into(),
-        reload: vec!["true".into()],
-        clash_api: "127.0.0.1:9090".parse().unwrap(),
-        dns_in: "127.0.0.1:6666".parse().unwrap(),
-        atomdns: "127.0.0.1:53".parse().unwrap(),
-        redirect_port: 7892,
-        tproxy_port: 7893,
-        resolver_group: "domestic".into(),
-        nft_table: Some("atom".into()),
-        nft: vec!["nft".into()],
-    };
-    let bytes = generate(&fake_host, &state, &rules, "udp://223.5.5.5", "s").unwrap();
-    assert_eq!(
-        NftSets::of_config(&bytes),
-        Some(NftSets::of("29.0.0.0/16", &rules))
-    );
-    assert_eq!(NftSets::of_config(b"{}"), None);
-}
-
-#[test]
-fn nft_sync_runs_the_script_and_reports_failures() {
-    let mut fake = FakeSingbox::start("nft");
-    let sets = NftSets::of("28.0.0.0/8", &[]);
-    assert_eq!(sync_nft(&fake.host, &sets), Ok(true));
-    assert_eq!(fake.nft_scripts(), [nft_script("atom", &sets)]);
-    std::fs::write(fake.host.dir.join("nftfail"), "").unwrap();
-    let error = sync_nft(&fake.host, &sets).unwrap_err();
-    assert!(error.contains("No such file"), "{error}");
-    fake.host.nft_table = None;
-    assert_eq!(sync_nft(&fake.host, &sets), Ok(false));
-}
-
-#[test]
 fn chunked_bodies_are_decoded() {
     assert_eq!(
         decode_chunked(b"3\r\nabc\r\n2;x=y\r\nde\r\n0\r\n\r\n").unwrap(),
@@ -444,8 +353,6 @@ fn generated(state: &ProxyState, ip_rules: &[IpRule]) -> Value {
         redirect_port: 7892,
         tproxy_port: 7893,
         resolver_group: "domestic".into(),
-        nft_table: None,
-        nft: vec!["nft".into()],
     };
     let bytes = generate(&fake_host, state, ip_rules, "udp://223.5.5.5", "secret").unwrap();
     assert_eq!(
@@ -469,13 +376,26 @@ fn generation_follows_the_design_table() {
     let ip_rules = vec![
         IpRule {
             cidrs: vec!["91.108.4.0/22".into()],
+            ports: Vec::new(),
+            port_ranges: Vec::new(),
+            networks: Vec::new(),
             action: Action::Proxy {
                 group_id: "g-default".into(),
             },
         },
         IpRule {
             cidrs: vec!["10.9.0.0/16".into()],
+            ports: Vec::new(),
+            port_ranges: Vec::new(),
+            networks: Vec::new(),
             action: Action::Block,
+        },
+        IpRule {
+            cidrs: Vec::new(),
+            ports: vec![22, 5201],
+            port_ranges: vec!["6000:6010".into()],
+            networks: vec!["tcp".into()],
+            action: Action::Direct,
         },
     ];
     let config = generated(&sample_state(), &ip_rules);
@@ -510,16 +430,23 @@ fn generation_follows_the_design_table() {
     );
     assert_eq!(rules[1]["action"], "resolve");
     assert_eq!(rules[1]["server"], "atomdns");
+    // Every sing-box rule leaves FakeIP destinations out (a safeguard: the
+    // patch routes them by binding or Final before any rule).
+    let not_fakeip = json!({"ip_cidr": ["28.0.0.0/8"], "invert": true});
     assert_eq!(
         rules[2],
-        json!({"ip_cidr": ["91.108.4.0/22"], "action": "route", "outbound": "g-default"})
+        json!({"type": "logical", "mode": "and", "rules": [not_fakeip, {"ip_cidr": ["91.108.4.0/22"]}], "action": "route", "outbound": "g-default"})
     );
     assert_eq!(
         rules[3],
-        json!({"ip_cidr": ["10.9.0.0/16"], "action": "reject"})
+        json!({"type": "logical", "mode": "and", "rules": [not_fakeip, {"ip_cidr": ["10.9.0.0/16"]}], "action": "reject"})
     );
-    assert_eq!(rules[4]["domain_regex"], json!(["."]));
-    assert_eq!(rules[4]["outbound"], "direct");
+    assert_eq!(
+        rules[4],
+        json!({"type": "logical", "mode": "and", "rules": [not_fakeip, {"port": [22, 5201], "port_range": ["6000:6010"], "network": ["tcp"]}], "action": "route", "outbound": "direct"})
+    );
+    assert_eq!(rules[5]["domain_regex"], json!(["."]));
+    assert_eq!(rules[5]["outbound"], "direct");
     assert_eq!(config["dns"]["servers"][0]["inet4_range"], "28.0.0.0/8");
     assert_eq!(config["dns"]["servers"][1]["server"], "223.5.5.5");
     assert_eq!(config["dns"]["servers"][2]["server_port"], 53);

@@ -1411,7 +1411,7 @@ paths:
   /status:
     get:
       tags: [status]
-      summary: Both processes, the latest application, the binding ledger and nft
+      summary: Both processes, the latest application and the binding ledger
       operationId: getStatus
       responses:
         "200":
@@ -2623,7 +2623,15 @@ components:
         `ip_ruleset`) is matched by sing-box with the same action; beside name
         conditions the rule matches either (the names in DNS, the prefixes in
         sing-box). A rule with `client` cannot proxy and cannot have an IP
-        part (400).
+        part (400). `port`, `port_range` and `network` are matched by sing-box
+        on real addresses only, like a sing-box headless rule: different
+        fields and-ed (with the IP part too), the values of one field or-ed.
+        A DNS query has no port, so they never go with name or client
+        conditions (400). sing-box routes a FakeIP destination by its
+        binding or Final before any rule, and the generated rules leave the
+        FakeIP range out; an `ip_cidr` entry overlapping the FakeIP range is
+        refused (400), as is a `fakeip_range` change overlapping an
+        `ip_cidr` entry.
       properties:
         domain:
           type: array
@@ -2669,6 +2677,25 @@ components:
             names; both: the whole set). A set without prefixes adds nothing.
           items:
             type: string
+        port:
+          type: array
+          description: Target ports, 1 to 65535.
+          items:
+            type: integer
+            minimum: 1
+            maximum: 65535
+        port_range:
+          type: array
+          description: |
+            Target port ranges, `start:end` as sing-box writes them; either
+            side may be open (`1000:`, `:2000`), `start` at most `end`.
+          items:
+            type: string
+        network:
+          type: array
+          items:
+            type: string
+            enum: [tcp, udp]
     Action:
       oneOf:
         - type: object
@@ -3200,7 +3227,7 @@ components:
           type: string
     Status:
       type: object
-      required: [atomdns, singbox, bindings, warnings, nft]
+      required: [atomdns, singbox, bindings, warnings]
       properties:
         atomdns:
           type: object
@@ -3264,43 +3291,3 @@ components:
               type: array
               items:
                 type: string
-        nft:
-          type: object
-          properties:
-            fakeip_range:
-              type: string
-            ip_cidr:
-              type: object
-              properties:
-                inet4:
-                  type: array
-                  items:
-                    type: string
-                inet6:
-                  type: array
-                  items:
-                    type: string
-            table:
-              type: string
-              nullable: true
-            sync:
-              type: object
-              nullable: true
-              properties:
-                at:
-                  type: integer
-                ok:
-                  type: boolean
-                error:
-                  type: string
-                sets:
-                  type: object
-                  properties:
-                    fakeip4:
-                      type: array
-                      items:
-                        type: string
-                    iprule4:
-                      type: array
-                      items:
-                        type: string

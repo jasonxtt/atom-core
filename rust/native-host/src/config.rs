@@ -3860,8 +3860,6 @@ fn compile_singbox_host(
             "redirect_port",
             "tproxy_port",
             "resolver_group",
-            "nft_table",
-            "nft",
         ],
         path,
     )?;
@@ -3896,36 +3894,6 @@ fn compile_singbox_host(
     if reload.is_empty() {
         return Err(ConfigError::new(reload_path, "reload needs a command"));
     }
-    let nft_table = match args.get("nft_table") {
-        None | Some(RawValue::Null) => None,
-        Some(value) => {
-            let key_path = format!("{path}.nft_table");
-            let table = expect_string(value, &key_path)?;
-            if table.is_empty()
-                || !table
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            {
-                return Err(ConfigError::new(
-                    key_path,
-                    "an nft table name is letters, digits and `_`",
-                ));
-            }
-            Some(table)
-        }
-    };
-    let nft_path = format!("{path}.nft");
-    let nft: Vec<String> = match args.get("nft") {
-        None | Some(RawValue::Null) => vec!["nft".to_owned()],
-        Some(value) => expect_sequence(value, &nft_path)?
-            .iter()
-            .enumerate()
-            .map(|(index, item)| expect_string(item, &format!("{nft_path}[{index}]")))
-            .collect::<Result<_, _>>()?,
-    };
-    if nft.is_empty() {
-        return Err(ConfigError::new(nft_path, "nft needs a command"));
-    }
     Ok(crate::atom_singbox::Host {
         binary: under_root(string("binary")?),
         dir: under_root(string("dir")?),
@@ -3936,8 +3904,6 @@ fn compile_singbox_host(
         redirect_port: port("redirect_port")?,
         tproxy_port: port("tproxy_port")?,
         resolver_group: string("resolver_group")?,
-        nft_table,
-        nft,
     })
 }
 

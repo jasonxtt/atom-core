@@ -53,12 +53,6 @@ pub(crate) struct Host {
     pub(crate) tproxy_port: u16,
     /// The AtomDNS upstream group the default resolver comes from.
     pub(crate) resolver_group: String,
-    /// The nft table (`inet <name>`) whose sets atom keeps current
-    /// (design §9.4); `None`: no nft rules on this host.
-    pub(crate) nft_table: Option<String>,
-    /// The nft program (and leading arguments); the script file is appended
-    /// after `-f`.
-    pub(crate) nft: Vec<String>,
 }
 
 impl Host {
@@ -78,10 +72,16 @@ impl Host {
     }
 }
 
-/// One IP rule (design §4.6), in table order.
+/// One rule sing-box matches (design §4.6), in table order: target IP
+/// prefixes, ports and networks; the fields that are empty do not restrict.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct IpRule {
     pub(crate) cidrs: Vec<String>,
+    pub(crate) ports: Vec<u16>,
+    /// `start:end` (either side may be open), as sing-box writes them.
+    pub(crate) port_ranges: Vec<String>,
+    /// `tcp`, `udp`.
+    pub(crate) networks: Vec<String>,
     pub(crate) action: Action,
 }
 
@@ -188,13 +188,46 @@ pub(crate) fn generate(
         }),
     ];
     for rule in ip_rules {
-        rules.push(match &rule.action {
+        // The conditions, and as a safeguard never a FakeIP destination: the
+        // sing-box patch routes FakeIP connections by their binding or Final
+        // before any rule, and the rules are for real addresses only.
+        let mut matched = Map::new();
+        if !rule.cidrs.is_empty() {
+            matched.insert("ip_cidr".into(), json!(rule.cidrs));
+        }
+        if !rule.ports.is_empty() {
+            matched.insert("port".into(), json!(rule.ports));
+        }
+        if !rule.port_ranges.is_empty() {
+            matched.insert("port_range".into(), json!(rule.port_ranges));
+        }
+        if !rule.networks.is_empty() {
+            matched.insert("network".into(), json!(rule.networks));
+        }
+        let mut routed = Map::new();
+        routed.insert("type".into(), json!("logical"));
+        routed.insert("mode".into(), json!("and"));
+        routed.insert(
+            "rules".into(),
+            json!([
+                {"ip_cidr": [state.settings.fakeip_range], "invert": true},
+                Value::Object(matched)
+            ]),
+        );
+        match &rule.action {
             Action::Proxy { group_id } => {
-                json!({"ip_cidr": rule.cidrs, "action": "route", "outbound": group_id})
+                routed.insert("action".into(), json!("route"));
+                routed.insert("outbound".into(), json!(group_id));
             }
-            Action::Direct => json!({"ip_cidr": rule.cidrs, "action": "route", "outbound": DIRECT}),
-            Action::Block => json!({"ip_cidr": rule.cidrs, "action": "reject"}),
-        });
+            Action::Direct => {
+                routed.insert("action".into(), json!("route"));
+                routed.insert("outbound".into(), json!(DIRECT));
+            }
+            Action::Block => {
+                routed.insert("action".into(), json!("reject"));
+            }
+        }
+        rules.push(Value::Object(routed));
     }
     // A name AtomDNS answered with a real address goes direct; an address
     // the client sent itself falls to Final.
@@ -521,101 +554,6 @@ pub(crate) fn rollback(host: &Host, old: Option<&[u8]>, old_chosen: &[(String, S
         Ok(()) => "已回滚到旧配置".to_owned(),
         Err(error) => format!("已写回旧配置，但重载后没有确认: {error}"),
     }
-}
-
-// ---------------------------------------------------------------------------
-// nft sets (design §9.4)
-// ---------------------------------------------------------------------------
-
-/// What the nft rules send to sing-box: the FakeIP range and the IPv4 IP
-/// rule ranges (IPv6 IP rules work through the mixed inbound only).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct NftSets {
-    pub(crate) fakeip4: Vec<String>,
-    pub(crate) iprule4: Vec<String>,
-}
-
-impl NftSets {
-    pub(crate) fn of(fakeip_range: &str, ip_rules: &[IpRule]) -> Self {
-        let mut iprule4: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for cidr in ip_rules.iter().flat_map(|rule| &rule.cidrs) {
-            if !cidr.contains(':') && seen.insert(cidr) {
-                iprule4.push(cidr.clone());
-            }
-        }
-        Self {
-            fakeip4: vec![fakeip_range.to_owned()],
-            iprule4,
-        }
-    }
-
-    /// The sets a generated configuration needs: what sing-box runs, which
-    /// is not the atom state after a failed application (rolled back).
-    /// `None` when the file is not a configuration atom generated.
-    pub(crate) fn of_config(bytes: &[u8]) -> Option<Self> {
-        let value: Value = serde_json::from_slice(bytes).ok()?;
-        let range = value
-            .pointer("/dns/servers")?
-            .as_array()?
-            .iter()
-            .find(|server| server["type"] == "fakeip")?
-            .get("inet4_range")?
-            .as_str()?
-            .to_owned();
-        let mut iprule4: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for rule in value.pointer("/route/rules")?.as_array()? {
-            for cidr in rule["ip_cidr"].as_array().into_iter().flatten() {
-                let cidr = cidr.as_str()?;
-                if !cidr.contains(':') && seen.insert(cidr) {
-                    iprule4.push(cidr.to_owned());
-                }
-            }
-        }
-        Some(Self {
-            fakeip4: vec![range],
-            iprule4,
-        })
-    }
-}
-
-/// One nft transaction: both sets emptied and filled again. The sets are
-/// declared by the installed rules (`flags interval; auto-merge`), so
-/// overlapping ranges merge instead of failing.
-pub(crate) fn nft_script(table: &str, sets: &NftSets) -> String {
-    let mut script = String::new();
-    for (name, elements) in [("fakeip4", &sets.fakeip4), ("iprule4", &sets.iprule4)] {
-        script.push_str(&format!("flush set inet {table} {name}\n"));
-        if !elements.is_empty() {
-            script.push_str(&format!(
-                "add element inet {table} {name} {{ {} }}\n",
-                elements.join(", ")
-            ));
-        }
-    }
-    script
-}
-
-/// Replaces the sets of `host`'s table (atomically: `nft -f` runs the
-/// script as one transaction). `Ok(false)`: the host has no nft table.
-pub(crate) fn sync_nft(host: &Host, sets: &NftSets) -> Result<bool, String> {
-    let Some(table) = &host.nft_table else {
-        return Ok(false);
-    };
-    let file = std::env::temp_dir().join(format!(
-        "atom-nft-{}-{}.nft",
-        std::process::id(),
-        new_secret()
-    ));
-    std::fs::write(&file, nft_script(table, sets))
-        .map_err(|error| format!("写入 {} 失败: {error}", file.display()))?;
-    let mut command = host.nft.clone();
-    command.push("-f".to_owned());
-    command.push(file.display().to_string());
-    let result = run(&command, RELOAD_TIMEOUT, "更新 nft 集合");
-    let _ = std::fs::remove_file(&file);
-    result.map(|()| true)
 }
 
 // ---------------------------------------------------------------------------

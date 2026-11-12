@@ -31,11 +31,8 @@
 #   clash_api       Clash API 只监听本机
 #   dns_in          FakeIP DNS 入站，必须和 forward_1.yaml 里 nocnfake 的地址一致
 #   atomdns         本机 AtomDNS 的 DNS 地址，mixed 入站（settings 里的 mixed_port，默认 7890）先用它 resolve
-#   redirect_port / tproxy_port   nft 把 FakeIP 网段和 IP 规则网段的 TCP / UDP 导进来的端口
+#   redirect_port / tproxy_port   nft 把 LAN 进来的 TCP / UDP 全部导进来的端口（atom docs/deploy-nft.md）
 #   resolver_group  解析节点域名的默认上游：取这个上游组里第一个 udp/tcp 地址（settings 的 resolver 可以另外指定）
-#   nft_table       nft 表 inet <名字>（由安装器装好，见 atom docs/deploy-nft.md）。应用成功后和启动时，
-#                   atom 用 `nft -f` 一次性替换其中的集合 fakeip4（FakeIP 网段）和 iprule4（IPv4 IP 规则网段）；
-#                   失败只记日志和 status.nft.sync。不写就不碰 nft。nft 是命令（默认 [nft]）
 plugins:
   - tag: atom_rules
     type: atom_rules
@@ -56,4 +53,3 @@ plugins:
         redirect_port: 7892
         tproxy_port: 7893
         resolver_group: domestic
-        nft_table: atom

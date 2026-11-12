@@ -156,7 +156,6 @@ const uptime = computed(() => {
   return started ? duration(Date.now() / 1000 - started) : ''
 })
 const lastApply = computed(() => status.value?.last_apply ?? null)
-const nftSync = computed(() => status.value?.nft.sync as { ok?: boolean; error?: string; sets?: { fakeip4?: string[]; iprule4?: string[] } } | null | undefined)
 
 const applying = ref(false)
 async function reapply() {
@@ -314,7 +313,7 @@ async function reapply() {
       </div>
     </div>
     <div class="card">
-      <div class="hd"><h2>绑定与 nft</h2></div>
+      <div class="hd"><h2>绑定</h2></div>
       <div class="grid g2" style="gap: 8px">
         <div class="tile">
           <div class="k">绑定账本</div>
@@ -323,15 +322,6 @@ async function reapply() {
             上次重算：{{ triggers[status.bindings.last.trigger ?? ''] ?? status.bindings.last.trigger }} · 改 {{ status.bindings.last.changed ?? 0 }} · 失败
             {{ status.bindings.last.failed ?? 0 }}
           </div>
-        </div>
-        <div class="tile">
-          <div class="k">nft 集合</div>
-          <template v-if="nftSync">
-            <div class="v" :style="{ color: nftSync.ok ? 'var(--ok)' : 'var(--bad)' }">{{ nftSync.ok ? '已同步' : '同步失败' }}</div>
-            <div class="s">fakeip4 {{ nftSync.sets?.fakeip4?.length ?? 0 }} 段 · iprule4 {{ nftSync.sets?.iprule4?.length ?? 0 }} 段</div>
-            <div class="s" v-if="nftSync.error" style="color: var(--bad)">{{ nftSync.error }}</div>
-          </template>
-          <div class="v" v-else>—</div>
         </div>
       </div>
     </div>

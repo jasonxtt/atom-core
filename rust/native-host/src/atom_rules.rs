@@ -10,10 +10,12 @@
 //! `ruleset`) are one class and the `client` addresses another. Within a
 //! class any entry may match; every class a rule uses must match;
 //! `client_invert` makes the client condition "not in the list". A rule
-//! with a `client` condition can only be direct or block. `ip_cidr` rules
-//! are matched by sing-box (design §4.6): they stand alone (no name or
-//! client condition), take no part in the DNS table, and are compiled into
-//! the generated sing-box route rules in table order ([`singbox`]).
+//! with a `client` condition can only be direct or block. The IP part
+//! (`ip_cidr`, `ip_ruleset`) and the port and network conditions (`port`,
+//! `port_range`, `network`) are matched by sing-box on real addresses
+//! (design §4.6): they are compiled into the generated sing-box route rules
+//! in table order ([`singbox`]); a rule with port or network conditions has
+//! no name or client condition (a DNS query has no port).
 //!
 //! With a `singbox` section in the plugin arguments the table also owns the
 //! proxy side (nodes, groups, Final, settings: [`crate::atom_proxy`]): a
@@ -49,7 +51,7 @@ use crate::managed::DomainSetHandle;
 use crate::rule_sources::Live;
 
 mod singbox;
-pub(crate) use singbox::{last_apply, last_nft};
+pub(crate) use singbox::last_apply;
 
 pub(crate) const RULES_FILE: &str = "webinfo/atom_rules.json";
 pub(crate) const RULESETS_FILE: &str = "webinfo/atom_rulesets.json";
@@ -108,12 +110,27 @@ pub(crate) struct Match {
     /// together the whole set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) ip_ruleset: Vec<String>,
+    /// Target ports (matched by sing-box, real addresses only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) port: Vec<u16>,
+    /// Target port ranges, `start:end` (either side may be open).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) port_range: Vec<String>,
+    /// `tcp` or `udp` (matched by sing-box).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) network: Vec<String>,
 }
 
 impl Match {
     /// Conditions sing-box matches (target IP prefixes).
     fn has_ip(&self) -> bool {
         !(self.ip_cidr.is_empty() && self.ip_ruleset.is_empty())
+    }
+
+    /// Port and network conditions (matched by sing-box; a DNS query has no
+    /// port, so they never go with name or client conditions).
+    fn has_transport(&self) -> bool {
+        !(self.port.is_empty() && self.port_range.is_empty() && self.network.is_empty())
     }
 
     fn has_name(&self) -> bool {
@@ -659,15 +676,15 @@ fn ip_entry(value: &str) -> Result<String, Refusal> {
     })
 }
 
-/// The enabled `ip_cidr` rules of `rules`, in order: what sing-box matches.
-/// The IP rules sing-box matches, in table order: every enabled rule with
-/// an IP part (its `ip_cidr` and the IP prefixes of its `ip_ruleset`).
+/// The rules sing-box matches, in table order: every enabled rule with an
+/// IP part (its `ip_cidr` and the IP prefixes of its `ip_ruleset`) or port
+/// and network conditions.
 pub(crate) fn ip_rules(state: &State) -> Vec<crate::atom_singbox::IpRule> {
     state
         .rules
         .iter()
-        .filter(|rule| rule.enabled && rule.matches.has_ip())
-        .map(|rule| {
+        .filter(|rule| rule.enabled && (rule.matches.has_ip() || rule.matches.has_transport()))
+        .filter_map(|rule| {
             let mut cidrs: Vec<String> = Vec::new();
             let mut seen = std::collections::HashSet::new();
             let from_sets = rule
@@ -687,14 +704,74 @@ pub(crate) fn ip_rules(state: &State) -> Vec<crate::atom_singbox::IpRule> {
                     cidrs.push(cidr);
                 }
             }
-            crate::atom_singbox::IpRule {
-                cidrs,
-                action: rule.action.clone(),
+            // A rule whose sets have no prefix (yet) adds no sing-box rule:
+            // without them it would match every address.
+            if rule.matches.has_ip() && cidrs.is_empty() {
+                return None;
             }
+            let mut ports = rule.matches.port.clone();
+            ports.sort_unstable();
+            ports.dedup();
+            let mut port_ranges: Vec<String> = Vec::new();
+            for value in &rule.matches.port_range {
+                if let Ok(range) = port_range_entry(value) {
+                    if !port_ranges.contains(&range) {
+                        port_ranges.push(range);
+                    }
+                }
+            }
+            let mut networks: Vec<String> = Vec::new();
+            for network in ["tcp", "udp"] {
+                if rule.matches.network.iter().any(|value| value == network) {
+                    networks.push(network.to_owned());
+                }
+            }
+            Some(crate::atom_singbox::IpRule {
+                cidrs,
+                ports,
+                port_ranges,
+                networks,
+                action: rule.action.clone(),
+            })
         })
-        // A rule whose sets have no prefix (yet) adds no sing-box rule.
-        .filter(|rule| !rule.cidrs.is_empty())
         .collect()
+}
+
+/// A `port_range` entry in sing-box's `start:end` form (either side may be
+/// open, not both; `start` at most `end`).
+fn port_range_entry(value: &str) -> Result<String, Refusal> {
+    let invalid = || {
+        Refusal::invalid(format!(
+            "port_range 条目 `{value}` 无效：写成 起始:结束（如 1000:2000），端口 1 到 65535"
+        ))
+    };
+    let (start, end) = value.trim().split_once(':').ok_or_else(invalid)?;
+    let side = |text: &str| -> Result<Option<u16>, Refusal> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        match text.parse::<u16>() {
+            Ok(port) if port > 0 => Ok(Some(port)),
+            _ => Err(invalid()),
+        }
+    };
+    match (side(start)?, side(end)?) {
+        (None, None) => Err(invalid()),
+        (Some(start), Some(end)) if start > end => Err(invalid()),
+        (start, end) => Ok(format!(
+            "{}:{}",
+            start.map(|port| port.to_string()).unwrap_or_default(),
+            end.map(|port| port.to_string()).unwrap_or_default()
+        )),
+    }
+}
+
+/// Whether two IPv4 prefixes share an address.
+fn overlaps_v4(a: (std::net::Ipv4Addr, u8), b: (std::net::Ipv4Addr, u8)) -> bool {
+    let bits = a.1.min(b.1);
+    let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
+    u32::from(a.0) & mask == u32::from(b.0) & mask
 }
 
 impl AtomRules {
@@ -950,6 +1027,42 @@ impl AtomRules {
                 "client_invert 只能和 client 条件一起用",
             )));
         }
+        // Port and network conditions are matched by sing-box on real
+        // addresses: a DNS query has no port, so they never go with name or
+        // client conditions.
+        if m.has_transport() {
+            if self.proxy.is_none() {
+                return Err(at(Refusal::invalid(
+                    "port、port_range、network 条件由 sing-box 匹配，需要配置里的 singbox 段",
+                )));
+            }
+            if m.has_name() || !m.client.is_empty() {
+                return Err(at(Refusal::invalid(
+                    "带端口或网络条件的规则不能再带域名类条件或客户端条件：DNS 查询时不知道端口",
+                )));
+            }
+            if m.port.len() + m.port_range.len() > MAX_LIST_RULES {
+                return Err(at(Refusal::invalid(format!(
+                    "port、port_range 条目超过 {MAX_LIST_RULES}"
+                ))));
+            }
+            if m.port.contains(&0) {
+                return Err(at(Refusal::invalid("port 条目要在 1 到 65535 之间")));
+            }
+            for value in &m.port_range {
+                port_range_entry(value).map_err(at)?;
+            }
+            for value in &m.network {
+                if value != "tcp" && value != "udp" {
+                    return Err(at(Refusal::invalid(format!(
+                        "network 条目 `{value}` 无效：只能是 tcp 或 udp"
+                    ))));
+                }
+            }
+            if let Action::Proxy { group_id } = &rule.action {
+                validate_group(group_id, proxy).map_err(at)?;
+            }
+        }
         // The IP part (`ip_cidr`, `ip_ruleset`) is matched by sing-box; beside
         // name conditions it is the same rule (atom step 6b): the names here,
         // the prefixes there, one action.
@@ -969,8 +1082,28 @@ impl AtomRules {
                     "ip_cidr 条目超过 {MAX_LIST_RULES}"
                 ))));
             }
+            // A FakeIP destination is decided by its binding or Final, never
+            // by an IP rule (the sing-box patch): a rule over the FakeIP
+            // range would never apply there.
+            let fakeip = proxy.and_then(|proxy| {
+                match crate::rule_formats::parse_prefix(&proxy.settings.fakeip_range)? {
+                    (IpAddr::V4(network), bits) => {
+                        Some((network, bits, proxy.settings.fakeip_range.as_str()))
+                    }
+                    _ => None,
+                }
+            });
             for value in &m.ip_cidr {
-                ip_entry(value).map_err(at)?;
+                let entry = ip_entry(value).map_err(at)?;
+                if let (Some((network, bits, range)), Some((IpAddr::V4(address), length))) =
+                    (fakeip, crate::rule_formats::parse_prefix(&entry))
+                {
+                    if overlaps_v4((address, length), (network, bits)) {
+                        return Err(at(Refusal::invalid(format!(
+                            "ip_cidr 条目 `{value}` 和 FakeIP 网段 `{range}` 重叠"
+                        ))));
+                    }
+                }
             }
             for id in &m.ip_ruleset {
                 if !state.rulesets.iter().any(|set| &set.id == id) {
@@ -982,9 +1115,9 @@ impl AtomRules {
             if let Action::Proxy { group_id } = &rule.action {
                 validate_group(group_id, proxy).map_err(at)?;
             }
-            if !m.has_name() {
-                return Ok(None);
-            }
+        }
+        if (m.has_ip() || m.has_transport()) && !m.has_name() {
+            return Ok(None);
         }
         if !m.has_name() && m.client.is_empty() {
             return Err(at(Refusal::invalid("规则至少要有一个匹配条件")));
@@ -1432,7 +1565,8 @@ impl AtomRules {
 
     /// The table without ruleset `id` (a confirmed deletion): it leaves every
     /// rule naming it, and a rule left without any name or IP condition goes
-    /// (a client condition alone would widen it to every name). `None` when
+    /// (a client condition alone would widen it to every name, a port or
+    /// network condition alone to every address). `None` when
     /// no rule names it.
     pub(crate) fn plan_without_ruleset(&self, id: &str) -> Option<State> {
         let mut next = self.state.borrow().clone();

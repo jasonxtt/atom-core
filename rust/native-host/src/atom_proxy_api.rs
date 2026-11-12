@@ -705,16 +705,6 @@ async fn status(rules: &AtomRules) -> Reply {
         }
         _ => None,
     };
-    let (mut v4, mut v6) = (Vec::new(), Vec::new());
-    let mut seen = std::collections::HashSet::new();
-    for rule in rules.current_ip_rules() {
-        for cidr in rule.cidrs {
-            if seen.insert(cidr.clone()) {
-                let list = if cidr.contains(':') { &mut v6 } else { &mut v4 };
-                list.push(cidr);
-            }
-        }
-    }
     let host_view = host.as_ref().map(|host| {
         json!({
             "config": host.config_path().display().to_string(),
@@ -737,14 +727,6 @@ async fn status(rules: &AtomRules) -> Reply {
             "last_apply": crate::atom_rules::last_apply(),
             "bindings": crate::atom_ledger::view(),
             "warnings": {"empty_groups": current.empty_groups()},
-            // For the nft rules (atom steps 4 and 7): what must reach sing-box.
-            "nft": {
-                "fakeip_range": current.settings.fakeip_range,
-                "ip_cidr": {"inet4": v4, "inet6": v6},
-                "table": host.as_ref().and_then(|host| host.nft_table.clone()),
-                // The latest update of the nft sets (none: not kept here).
-                "sync": crate::atom_rules::last_nft(),
-            },
         }),
     )
 }
