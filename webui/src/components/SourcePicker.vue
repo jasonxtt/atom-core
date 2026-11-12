@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { call, client, describe, type Schemas } from '../api/client'
-import { builtins } from '../composables/rules'
 
-/** A rule source picked: a builtin set or a catalog entry (`names`/`ips` null: unknown yet). */
+/** A catalog entry picked (`names`/`ips` null: unknown yet). */
 export interface Source {
   id: string
   name: string
@@ -24,7 +23,8 @@ const error = ref('')
 let timer: ReturnType<typeof setTimeout> | undefined
 let asked = 0
 
-// The catalog is searched on the server (debounced); the builtin sets here.
+// The catalog is searched on the server (debounced). Only the catalog's two providers are offered:
+// the default sets (adguard, geosite_cn, ...) stay on the rules that already use them.
 watch(query, (text) => {
   clearTimeout(timer)
   timer = setTimeout(async () => {
@@ -42,14 +42,9 @@ watch(query, (text) => {
 }, { immediate: true })
 onUnmounted(() => clearTimeout(timer))
 
-const options = computed<Source[]>(() => {
-  const text = query.value.trim().toLowerCase()
-  const local = builtins.value
-    .filter((item) => item.usable && (!text || `${item.id} ${item.name}`.toLowerCase().includes(text)))
-    .map((item) => ({ id: item.id, name: item.name, provider: '默认', names: true, ips: false }))
-  const remote = entries.value.map((entry) => ({ id: entry.id, name: entry.name, provider: PROVIDERS[entry.provider] ?? entry.provider, names: entry.names ?? null, ips: entry.ips ?? null }))
-  return [...local, ...remote]
-})
+const options = computed<Source[]>(() =>
+  entries.value.map((entry) => ({ id: entry.id, name: entry.name, provider: PROVIDERS[entry.provider] ?? entry.provider, names: entry.names ?? null, ips: entry.ips ?? null }))
+)
 
 // With a client condition only names can be taken, with a port or network condition only IP
 // prefixes: a source without that part is unusable.

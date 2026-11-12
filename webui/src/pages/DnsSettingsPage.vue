@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ApiError, call, client, describe, type Schemas } from '../api/client'
 import AppModal from '../components/AppModal.vue'
 import DnsTabs from '../components/DnsTabs.vue'
@@ -24,6 +25,7 @@ const CACHE: [Toggle, string][] = [
 ]
 const LEARN: Record<LearnKey, string> = { remember_direct: '直连', remember_proxy: '代理', no_v4: '无 V4', no_v6: '无 V6' }
 
+const route = useRoute()
 const dns = ref<Dns | null>(null)
 const form = reactive({
   core_mode: 'compat' as 'compat' | 'safe',
@@ -140,6 +142,11 @@ onMounted(async () => {
   ])
   const failed = results.find((result) => result.status === 'rejected')
   errors.load = failed ? describe((failed as PromiseRejectedResult).reason) : ''
+  // `?at=mode|learning` (from the rules page's original judgement) shows that setting.
+  if (typeof route.query.at === 'string') {
+    await nextTick()
+    document.getElementById(`dset-${route.query.at}`)?.scrollIntoView({ block: 'center' })
+  }
 })
 
 // Only what changed is sent (the last write wins: `dns` carries no version).
@@ -402,7 +409,7 @@ async function saveRewrite() {
           <span class="sp"></span>
           <button class="btn sm pri" type="button" :disabled="!!busy || !changed('resolve')" @click="saveDns('resolve')">保存</button>
         </div>
-        <div class="field">
+        <div id="dset-mode" class="field">
           <span class="label">核心模式</span>
           <div class="seg" style="align-self: flex-start">
             <button type="button" :class="{ on: form.core_mode === 'compat' }" @click="form.core_mode = 'compat'">兼容模式</button>
@@ -506,7 +513,7 @@ async function saveRewrite() {
         </div>
       </div>
 
-      <div v-if="dns" class="card grid" style="gap: 12px">
+      <div v-if="dns" id="dset-learning" class="card grid" style="gap: 12px">
         <div class="hd" style="margin: 0">
           <h2>域名学习</h2>
           <span class="sp"></span>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ApiError, call, client, describe } from '../api/client'
 import AppModal from '../components/AppModal.vue'
 import RulesTabs from '../components/RulesTabs.vue'
@@ -9,6 +10,7 @@ import { refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
 import { ago } from '../format'
 
+const route = useRoute()
 const error = ref('')
 const catalog = ref<{ size: number; updated_at: number } | null>(null)
 
@@ -21,6 +23,11 @@ onMounted(async () => {
   const results = await Promise.allSettled([loadRulesets(), loadRules(), loadCatalog()])
   const failed = results.find((result) => result.status === 'rejected')
   error.value = failed ? describe((failed as PromiseRejectedResult).reason) : ''
+  // `?set=<id>` (from the rules page's original judgement) shows that default set.
+  if (typeof route.query.set === 'string') {
+    await nextTick()
+    document.getElementById(`set-${route.query.set}`)?.scrollIntoView({ block: 'center' })
+  }
 })
 
 const custom = computed(() => rulesets.value.filter((set) => set.type !== 'catalog'))
@@ -194,7 +201,7 @@ async function remove(confirm: boolean) {
           <tr><th>名称</th><th>来源</th><th>更新</th><th></th></tr>
         </thead>
         <tbody>
-          <tr v-for="set in builtins" :key="set.id">
+          <tr v-for="set in builtins" :id="`set-${set.id}`" :key="set.id" :class="{ hit: route.query.set === set.id }">
             <td>{{ set.name }} <span class="mono t2">{{ set.id }}</span> <span v-if="set.required" class="tag">必需</span></td>
             <td class="mono t2" style="max-width: 340px; overflow: hidden; text-overflow: ellipsis" :title="set.url">{{ set.url ?? '多个来源' }}</td>
             <td class="t2">{{ updatedAt(set.updated) }}</td>

@@ -225,6 +225,15 @@ a.nav{text-decoration:none}
   .li .ops{grid-column:3;grid-row:1}
 }
 .dnstag{font-size:12px;color:var(--muted);white-space:nowrap}
+.orig{border-top:1px dashed var(--line);margin-top:4px;padding:10px 8px;background:var(--fill2);border-radius:0 0 14px 14px}
+.orig.hit{background:var(--accent-soft)}
+.orig-hd{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;padding:0;font:inherit;color:inherit;text-align:left;cursor:pointer}
+.orig-hd .sum{font-size:12.5px;color:var(--muted)}
+.orig-chev{width:22px;text-align:center;color:var(--faint)}
+.orig-list{list-style:none;margin:8px 0 0;padding:0 0 0 32px;display:flex;flex-direction:column;gap:6px;font-size:13px}
+.orig-list li{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.orig-list li.off{opacity:.5}
+tr.hit td{background:var(--accent-soft)}
 .cond{background:var(--fill);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:8px}
 .cond .inp{background:var(--card)}
 .cond .seg{background:var(--card)}

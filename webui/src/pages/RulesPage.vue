@@ -1,20 +1,32 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { RouterLink, useRouter } from 'vue-router'
 import draggable from 'vuedraggable'
 import { ApiError, call, client, describe, type Schemas } from '../api/client'
 import AppModal from '../components/AppModal.vue'
 import RulesTabs from '../components/RulesTabs.vue'
-import { loadProxy } from '../composables/proxy'
+import { FINAL_NAME, loadProxy } from '../composables/proxy'
 import { actionLabel, dnsLabel, loadRules, loadRulesets, loadUpstreams, proxyTargets, rules, rulesVersion, summary, type Rule } from '../composables/rules'
 import { refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
+import { originalBranches } from '../original'
 
 const router = useRouter()
 const error = ref('')
 
+// The original judgement under the last rule (DNS only; the switches it shows come from `GET dns`).
+const dns = ref<Schemas['Dns'] | null>(null)
+const branches = computed(() => (dns.value ? originalBranches(dns.value, FINAL_NAME) : []))
+const originalOpen = ref(false)
+
 onMounted(async () => {
-  const results = await Promise.allSettled([loadRules(), loadRulesets(), loadUpstreams(), loadProxy()])
+  const results = await Promise.allSettled([
+    loadRules(),
+    loadRulesets(),
+    loadUpstreams(),
+    loadProxy(),
+    call(client.GET('/dns')).then((value) => (dns.value = value))
+  ])
   const failed = results.find((result) => result.status === 'rejected')
   error.value = failed ? describe((failed as PromiseRejectedResult).reason) : ''
 })
@@ -34,6 +46,7 @@ const testDomain = ref('')
 const testClient = ref('')
 const testResult = ref('')
 const hitId = ref('')
+const hitOriginal = ref(false)
 async function test() {
   const domain = testDomain.value.trim()
   if (!domain) return
@@ -42,12 +55,16 @@ async function test() {
     if (testClient.value.trim()) body.client = testClient.value.trim()
     const answer = await call(client.POST('/rules/test', { body }))
     hitId.value = answer.rule?.id ?? ''
+    hitOriginal.value = !answer.matched && answer.fallthrough === 'original'
     testResult.value =
       answer.matched && answer.rule && answer.index !== undefined
         ? `命中第 ${answer.index + 1} 条「${answer.rule.remark || answer.rule.id}」：${actionLabel(answer.rule.action)}`
-        : '没有规则命中，交给原判断'
+        : hitOriginal.value
+          ? '交给原判断（DNS）'
+          : '没有规则命中'
   } catch (failure) {
     hitId.value = ''
+    hitOriginal.value = false
     testResult.value = describe(failure)
   }
 }
@@ -229,6 +246,22 @@ async function remove() {
         </div>
       </template>
     </draggable>
+    <div class="orig" :class="{ hit: hitOriginal }">
+      <button type="button" class="orig-hd" :aria-expanded="originalOpen" aria-controls="orig-branches" @click="originalOpen = !originalOpen">
+        <span class="orig-chev" aria-hidden="true">{{ originalOpen ? '▾' : '▸' }}</span>
+        <span>未命中以上规则</span>
+        <span class="pill acc">DNS</span>
+        <span class="sum">原判断</span>
+      </button>
+      <ul v-if="originalOpen" id="orig-branches" class="orig-list">
+        <li v-for="branch in branches" :key="branch.key" :class="{ off: branch.off }">
+          <RouterLink class="mono" :to="branch.to">{{ branch.name }}</RouterLink>
+          <span v-if="branch.off" class="tag">关</span>
+          <span class="t2" aria-hidden="true">→</span>
+          <span v-for="item in branch.result" :key="item" class="tag">{{ item }}</span>
+        </li>
+      </ul>
+    </div>
   </div>
 
   <AppModal v-if="removing" :title="`删除规则「${removing.remark || removing.id}」`" @close="removing = null">
