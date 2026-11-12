@@ -4313,7 +4313,7 @@ fn branch_transport(transport: atomdns_upstream_core::Transport) -> UpstreamTran
     match transport {
         atomdns_upstream_core::Transport::Udp => UpstreamTransport::Udp,
         atomdns_upstream_core::Transport::Tcp => UpstreamTransport::Tcp,
-        atomdns_upstream_core::Transport::Quic => UpstreamTransport::Https,
+        atomdns_upstream_core::Transport::Quic => UpstreamTransport::Quic,
     }
 }
 
@@ -4593,13 +4593,7 @@ fn result_from_wire(response_wire: Vec<u8>, mut facts: ExecutionFacts) -> Execut
     if !matches!(response_source, ResponseSource::Upstream(_)) {
         if let Some(diagnostics) = &mut facts.upstream_diagnostics {
             diagnostics.selected = origin.and_then(|origin| {
-                let transport = match origin.transport? {
-                    "udp" => UpstreamTransport::Udp,
-                    "tcp" => UpstreamTransport::Tcp,
-                    "tls" => UpstreamTransport::Tls,
-                    "https" => UpstreamTransport::Https,
-                    _ => return None,
-                };
+                let transport = UpstreamTransport::parse(origin.transport?)?;
                 Some(UpstreamDiagnosticSelected {
                     branch_id: None,
                     entry: origin.identity.to_string(),

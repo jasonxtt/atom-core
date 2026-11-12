@@ -125,6 +125,46 @@ enum FirstStreamMode {
     Reset,
     Malformed,
     Close,
+    NonzeroId,
+}
+
+async fn answer_stream(
+    (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+    index: usize,
+    initial_mode: Option<FirstStreamMode>,
+    ready: &tokio::sync::Notify,
+    connection: &quinn::Connection,
+) -> Option<(u64, Vec<u8>)> {
+    let request = recv.read_to_end(MAX_DOQ_MESSAGE).await.ok()?;
+    if initial_mode.is_some() {
+        ready.notify_one();
+    }
+    match initial_mode {
+        Some(FirstStreamMode::Close) => {
+            connection.close(quinn::VarInt::from_u32(0x2), b"test failure");
+        }
+        Some(FirstStreamMode::Hold) => {
+            let _ = send.stopped().await;
+        }
+        Some(FirstStreamMode::Reset) => send.reset(quinn::VarInt::from_u32(0x2)).ok()?,
+        Some(FirstStreamMode::Malformed) => {
+            send.write_all(&[0, 0]).await.ok()?;
+            send.finish().ok()?;
+        }
+        Some(FirstStreamMode::NonzeroId) => {
+            send.write_all(&frame(&response_wire(1, 0x42))).await.ok()?;
+            send.finish().ok()?;
+        }
+        None | Some(FirstStreamMode::Normal) => {
+            let marker = marker_from_doq_frame(&request)
+                .unwrap_or_else(|| u8::try_from(index).expect("test stream index fits u8"));
+            send.write_all(&frame(&response_wire(0, marker)))
+                .await
+                .ok()?;
+            send.finish().ok()?;
+        }
+    }
+    Some((send.id().index(), request))
 }
 
 impl DoqServer {
@@ -145,12 +185,13 @@ impl DoqServer {
         let accepts_thread = Arc::clone(&accepts);
         let ready = Arc::new(tokio::sync::Notify::new());
         let ready_thread = Arc::clone(&ready);
-        let handle = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build server runtime");
-            runtime.block_on(async move {
+        let handle =
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build server runtime");
+                runtime.block_on(async move {
                 let endpoint =
                     quinn::Endpoint::server(config, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
                         .expect("bind loopback QUIC endpoint");
@@ -159,11 +200,12 @@ impl DoqServer {
                     .expect("send server address");
 
                 let mut evidence = Vec::new();
-                let connection_rounds = if matches!(mode, FirstStreamMode::Close) {
-                    2
-                } else {
-                    1
-                };
+                let connection_rounds =
+                    if matches!(mode, FirstStreamMode::Close | FirstStreamMode::NonzeroId) {
+                        2
+                    } else {
+                        1
+                    };
                 for connection_index in 0..connection_rounds {
                     let Some(incoming) = endpoint.accept().await else {
                         return;
@@ -175,61 +217,35 @@ impl DoqServer {
 
                     let mut tasks = Vec::new();
                     for index in 0..streams {
-                        let Ok((mut send, mut recv)) = connection.accept_bi().await else {
+                        let Ok(streams) = connection.accept_bi().await else {
                             return;
                         };
-                        let stream_id = send.id().index();
+                        let initial_mode = (connection_index == 0 && index == 0).then_some(mode);
                         let connection_for_task = connection.clone();
                         let ready_for_task = Arc::clone(&ready_thread);
-                        let task = tokio::spawn(async move {
-                            let request = recv.read_to_end(MAX_DOQ_MESSAGE).await.ok()?;
-                            if connection_index == 0 && index == 0 {
-                                ready_for_task.notify_one();
-                            }
-                            if connection_index == 0 && index == 0 {
-                                match mode {
-                                    FirstStreamMode::Close => {
-                                        connection_for_task
-                                            .close(quinn::VarInt::from_u32(0x2), b"test failure");
-                                        return Some((stream_id, request));
-                                    }
-                                    FirstStreamMode::Hold => {
-                                        let _ = send.stopped().await;
-                                        return Some((stream_id, request));
-                                    }
-                                    FirstStreamMode::Reset => {
-                                        send.reset(quinn::VarInt::from_u32(0x2)).ok()?;
-                                        return Some((stream_id, request));
-                                    }
-                                    FirstStreamMode::Malformed => {
-                                        send.write_all(&[0, 0]).await.ok()?;
-                                        send.finish().ok()?;
-                                        return Some((stream_id, request));
-                                    }
-                                    FirstStreamMode::Normal => {}
-                                }
-                            }
-                            let marker = marker_from_doq_frame(&request).unwrap_or_else(|| {
-                                u8::try_from(index).expect("test stream index fits u8")
-                            });
-                            let response = frame(&response_wire(0, marker));
-                            send.write_all(&response).await.ok()?;
-                            send.finish().ok()?;
-                            Some((stream_id, request))
-                        });
-                        tasks.push(task);
+                        tasks.push(tokio::spawn(async move {
+                            answer_stream(
+                                streams, index, initial_mode, &ready_for_task, &connection_for_task,
+                            ).await
+                        }));
                     }
                     for task in tasks {
                         if let Ok(Some(item)) = task.await {
                             evidence.push(item);
                         }
                     }
-                    let _ = timeout(TEST_TIMEOUT, connection.closed()).await;
+                    let closed = timeout(TEST_TIMEOUT, connection.closed()).await;
+                    if connection_index == 0 && matches!(mode, FirstStreamMode::NonzeroId) {
+                        assert!(
+                            matches!(closed, Ok(quinn::ConnectionError::ApplicationClosed(error))
+                            if error.error_code == quinn::VarInt::from_u32(0x2))
+                        );
+                    }
                 }
                 endpoint.wait_idle().await;
                 let _ = evidence_tx.send(evidence);
             });
-        });
+            });
         let address = address_rx
             .recv_timeout(TEST_TIMEOUT)
             .expect("server binds within the test bound");
@@ -621,8 +637,23 @@ fn doq_malformed_response_is_stream_local_on_a_healthy_connection() {
 
 #[test]
 fn doq_connection_failure_replaces_only_after_terminal_removal() {
+    assert_doq_fatal_error_replaces_connection(
+        FirstStreamMode::Close,
+        &SecureError::DoqProtocolMissingResponseFin,
+    );
+}
+
+#[test]
+fn doq_nonzero_response_id_closes_connection_with_protocol_error() {
+    assert_doq_fatal_error_replaces_connection(
+        FirstStreamMode::NonzeroId,
+        &SecureError::DoqProtocolNonzeroResponseId,
+    );
+}
+
+fn assert_doq_fatal_error_replaces_connection(mode: FirstStreamMode, expected: &SecureError) {
     let set = FixtureSet::generate();
-    let server = DoqServer::start(&set, 1, FirstStreamMode::Close);
+    let server = DoqServer::start(&set, 1, mode);
     let upstream = upstream(&set, server.address);
     let (first, replacement) = block_on(async {
         let first_query = query_wire(0x3001);
@@ -664,16 +695,50 @@ fn doq_connection_failure_replaces_only_after_terminal_removal() {
         upstream.close().await;
         (first, replacement)
     });
-    assert!(matches!(
-        first,
-        Err(SecureError::DoqProtocolMissingResponseFin)
-    ));
+    assert_eq!(&first.unwrap_err(), expected);
     assert!(
         replacement.is_ok(),
         "the next independent exchange replaces it"
     );
     let (accepts, _) = server.join();
     assert_eq!(accepts, 2, "only the replacement opens a second connection");
+}
+
+#[test]
+fn blackholed_shared_handshake_expires_after_the_first_caller_leaves() {
+    let set = FixtureSet::generate();
+    let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let upstream = upstream(&set, blackhole.local_addr().unwrap());
+    block_on(async {
+        let query = query_wire(0x3000);
+        let context = ExchangeContext::new(
+            Instant::now() + Duration::from_millis(250),
+            TransportCancellation::new(),
+        );
+        let error = upstream
+            .exchange(ExchangeRequest::new(&query).unwrap(), context)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            SecureError::Transport(UpstreamError::DeadlineExceeded(SideEffectState::NotSent))
+        );
+        assert_eq!(
+            upstream.entry_count(),
+            1,
+            "caller timeout preserves shared work"
+        );
+        timeout(TEST_TIMEOUT, async {
+            while upstream.entry_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("shared handshake expires and drains independently");
+        upstream.close().await;
+    });
+    blackhole.set_nonblocking(true).unwrap();
+    assert!(blackhole.recv(&mut [0; 2048]).is_ok());
 }
 
 #[test]

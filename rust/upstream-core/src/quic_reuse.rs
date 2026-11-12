@@ -181,6 +181,9 @@ pub const MAX_CONNECTIONS_PER_OWNER: usize = 8;
 /// There is no background reaper and no timer: expiry is evaluated under the
 /// owner-map lock by [`QuicReuseOwner::maintain`] and by the admission scan.
 pub const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+// Bound a single shared initialization, even if individual callers have
+// shorter deadlines or the peer keeps an incomplete connection active.
+const QUIC_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The complete DoQ stream bound shared with the one-shot protocol.
 const MAX_DOQ_MESSAGE: usize = 65_537;
@@ -1782,6 +1785,7 @@ impl EntryInitializer for ImmediateInitializer {
 struct DoqEntryInitializer {
     endpoint: crate::quic::DoqEndpoint,
     tls: TlsPolicy,
+    cancellation: TransportCancellation,
 }
 
 impl EntryInitializer for DoqEntryInitializer {
@@ -1798,8 +1802,9 @@ impl EntryInitializer for DoqEntryInitializer {
     fn initialize_result(&self, _key: QuicReuseKey, _generation: u64) -> InitializeResultFuture {
         let endpoint = self.endpoint.clone();
         let tls = self.tls.clone();
+        let cancellation = self.cancellation.clone();
         Box::pin(async move {
-            match build_doq_connection(&endpoint, &tls).await {
+            match build_doq_connection(&endpoint, &tls, &cancellation).await {
                 Ok(connection) => {
                     InitializationResult::Ready(Arc::new(EntryTransport::from_doq(connection)))
                 }
@@ -1813,6 +1818,7 @@ impl EntryInitializer for DoqEntryInitializer {
 struct Doh3EntryInitializer {
     endpoint: DohEndpoint,
     tls: TlsPolicy,
+    cancellation: TransportCancellation,
 }
 
 impl EntryInitializer for Doh3EntryInitializer {
@@ -1829,8 +1835,9 @@ impl EntryInitializer for Doh3EntryInitializer {
     fn initialize_result(&self, _key: QuicReuseKey, _generation: u64) -> InitializeResultFuture {
         let endpoint = self.endpoint.clone();
         let tls = self.tls.clone();
+        let cancellation = self.cancellation.clone();
         Box::pin(async move {
-            match build_doh3_connection(&endpoint, &tls).await {
+            match build_doh3_connection(&endpoint, &tls, &cancellation).await {
                 Ok(connection) => {
                     InitializationResult::Ready(Arc::new(EntryTransport::from_doh3(connection)))
                 }
@@ -1840,18 +1847,24 @@ impl EntryInitializer for Doh3EntryInitializer {
     }
 }
 
-/// Builds one authenticated DoQ connection outside the owner-map lock.
-async fn build_doq_connection(
-    endpoint: &crate::quic::DoqEndpoint,
+/// Shared handshake. Owner close must release the socket promptly even when
+/// the peer never answers, while a single caller timing out leaves the shared
+/// handshake available to other callers.
+async fn connect_quic(
+    dial: SocketAddr,
+    identity: &crate::ServerIdentity,
     tls: &TlsPolicy,
-) -> Result<DoqConnection, UpstreamError> {
+    alpn: &[u8],
+    cancellation: &TransportCancellation,
+    deadline: tokio::time::Instant,
+) -> Result<(quinn::Endpoint, quinn::Connection), UpstreamError> {
     let rustls_config = tls
-        .client_config_with_alpn(&[DOQ_ALPN])
+        .client_config_with_alpn(&[alpn])
         .map_err(|_| UpstreamError::Connect)?;
     let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(rustls_config)
         .map_err(|_| UpstreamError::Connect)?;
     let client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
-    let local = if endpoint.dial().is_ipv4() {
+    let local = if dial.is_ipv4() {
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
     } else {
         SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
@@ -1859,9 +1872,40 @@ async fn build_doq_connection(
     let mut client = quinn::Endpoint::client(local).map_err(|_| UpstreamError::Connect)?;
     client.set_default_client_config(client_config);
     let connecting = client
-        .connect(endpoint.dial(), endpoint.identity().as_str())
+        .connect(dial, identity.as_str())
         .map_err(|_| UpstreamError::Connect)?;
-    let connection = connecting.await.map_err(|_| UpstreamError::Connect)?;
+    let connection = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(UpstreamError::Closed(SideEffectState::NotSent)),
+        () = tokio::time::sleep_until(deadline) =>
+            Err(UpstreamError::DeadlineExceeded(SideEffectState::NotSent)),
+        result = connecting => result.map_err(|_| UpstreamError::Connect),
+    };
+    match connection {
+        Ok(connection) => Ok((client, connection)),
+        Err(error) => {
+            client.close(0u32.into(), b"");
+            client.wait_idle().await;
+            Err(error)
+        }
+    }
+}
+
+/// Builds one authenticated DoQ connection outside the owner-map lock.
+async fn build_doq_connection(
+    endpoint: &crate::quic::DoqEndpoint,
+    tls: &TlsPolicy,
+    cancellation: &TransportCancellation,
+) -> Result<DoqConnection, UpstreamError> {
+    let (client, connection) = connect_quic(
+        endpoint.dial(),
+        endpoint.identity(),
+        tls,
+        DOQ_ALPN,
+        cancellation,
+        tokio::time::Instant::now() + QUIC_INITIALIZATION_TIMEOUT,
+    )
+    .await?;
     Ok(DoqConnection {
         endpoint: client,
         connection,
@@ -1875,52 +1919,38 @@ async fn build_doq_connection(
 async fn build_doh3_connection(
     endpoint: &DohEndpoint,
     tls: &TlsPolicy,
+    cancellation: &TransportCancellation,
 ) -> Result<Doh3Connection, UpstreamError> {
-    let rustls_config = tls
-        .client_config_with_alpn(&[crate::quic::H3_ALPN])
-        .map_err(|_| UpstreamError::Connect)?;
-    let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(rustls_config)
-        .map_err(|_| UpstreamError::Connect)?;
-    let client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
-    let local = if endpoint.dial().is_ipv4() {
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
-    } else {
-        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
-    };
-    let mut client = quinn::Endpoint::client(local).map_err(|_| UpstreamError::Connect)?;
-    client.set_default_client_config(client_config);
-    let connecting = match client.connect(endpoint.dial(), endpoint.identity().as_str()) {
-        Ok(connecting) => connecting,
-        Err(_) => {
-            client.close(0u32.into(), b"");
-            client.wait_idle().await;
-            return Err(UpstreamError::Connect);
-        }
-    };
-    let connection = match connecting.await {
-        Ok(connection) => connection,
-        Err(_) => {
-            client.close(0u32.into(), b"");
-            client.wait_idle().await;
-            return Err(UpstreamError::Connect);
-        }
-    };
-
+    let deadline = tokio::time::Instant::now() + QUIC_INITIALIZATION_TIMEOUT;
+    let (client, connection) = connect_quic(
+        endpoint.dial(),
+        endpoint.identity(),
+        tls,
+        H3_ALPN,
+        cancellation,
+        deadline,
+    )
+    .await?;
     let h3_connection = h3_quinn::Connection::new(connection.clone());
     let mut builder = h3::client::builder();
     builder.max_field_section_size(
         u64::try_from(crate::secure::MAX_RESPONSE_HEADER_BYTES).unwrap_or(u64::MAX),
     );
-    let (driver, sender) = match builder
-        .build::<_, _, crate::quic::H3Body>(h3_connection)
-        .await
-    {
+    let parts = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(UpstreamError::Closed(SideEffectState::NotSent)),
+        () = tokio::time::sleep_until(deadline) =>
+            Err(UpstreamError::DeadlineExceeded(SideEffectState::NotSent)),
+        result = builder.build::<_, _, crate::quic::H3Body>(h3_connection) =>
+            result.map_err(|_| UpstreamError::Connect),
+    };
+    let (driver, sender) = match parts {
         Ok(parts) => parts,
-        Err(_) => {
+        Err(error) => {
             connection.close(0u32.into(), b"");
             client.close(0u32.into(), b"");
             client.wait_idle().await;
-            return Err(UpstreamError::Connect);
+            return Err(error);
         }
     };
     let driver_terminal = Arc::new(Doh3DriverState {
@@ -2573,10 +2603,26 @@ impl QuicReuseOwner {
         initializer: Arc<dyn EntryInitializer>,
         seams: ModelSeams,
     ) -> Self {
+        Self::with_parts_and_cancellation(
+            lifecycle,
+            clock,
+            initializer,
+            seams,
+            TransportCancellation::new(),
+        )
+    }
+
+    fn with_parts_and_cancellation(
+        lifecycle: Arc<Lifecycle>,
+        clock: Arc<dyn OwnerClock>,
+        initializer: Arc<dyn EntryInitializer>,
+        seams: ModelSeams,
+        owner_cancellation: TransportCancellation,
+    ) -> Self {
         Self {
             shared: Arc::new(OwnerShared {
                 lifecycle,
-                owner_cancellation: TransportCancellation::new(),
+                owner_cancellation,
                 clock,
                 initializer,
                 seams,
@@ -3021,15 +3067,18 @@ impl DoqReuseUpstream {
     pub fn new(endpoint: crate::quic::DoqEndpoint, tls: TlsPolicy) -> Result<Self, SecureError> {
         tls.client_config_with_alpn(&[DOQ_ALPN])?;
         let lifecycle = Arc::new(Lifecycle::new());
+        let cancellation = TransportCancellation::new();
         let initializer = Arc::new(DoqEntryInitializer {
             endpoint: endpoint.clone(),
             tls: tls.clone(),
+            cancellation: cancellation.clone(),
         });
-        let owner = QuicReuseOwner::with_parts(
+        let owner = QuicReuseOwner::with_parts_and_cancellation(
             lifecycle,
             Arc::new(SystemOwnerClock),
             initializer,
             ModelSeams::default(),
+            cancellation,
         );
         Ok(Self {
             endpoint,
@@ -3154,7 +3203,17 @@ impl DoqReuseUpstream {
             }
         };
 
-        let (body, truncated) = crate::quic::validate_doq_payload(&complete, request_id)?;
+        let (body, truncated) = crate::quic::validate_doq_payload(&complete, request_id)
+            .inspect_err(|error| {
+                if matches!(
+                    error,
+                    SecureError::DoqProtocolNonzeroResponseId
+                        | SecureError::DoqProtocolTrailingResponse
+                        | SecureError::Transport(UpstreamError::TruncatedFrame)
+                ) {
+                    self.retire_protocol_error(&key, generation, &shared);
+                }
+            })?;
         self.owner.lifecycle().commit_final_response(
             &control.caller_cancellation(),
             deadline,
@@ -3163,6 +3222,20 @@ impl DoqReuseUpstream {
         Ok(crate::secure::SecureResponse::doq(
             body, request_id, truncated,
         ))
+    }
+
+    fn retire_protocol_error(
+        &self,
+        key: &QuicReuseKey,
+        generation: u64,
+        connection: &DoqConnection,
+    ) {
+        // RFC 9250 section 4.3.3 specifies connection closure for framing and
+        // message ID violations. Send the protocol code before the ordinary
+        // owner teardown can close the endpoint with DOQ_NO_ERROR.
+        connection.connection.close(0x2u32.into(), b"");
+        self.owner
+            .apply_error_class(key, generation, QuicErrorClass::EntryTerminal);
     }
 }
 
@@ -3185,15 +3258,18 @@ impl Doh3ReuseUpstream {
     pub fn new(endpoint: DohEndpoint, tls: TlsPolicy) -> Result<Self, SecureError> {
         tls.client_config_with_alpn(&[H3_ALPN])?;
         let lifecycle = Arc::new(Lifecycle::new());
+        let cancellation = TransportCancellation::new();
         let initializer = Arc::new(Doh3EntryInitializer {
             endpoint: endpoint.clone(),
             tls: tls.clone(),
+            cancellation: cancellation.clone(),
         });
-        let owner = QuicReuseOwner::with_parts(
+        let owner = QuicReuseOwner::with_parts_and_cancellation(
             lifecycle,
             Arc::new(SystemOwnerClock),
             initializer,
             ModelSeams::default(),
+            cancellation,
         );
         Ok(Self {
             endpoint,

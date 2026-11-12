@@ -320,7 +320,6 @@ impl DoqServer {
                 // can transmit the response; a bounded wait keeps a broken path
                 // from hanging the test.
                 let _ = timeout(TEST_TIMEOUT, connection.closed()).await;
-                endpoint.wait_idle().await;
 
                 // A second connection opened before the first closed would be
                 // queued here; the bounded probe accounts for it.
@@ -330,6 +329,13 @@ impl DoqServer {
                 {
                     accepts_thread.fetch_add(1, Ordering::SeqCst);
                 }
+                // A one-shot client can drop its runtime after rejecting the
+                // response, before its close reaches the fixture. Explicitly
+                // close the fixture endpoint after observing the accept count.
+                endpoint.close(0u32.into(), b"");
+                timeout(TEST_TIMEOUT, endpoint.wait_idle())
+                    .await
+                    .expect("the fixture endpoint drains after close");
             });
         });
 

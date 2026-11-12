@@ -234,7 +234,6 @@ impl AliApiArgs {
         for (key, set) in [
             ("idle_timeout", upstream.idle_timeout > 0),
             ("enable_pipeline", upstream.enable_pipeline),
-            ("enable_http3", upstream.enable_http3),
             ("so_mark", so_mark != 0),
             ("bind_to_device", !bind_to_device.is_empty()),
         ] {
@@ -282,6 +281,7 @@ impl AliApiArgs {
                 bootstrap_version,
                 query_timeout,
                 insecure_skip_verify: upstream.insecure_skip_verify,
+                enable_http3: upstream.enable_http3,
                 socks5: (!socks5.is_empty()).then(|| socks5.to_owned()),
             },
             path,

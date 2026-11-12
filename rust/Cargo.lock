@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "atomdns-native-host"
-version = "0.6.4"
+version = "0.6.6"
 dependencies = [
  "atomdns-cache-core",
  "atomdns-dns-core",
@@ -104,11 +104,14 @@ dependencies = [
  "flate2",
  "getrandom 0.4.3",
  "h2",
+ "h3",
+ "h3-quinn",
  "hickory-proto",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "quinn",
  "rcgen",
  "ring",
  "rustix",

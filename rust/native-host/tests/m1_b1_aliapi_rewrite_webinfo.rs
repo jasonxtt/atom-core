@@ -639,7 +639,6 @@ fn aliapi_rejects_what_it_cannot_honor_instead_of_dropping_it() {
     for (option, name) in [
         ("so_mark: 7", "so_mark"),
         ("bind_to_device: eth0", "bind_to_device"),
-        ("enable_http3: true", "enable_http3"),
         ("enable_pipeline: true", "enable_pipeline"),
         ("idle_timeout: 30", "idle_timeout"),
     ] {
@@ -658,9 +657,10 @@ fn aliapi_rejects_what_it_cannot_honor_instead_of_dropping_it() {
     assert!(compile_error("      upstreams: []\n").contains("must not be empty"));
     assert!(compile_error("      upstreams:\n        - tag: a\n          addr: \"udp://127.0.0.1:1\"\n        - tag: a\n          addr: \"udp://127.0.0.1:2\"\n").contains("duplicated upstream tag"));
     assert!(compile_error("      upstreams:\n        - addr: \"\"\n").contains("addr is required"));
+    assert!(compile_error(&one("          enable_http3: true\n")).contains("enable_http3"));
     assert!(
-        compile_error("      upstreams:\n        - addr: \"quic://127.0.0.1:853\"\n")
-            .contains("unsupported upstream scheme")
+        compile_error("      socks5: '192.0.2.1:1080'\n      upstreams:\n        - addr: 'quic://192.0.2.53'\n")
+            .contains("group's literal socks5 address")
     );
     assert!(
         compile_error("      upstreams:\n        - addr: \"dns.example\"\n")

@@ -185,11 +185,18 @@ impl UpstreamEntry {
             return raw.to_owned();
         }
         let scheme = match self.protocol_name().as_str() {
-            scheme @ ("udp" | "tcp" | "tls" | "https" | "quic") => scheme.to_owned(),
+            scheme @ ("udp" | "tcp" | "tls" | "https" | "h3" | "quic") => scheme.to_owned(),
             _ => return raw.to_owned(),
         };
-        if scheme == "https" && !raw.contains('/') {
-            format!("https://{raw}/dns-query")
+        let ipv6;
+        let raw = if raw.parse::<std::net::Ipv6Addr>().is_ok() {
+            ipv6 = format!("[{raw}]");
+            ipv6.as_str()
+        } else {
+            raw
+        };
+        if matches!(scheme.as_str(), "https" | "h3") && !raw.contains('/') {
+            format!("{scheme}://{raw}/dns-query")
         } else {
             format!("{scheme}://{raw}")
         }
@@ -218,19 +225,31 @@ impl UpstreamEntry {
         if self.addr.trim().is_empty() {
             return Err(at("addr is required for DNS types".to_owned()));
         }
+        if !matches!(
+            protocol.as_str(),
+            "udp" | "tcp" | "tls" | "https" | "h3" | "quic"
+        ) {
+            return Err(at(format!("protocol `{protocol}` is not supported")));
+        }
         if let Some((scheme, _)) = self.addr.trim().split_once("://") {
-            if !matches!(protocol.as_str(), "udp" | "tcp" | "tls" | "https" | "quic")
-                || !scheme.eq_ignore_ascii_case(&protocol)
-            {
+            let matches = scheme.eq_ignore_ascii_case(&protocol)
+                || (protocol == "quic" && scheme.eq_ignore_ascii_case("doq"));
+            if !matches {
                 return Err(at(format!(
                     "protocol {protocol} does not match the scheme {scheme} of the address"
                 )));
             }
-        } else if !matches!(protocol.as_str(), "udp" | "tcp" | "tls" | "https") {
-            return Err(at(format!("protocol `{protocol}` is not supported")));
         }
-        if protocol == "quic" {
-            return Err(at("protocol quic is not supported".to_owned()));
+        if self.enable_http3 && !matches!(protocol.as_str(), "https" | "h3") {
+            return Err(at(
+                "enable_http3 requires an https or h3 upstream".to_owned()
+            ));
+        }
+        if (self.enable_http3 || matches!(protocol.as_str(), "h3" | "quic")) && self.proxy_switch()
+        {
+            return Err(at(
+                "SOCKS5 is unsupported for HTTP/3 and DoQ upstreams".to_owned()
+            ));
         }
         if !self.socks5.trim().is_empty() {
             return Err(at(
@@ -242,7 +261,6 @@ impl UpstreamEntry {
             ("so_mark", self.so_mark != 0),
             ("bind_to_device", !self.bind_to_device.is_empty()),
             ("enable_pipeline", self.enable_pipeline),
-            ("enable_http3", self.enable_http3),
             ("idle_timeout", self.idle_timeout > 0),
         ] {
             if set {
@@ -1005,7 +1023,23 @@ fn resolve_items(
             format!("{name}={addr}{dial}{mark}")
         });
         let proxied = own_proxy.is_some() || uses || literal || !proxies.plugin_socks5.is_empty();
-        entries.push(raw_to_entry(item, proxied));
+        let entry = raw_to_entry(item, proxied);
+        if entry.enable_http3 || matches!(entry.protocol.as_str(), "h3" | "quic" | "doq") {
+            let reason = "SOCKS5 is unsupported for HTTP/3 and DoQ upstreams";
+            if own_proxy.is_some() {
+                return refuse("proxy", reason);
+            }
+            if uses {
+                return refuse("use_proxy", reason);
+            }
+            if !proxies.plugin_socks5.is_empty() {
+                return refuse(
+                    "socks5",
+                    "HTTP/3 and DoQ cannot inherit the group's literal socks5 address; use a group proxy reference and opt in only on TCP-based entries",
+                );
+            }
+        }
+        entries.push(entry);
     }
     Ok((summary, entries))
 }
@@ -1032,6 +1066,7 @@ fn raw_to_entry(item: &RawMap, proxied: bool) -> UpstreamEntry {
         addr,
         dial_addr: text("dial_addr"),
         upstream_query_timeout: number("upstream_query_timeout"),
+        enable_http3: matches!(item.get("enable_http3"), Some(RawValue::Bool(true))),
         insecure_skip_verify: matches!(
             item.get("insecure_skip_verify"),
             Some(RawValue::Bool(true))
@@ -1066,6 +1101,10 @@ pub(super) fn upstream_to_raw(entry: &UpstreamEntry) -> RawValue {
     if entry.insecure_skip_verify {
         map.entries
             .push(("insecure_skip_verify".to_owned(), RawValue::Bool(true)));
+    }
+    if entry.enable_http3 {
+        map.entries
+            .push(("enable_http3".to_owned(), RawValue::Bool(true)));
     }
     if !entry.bootstrap.is_empty() {
         map.entries
@@ -1569,12 +1608,87 @@ mod tests {
                 r#"{"tag":"a","protocol":"udp","addr":"1.1.1.1","so_mark":3}"#,
                 "so_mark",
             ),
-            (r#"{"tag":"a","protocol":"quic","addr":"1.1.1.1"}"#, "quic"),
+            (
+                r#"{"tag":"a","protocol":"quic","addr":"192.0.2.53","use_proxy":true}"#,
+                "SOCKS5 is unsupported",
+            ),
         ] {
             let error = entry(json).validate(0).unwrap_err();
             assert!(error.contains(reason), "{json}: {error}");
         }
         assert!(serde_json::from_str::<UpstreamEntry>(r#"{"tag":"a","bogus":1}"#).is_err());
+    }
+
+    #[test]
+    fn quic_settings_wrap_bare_ipv6_literals() {
+        for (protocol, expected) in [
+            ("h3", "h3://[2001:db8::53]/dns-query"),
+            ("doq", "quic://[2001:db8::53]"),
+        ] {
+            let entry = UpstreamEntry {
+                protocol: protocol.to_owned(),
+                addr: "2001:db8::53".to_owned(),
+                tag: "ipv6".to_owned(),
+                ..UpstreamEntry::default()
+            };
+            assert!(entry.validate(0).is_ok());
+            assert_eq!(entry.runtime_addr(), expected);
+        }
+    }
+
+    #[test]
+    fn quic_yaml_refuses_an_explicit_proxy_even_when_its_address_is_empty() {
+        let yaml = r#"
+log: {level: error}
+plugins:
+  - tag: main_proxy
+    type: socks5_proxy
+    args: {addr: ""}
+  - tag: upstream
+    type: aliapi
+    args:
+      proxy: $main_proxy
+      upstreams:
+        - {addr: 'h3://192.0.2.53/dns-query'}
+        - {addr: 'quic://192.0.2.53'}
+  - tag: entry
+    type: sequence
+    args: [{exec: $upstream}]
+  - tag: listener
+    type: udp_server
+    args: {entry: entry, listen: '127.0.0.1:5300'}
+"#;
+        super::super::compile_yaml(yaml).expect("group proxy is optional for QUIC entries");
+        super::super::compile_yaml(&yaml.replace("addr: \"\"", "addr: '192.0.2.1:1080'"))
+            .expect("QUIC entries need no opt-out from a group proxy reference");
+        let error = super::super::compile_yaml(
+            &yaml.replace("proxy: $main_proxy\n", "socks5: '192.0.2.1:1080'\n"),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("group's literal socks5 address"), "{error}");
+        for (from, to, field) in [
+            (
+                "h3://192.0.2.53/dns-query'}",
+                "h3://192.0.2.53/dns-query', use_proxy: true}",
+                ".use_proxy",
+            ),
+            (
+                "quic://192.0.2.53'}",
+                "quic://192.0.2.53', proxy: $main_proxy}",
+                ".proxy",
+            ),
+        ] {
+            let error = super::super::compile_yaml(&yaml.replace(from, to))
+                .err()
+                .expect("explicit proxy is rejected")
+                .to_string();
+            assert!(
+                error.contains(field) && error.contains("SOCKS5 is unsupported"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
