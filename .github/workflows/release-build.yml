@@ -16,7 +16,7 @@ jobs:
     # so Debian 12 (2.36) and newer hosts, including production (Debian 13, glibc 2.41), keep running them.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.96.0
         with:
