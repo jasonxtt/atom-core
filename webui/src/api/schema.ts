@@ -1528,6 +1528,16 @@ export interface components {
             type: "selector" | "urltest";
             /** @description Node and group IDs, in order. */
             members?: string[];
+            /**
+             * @description A regular expression over node names, case-insensitive (a plain keyword is one). Every
+             *     matching node is a member too, and nodes added later join on their own. "" is none.
+             */
+            filter?: string;
+            /**
+             * @description With a filter: the order of everything the group holds, manual members and filtered nodes
+             *     (what it does not name follows in its own order). Without a filter it is dropped.
+             */
+            order?: string[];
             /** @description selector only; "" is the first member. */
             selected?: string;
             /** @description urltest only (default https://www.gstatic.com/generate_204). */
@@ -1543,7 +1553,12 @@ export interface components {
             name: string;
             /** @enum {string} */
             type: "selector" | "urltest";
+            /** @description The manually chosen members (not the filtered nodes). */
             members: string[];
+            filter?: string;
+            order?: string[];
+            /** @description The node IDs the filter matches now (members too, and not removable one by one). */
+            matched?: string[];
             selected?: string;
             url?: string;
             interval?: string;

@@ -15,6 +15,8 @@ fn group(name: &str, kind: GroupKind, members: &[&str]) -> GroupInput {
         name: name.to_owned(),
         kind,
         members: members.iter().map(|m| (*m).to_owned()).collect(),
+        filter: String::new(),
+        order: Vec::new(),
         selected: String::new(),
         url: None,
         interval: None,
@@ -392,4 +394,59 @@ fn credential_names_are_matched_as_sing_box_decodes_them() {
             .message;
         assert!(refused.contains("不能带"), "{key}: {refused}");
     }
+}
+
+#[test]
+fn a_filter_pulls_matching_nodes_in_and_keeps_manual_members() {
+    let mut state = ProxyState::default();
+    let nodes = state.add_nodes(vec![node("美国 01"), node("日本 01"), node("us-west")]);
+    let mut input = group("美国组", GroupKind::Selector, &[&nodes[1].id]);
+    input.filter = " 美国|US ".to_owned();
+    let group = state.add_group(input);
+    state.validate(RESERVED).unwrap();
+    let group = state.group(&group.id).unwrap().clone();
+    assert_eq!(group.filter, "美国|US");
+    assert_eq!(
+        state.members_of(&group),
+        vec![nodes[1].id.clone(), nodes[0].id.clone(), nodes[2].id.clone()]
+    );
+    // A node added later joins without touching the group.
+    let later = state.add_nodes(vec![node("US-East")]);
+    assert!(state.members_of(&group).contains(&later[0].id));
+    assert!(state.groups_containing(&later[0].id).contains(&group.id));
+}
+
+#[test]
+fn a_bad_filter_is_refused_and_a_rename_drops_a_stale_selection() {
+    let mut state = ProxyState::default();
+    let nodes = state.add_nodes(vec![node("美国 01")]);
+    let mut input = group("g", GroupKind::Selector, &[]);
+    input.filter = "(".to_owned();
+    let id = state.add_group(input).id;
+    assert!(message(state.validate(RESERVED)).contains("筛选正则无效"));
+    state.groups.iter_mut().find(|g| g.id == id).unwrap().filter = "美国".to_owned();
+    state.select(&id, &nodes[0].id).unwrap();
+    state.validate(RESERVED).unwrap();
+    state
+        .update_node(&nodes[0].id, Some("日本 01".to_owned()), None)
+        .unwrap();
+    assert!(state.group(&id).unwrap().selected.is_empty());
+    state.validate(RESERVED).unwrap();
+}
+
+#[test]
+fn the_stored_order_arranges_manual_and_filtered_members() {
+    let mut state = ProxyState::default();
+    let nodes = state.add_nodes(vec![node("us-1"), node("us-2"), node("jp-1")]);
+    let mut input = group("g", GroupKind::Selector, &[&nodes[2].id]);
+    input.filter = "us".to_owned();
+    // us-2 first, then the manual jp-1, a stale name ignored; us-1 is not named, so it follows.
+    input.order = vec![nodes[1].id.clone(), nodes[2].id.clone(), "n-gone".to_owned()];
+    let id = state.add_group(input).id;
+    state.validate(RESERVED).unwrap();
+    let group = state.group(&id).unwrap().clone();
+    assert_eq!(
+        state.members_of(&group),
+        vec![nodes[1].id.clone(), nodes[2].id.clone(), nodes[0].id.clone()]
+    );
 }

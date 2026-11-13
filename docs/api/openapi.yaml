@@ -3218,6 +3218,18 @@ components:
           description: Node and group IDs, in order.
           items:
             type: string
+        filter:
+          type: string
+          description: |
+            A regular expression over node names, case-insensitive (a plain keyword is one). Every
+            matching node is a member too, and nodes added later join on their own. "" is none.
+        order:
+          type: array
+          description: |
+            With a filter: the order of everything the group holds, manual members and filtered nodes
+            (what it does not name follows in its own order). Without a filter it is dropped.
+          items:
+            type: string
         selected:
           type: string
           description: selector only; "" is the first member.
@@ -3244,6 +3256,18 @@ components:
           enum: [selector, urltest]
         members:
           type: array
+          items:
+            type: string
+          description: The manually chosen members (not the filtered nodes).
+        filter:
+          type: string
+        order:
+          type: array
+          items:
+            type: string
+        matched:
+          type: array
+          description: The node IDs the filter matches now (members too, and not removable one by one).
           items:
             type: string
         selected:

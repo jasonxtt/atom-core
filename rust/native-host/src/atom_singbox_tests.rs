@@ -333,6 +333,8 @@ fn sample_state() -> ProxyState {
         name: "自动".into(),
         kind: GroupKind::Urltest,
         members: Vec::new(),
+        filter: String::new(),
+        order: Vec::new(),
         selected: String::new(),
         url: Some("https://cp.cloudflare.com/".into()),
         interval: Some("5m".into()),

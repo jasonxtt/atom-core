@@ -93,6 +93,16 @@ pub(crate) struct Group {
     pub(crate) kind: GroupKind,
     /// Node and group IDs, in order.
     pub(crate) members: Vec<String>,
+    /// A regular expression over node names (case-insensitive): every
+    /// matching node is a member too, and nodes added later join on their
+    /// own. "" = none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) filter: String,
+    /// With a filter: the order of everything the group holds (the manual
+    /// members and the filtered nodes). Members it does not name follow in
+    /// their own order; names that are no longer members are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) order: Vec<String>,
     /// selector: the chosen member ("" = the first).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) selected: String,
@@ -180,6 +190,8 @@ impl Default for ProxyState {
                 name: DEFAULT_GROUP_NAME.to_owned(),
                 kind: GroupKind::Selector,
                 members: Vec::new(),
+                filter: String::new(),
+                order: Vec::new(),
                 selected: String::new(),
                 url: None,
                 interval: None,
@@ -204,6 +216,10 @@ pub(crate) struct GroupInput {
     pub(crate) kind: GroupKind,
     #[serde(default)]
     pub(crate) members: Vec<String>,
+    #[serde(default)]
+    pub(crate) filter: String,
+    #[serde(default)]
+    pub(crate) order: Vec<String>,
     #[serde(default)]
     pub(crate) selected: String,
     #[serde(default)]
@@ -454,6 +470,24 @@ pub(crate) fn check_settings(settings: &Settings, reserved: &[u16]) -> Result<()
     Ok(())
 }
 
+const MAX_FILTER_LEN: usize = 200;
+
+/// The group's name filter: case-insensitive; `None` when it is empty.
+fn compile_filter(filter: &str) -> Result<Option<regex::Regex>, String> {
+    if filter.is_empty() {
+        return Ok(None);
+    }
+    if filter.len() > MAX_FILTER_LEN {
+        return Err(format!("筛选正则最长 {MAX_FILTER_LEN} 字节"));
+    }
+    regex::RegexBuilder::new(filter)
+        .case_insensitive(true)
+        .size_limit(1 << 20)
+        .build()
+        .map(Some)
+        .map_err(|error| format!("筛选正则无效: {error}"))
+}
+
 /// Every member of `members` exists (a node or a group), once, and is not
 /// `owner` itself.
 fn check_members(
@@ -559,6 +593,8 @@ impl ProxyState {
         for group in &self.groups {
             check_name("节点组", &group.name)?;
             check_members(&group.id, &group.members, &nodes, &groups)?;
+            compile_filter(&group.filter)
+                .map_err(|message| invalid(format!("{}: {message}", group.id)))?;
             match group.kind {
                 GroupKind::Selector => {
                     if group.url.is_some() || group.interval.is_some() || group.tolerance.is_some()
@@ -568,7 +604,7 @@ impl ProxyState {
                             group.id
                         )));
                     }
-                    if !group.selected.is_empty() && !group.members.contains(&group.selected) {
+                    if !group.selected.is_empty() && !self.members_of(group).contains(&group.selected) {
                         return Err(invalid(format!(
                             "{}: 选中的 `{}` 不是成员",
                             group.id, group.selected
@@ -664,7 +700,7 @@ impl ProxyState {
         let mut empty: Vec<String> = self
             .groups
             .iter()
-            .filter(|group| group.members.is_empty())
+            .filter(|group| self.members_of(group).is_empty())
             .map(|group| group.id.clone())
             .collect();
         if self.final_group.members.is_empty() {
@@ -673,11 +709,51 @@ impl ProxyState {
         empty
     }
 
+    /// The nodes whose names the group's filter matches, in node order.
+    pub(crate) fn filtered_nodes(&self, group: &Group) -> Vec<String> {
+        match compile_filter(&group.filter) {
+            Ok(Some(filter)) => self
+                .nodes
+                .iter()
+                .filter(|node| filter.is_match(&node.name))
+                .map(|node| node.id.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// What the group really holds: its own members, then the filtered
+    /// nodes that are not among them; the stored order, when there is one,
+    /// puts what it names first.
+    pub(crate) fn members_of(&self, group: &Group) -> Vec<String> {
+        let mut members = group.members.clone();
+        for id in self.filtered_nodes(group) {
+            if !members.contains(&id) {
+                members.push(id);
+            }
+        }
+        if group.order.is_empty() {
+            return members;
+        }
+        let mut ordered: Vec<String> = Vec::with_capacity(members.len());
+        for id in &group.order {
+            if members.contains(id) && !ordered.contains(id) {
+                ordered.push(id.clone());
+            }
+        }
+        for id in members {
+            if !ordered.contains(&id) {
+                ordered.push(id);
+            }
+        }
+        ordered
+    }
+
     /// The groups whose members include `id`.
     pub(crate) fn groups_containing(&self, id: &str) -> Vec<String> {
         self.groups
             .iter()
-            .filter(|group| group.members.iter().any(|member| member == id))
+            .filter(|group| self.members_of(group).iter().any(|member| member == id))
             .map(|group| group.id.clone())
             .collect()
     }
@@ -733,7 +809,16 @@ impl ProxyState {
         if let Some(outbound) = outbound {
             node.outbound = outbound;
         }
-        Ok(node.clone())
+        let node = node.clone();
+        // A rename can take a node out of a filtered group: a selection on
+        // it falls back to the first member.
+        for at in 0..self.groups.len() {
+            let group = &self.groups[at];
+            if !group.selected.is_empty() && !self.members_of(group).contains(&group.selected) {
+                self.groups[at].selected.clear();
+            }
+        }
+        Ok(node)
     }
 
     /// Removes a node; groups and Final drop it from their members.
@@ -754,6 +839,8 @@ impl ProxyState {
             name: input.name,
             kind: input.kind,
             members: input.members,
+            filter: input.filter.trim().to_owned(),
+            order: input.order,
             selected: input.selected,
             url: if urltest {
                 Some(input.url.unwrap_or_else(|| DEFAULT_URL.to_owned()))
@@ -829,10 +916,13 @@ impl ProxyState {
         if group.kind != GroupKind::Selector {
             return Err(invalid(format!("{id} 是 urltest，自动选择，不能手动切换")));
         }
-        if !group.members.iter().any(|m| m == member) {
+        let group = group.clone();
+        if !self.members_of(&group).iter().any(|m| m == member) {
             return Err(invalid(format!("`{member}` 不是 {id} 的成员")));
         }
-        group.selected = member.to_owned();
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id == id) {
+            group.selected = member.to_owned();
+        }
         Ok(())
     }
 
@@ -844,7 +934,7 @@ impl ProxyState {
         let group = self.group(id)?;
         (group.kind == GroupKind::Selector).then(|| {
             if group.selected.is_empty() {
-                group.members.first().cloned().unwrap_or_default()
+                self.members_of(group).first().cloned().unwrap_or_default()
             } else {
                 group.selected.clone()
             }

@@ -94,6 +94,13 @@ export async function reportFailure(error: unknown) {
   }
 }
 
+/** Everything a group holds, in order: its own members and the nodes its filter matched, as the saved `order` arranges them. */
+export function membersOf(group: { members: string[]; matched?: string[]; order?: string[] }): string[] {
+  const base = [...group.members, ...(group.matched ?? []).filter((id) => !group.members.includes(id))]
+  const ordered = (group.order ?? []).filter((id, at, all) => base.includes(id) && all.indexOf(id) === at)
+  return [...ordered, ...base.filter((id) => !ordered.includes(id))]
+}
+
 export const groupViews = computed<GroupView[]>(() => {
   const byId = new Map(groups.value.map((group) => [group.id, group]))
   return order.value.flatMap((id): GroupView[] => {
@@ -101,7 +108,7 @@ export const groupViews = computed<GroupView[]>(() => {
       return final.value ? [{ id, name: FINAL_NAME, type: 'selector', members: final.value.members, builtin: true }] : []
     }
     const group = byId.get(id)
-    return group ? [{ id, name: group.name, type: group.type, members: group.members, builtin: group.builtin, group }] : []
+    return group ? [{ id, name: group.name, type: group.type, members: membersOf(group), builtin: group.builtin, group }] : []
   })
 })
 
@@ -125,7 +132,7 @@ export function currentOf(id: string): string | undefined {
   if (now) return now
   if (id === FINAL) return final.value?.selected || final.value?.members[0]
   const group = groups.value.find((item) => item.id === id)
-  return group?.now || group?.selected || group?.members[0]
+  return group?.now || group?.selected || (group ? membersOf(group)[0] : undefined)
 }
 
 /** The node a member's traffic ends at (following groups that choose groups). */

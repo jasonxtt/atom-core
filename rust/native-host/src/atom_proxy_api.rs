@@ -98,7 +98,8 @@ fn node_view(state: &ProxyState, node: &crate::atom_proxy::Node) -> Value {
 fn group_view(state: &ProxyState, group: &crate::atom_proxy::Group) -> Value {
     let mut value = serde_json::to_value(group).unwrap_or(Value::Null);
     if let Value::Object(map) = &mut value {
-        map.insert("empty".into(), json!(group.members.is_empty()));
+        map.insert("empty".into(), json!(state.members_of(group).is_empty()));
+        map.insert("matched".into(), json!(state.filtered_nodes(group)));
         map.insert(
             "builtin".into(),
             json!(group.id == crate::atom_proxy::DEFAULT_GROUP),

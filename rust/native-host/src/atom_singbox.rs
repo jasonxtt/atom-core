@@ -121,7 +121,7 @@ pub(crate) fn generate(
     for group in &state.groups {
         let mut outbound = Map::new();
         outbound.insert("tag".into(), json!(group.id));
-        outbound.insert("outbounds".into(), json!(members_or_block(&group.members)));
+        outbound.insert("outbounds".into(), json!(members_or_block(&state.members_of(group))));
         match group.kind {
             GroupKind::Selector => {
                 outbound.insert("type".into(), json!("selector"));

@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import draggable from 'vuedraggable'
 import { ApiError, call, client, describe } from '../api/client'
-import { FINAL, FINAL_NAME, groups, isGroup, loadProxy, nameOf, nodes, final, version } from '../composables/proxy'
+import { FINAL, FINAL_NAME, groups, isGroup, loadProxy, membersOf, nameOf, nodes, final, version } from '../composables/proxy'
 import { refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
 
@@ -17,6 +17,8 @@ const form = reactive({
   name: '',
   type: 'selector' as 'selector' | 'urltest',
   members: [] as string[],
+  filter: '',
+  order: [] as string[],
   selected: '',
   url: '',
   interval: '',
@@ -31,14 +33,14 @@ const saving = ref(false)
 const formVersion = ref(0)
 // After a 409: what is saved now, for the user to compare with the form.
 // Every field a save replaces is shown.
-type Saved = { name: string; type: string; members: string[]; selected?: string; url?: string; interval?: string; tolerance?: number }
+type Saved = { name: string; type: string; members: string[]; filter?: string; selected?: string; url?: string; interval?: string; tolerance?: number }
 const conflict = ref<Saved | null>(null)
 
 function latest(): Saved | null {
   if (isFinal.value) return final.value ? { name: FINAL_NAME, type: 'selector', members: final.value.members, selected: final.value.selected } : null
   const group = groups.value.find((item) => item.id === id.value)
   return group
-    ? { name: group.name, type: group.type, members: group.members, selected: group.selected, url: group.url, interval: group.interval, tolerance: group.tolerance }
+    ? { name: group.name, type: group.type, members: group.members, filter: group.filter, selected: group.selected, url: group.url, interval: group.interval, tolerance: group.tolerance }
     : null
 }
 
@@ -55,6 +57,8 @@ function fill() {
     name: group.name,
     type: group.type,
     members: [...group.members],
+    filter: group.filter ?? '',
+    order: [...(group.order ?? [])],
     selected: group.selected ?? '',
     url: group.url ?? '',
     interval: group.interval ?? '',
@@ -85,23 +89,65 @@ onMounted(load)
 
 // Candidates: nodes and the other groups (Final is never a member; Final itself takes groups).
 const filter = ref<'all' | 'node' | 'group'>('all')
-const search = ref('')
+// The name filter (a regular expression, case-insensitive; a plain keyword is one): the nodes
+// it matches are members that cannot be unticked one by one. The server decides at save time
+// (Rust's regex); this is the preview.
+const filterText = computed(() => form.filter.trim())
+const filterRegex = computed(() => {
+  if (!filterText.value) return null
+  try {
+    return new RegExp(filterText.value, 'i')
+  } catch {
+    return false as const
+  }
+})
+const locked = computed(() => {
+  const regex = filterRegex.value
+  return new Set(regex ? nodes.value.filter((node) => regex.test(node.name)).map((node) => node.id) : [])
+})
+// Everything the group will hold: the ticked members, then the filtered nodes not among them.
+// The selected members as the right list shows them, in the order the group will have: the
+// stored `order` first, then what it does not name (the ticked members, then the filtered nodes).
+const shown = computed({
+  get() {
+    const base = [...form.members, ...[...locked.value].filter((member) => !form.members.includes(member))]
+    const ordered = form.order.filter((member, at) => base.includes(member) && form.order.indexOf(member) === at)
+    return [...ordered, ...base.filter((member) => !ordered.includes(member))]
+  },
+  set(list: string[]) {
+    form.order = list
+    form.members = list.filter((member) => form.members.includes(member))
+  }
+})
+const memberCount = computed(() => shown.value.length)
+
 const candidates = computed(() => {
-  const query = search.value.trim().toLowerCase()
   const groupItems =
     filter.value === 'node'
       ? []
       : groups.value
           .filter((group) => group.id !== id.value)
-          .map((group) => ({ id: group.id, name: group.name, group: true, sub: `${group.type === 'selector' ? '手动' : '自动测速'} · ${group.members.length} 个成员` }))
+          .map((group) => ({ id: group.id, name: group.name, group: true, sub: `${group.type === 'selector' ? '手动' : '自动测速'} · ${membersOf(group).length} 个成员` }))
   const nodeItems =
     filter.value === 'group'
       ? []
       : nodes.value.map((node) => ({ id: node.id, name: node.name, group: false, sub: `${node.type ?? ''} · ${node.server ?? ''}:${node.server_port ?? ''}` }))
-  return [...groupItems, ...nodeItems].filter((item) => !query || `${item.name} ${item.sub}`.toLowerCase().includes(query))
+  return [...groupItems, ...nodeItems]
 })
 
+const isPicked = (member: string) => form.members.includes(member) || locked.value.has(member)
+const pickedCount = computed(() => candidates.value.filter((item) => isPicked(item.id)).length)
+const allPicked = computed(() => candidates.value.length > 0 && pickedCount.value === candidates.value.length)
+
+/** Ticks every candidate in the current list (the filter tabs apply); ticking again clears them. */
+function toggleAll() {
+  const ids = candidates.value.map((item) => item.id).filter((member) => !locked.value.has(member))
+  if (allPicked.value) form.members = form.members.filter((member) => !ids.includes(member))
+  else form.members.push(...ids.filter((member) => !form.members.includes(member)))
+}
+
 function toggle(member: string) {
+  if (locked.value.has(member)) return
   const index = form.members.indexOf(member)
   if (index < 0) form.members.push(member)
   else form.members.splice(index, 1)
@@ -130,7 +176,11 @@ async function save(overwrite = false) {
     return
   }
   // A selector keeps its choice while it is still a member ("" is the first member).
-  const selected = form.members.includes(form.selected) ? form.selected : ''
+  const selected = isPicked(form.selected) ? form.selected : ''
+  if (!isFinal.value && filterRegex.value === false) {
+    error.value = '筛选正则无效'
+    return
+  }
   saving.value = true
   try {
     if (isFinal.value) {
@@ -140,6 +190,8 @@ async function save(overwrite = false) {
         name,
         type: form.type,
         members: form.members,
+        filter: filterText.value,
+        order: filterText.value ? shown.value : [],
         version: formVersion.value,
         ...(form.type === 'selector'
           ? { selected }
@@ -215,13 +267,17 @@ async function save(overwrite = false) {
               {{ item[1] }}
             </button>
           </div>
-          <input v-model="search" class="inp" style="width: 180px" placeholder="搜索" aria-label="搜索成员" />
+          <div class="seg sm">
+            <button type="button" :class="{ on: allPicked }" :disabled="!candidates.length" :title="`${pickedCount} / ${candidates.length}`" @click="toggleAll">全选</button>
+          </div>
+          <input v-if="!isFinal" v-model="form.filter" class="inp sm mono" style="width: 180px; font-size: 12.5px" placeholder="关键字筛选节点" aria-label="关键字筛选节点" autocomplete="off" spellcheck="false" />
+          <span v-if="filterRegex === false" class="err">正则无效</span>
         </div>
         <div class="mgrid">
-          <label v-for="item in candidates" :key="item.id" class="check" :class="{ on: form.members.includes(item.id) }">
-            <input type="checkbox" :aria-label="item.name" :checked="form.members.includes(item.id)" @change="toggle(item.id)" />
+          <label v-for="item in candidates" :key="item.id" class="check" :class="{ on: isPicked(item.id) }">
+            <input type="checkbox" :aria-label="item.name" :checked="isPicked(item.id)" :disabled="locked.has(item.id)" @change="toggle(item.id)" />
             <div>
-              <div class="t1">{{ item.name }} <span v-if="item.group" class="tag">组</span></div>
+              <div class="t1">{{ item.name }} <span v-if="item.group" class="tag">组</span> <span v-if="locked.has(item.id)" class="tag">筛选</span></div>
               <div class="t2 t1">{{ item.sub }}</div>
             </div>
           </label>
@@ -231,10 +287,10 @@ async function save(overwrite = false) {
     <div class="card grid sticky" style="gap: 10px">
       <div class="row">
         <h2>已选成员</h2>
-        <span class="tag">{{ form.members.length }}</span>
+        <span class="tag">{{ memberCount }}</span>
       </div>
       <draggable
-        v-model="form.members"
+        v-model="shown"
         :item-key="(member: string) => member"
         class="grid"
         style="gap: 6px"
@@ -250,21 +306,23 @@ async function save(overwrite = false) {
         chosen-class="s-chosen"
         fallback-class="s-fallback"
       >
-        <template #item="{ element, index }">
+        <template #item="{ element }">
           <div class="srow">
             <span class="handle" aria-hidden="true">⠿</span>
             <span class="nm">{{ nameOf(element) }}</span>
             <span v-if="isGroup(element)" class="tag">组</span>
-            <button class="ico" type="button" style="width: 24px; height: 24px" aria-label="移除" @click="form.members.splice(index, 1)">✕</button>
+            <span v-if="locked.has(element)" class="tag">筛选</span>
+            <button v-else class="ico" type="button" style="width: 24px; height: 24px" aria-label="移除" @click="form.members = form.members.filter((member) => member !== element)">✕</button>
           </div>
         </template>
       </draggable>
-      <div v-if="!form.members.length" class="err">空组</div>
+      <div v-if="!memberCount" class="err">空组</div>
       <div v-if="conflict" class="grid" style="gap: 8px">
         <div class="err">已在别处修改（409）。现在保存的是：</div>
         <div class="tile" style="font-size: 12.5px">
           <div>{{ conflict.name }} · {{ conflict.type === 'selector' ? '手动' : '自动测速' }}</div>
           <div class="t2">成员：{{ conflict.members.map(nameOf).join('、') || '空组' }}</div>
+          <div v-if="conflict.filter" class="t2 mono">名称筛选：{{ conflict.filter }}</div>
           <div v-if="conflict.type === 'selector'" class="t2">选中：{{ conflict.selected ? nameOf(conflict.selected) : '第一个成员' }}</div>
           <template v-else>
             <div class="t2 mono">测速 URL：{{ conflict.url || '—' }}</div>

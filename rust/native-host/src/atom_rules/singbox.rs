@@ -128,7 +128,9 @@ fn selections(state: &ProxyState) -> Selections {
     let mut chosen: Vec<(String, String)> = state
         .groups
         .iter()
-        .filter(|group| group.kind == atom_proxy::GroupKind::Selector && !group.members.is_empty())
+        .filter(|group| {
+            group.kind == atom_proxy::GroupKind::Selector && !state.members_of(group).is_empty()
+        })
         .filter_map(|group| Some((group.id.clone(), state.selection(&group.id)?)))
         .collect();
     if !state.final_group.members.is_empty() {
