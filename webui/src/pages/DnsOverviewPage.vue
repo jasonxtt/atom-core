@@ -31,13 +31,29 @@ async function loadDomains() {
   distinct.value = Number.isFinite(header) ? header : null
 }
 
+/** The rankings one at a time: the server runs two audit reads at once and answers 503 to more. */
+async function loadRanks() {
+  const steps = [
+    loadDomains,
+    async () => (clients.value = await call(client.GET('/audit/rank/client', { params: { query: { limit: RANK_ROWS } } }))),
+    async () => (slowest.value = await call(client.GET('/audit/rank/slowest', { params: { query: { limit: RANK_ROWS } } }))),
+    async () => (sets.value = await call(client.GET('/audit/rank/domain_set', { params: { query: { limit: 500 } } })))
+  ]
+  let failure: unknown = null
+  for (const step of steps) {
+    try {
+      await step()
+    } catch (reason) {
+      failure ??= reason
+    }
+  }
+  if (failure !== null) throw failure
+}
+
 async function load() {
   const results = await Promise.allSettled([
     call(client.GET('/audit/stats')).then((value) => (stats.value = value)),
-    loadDomains(),
-    call(client.GET('/audit/rank/client', { params: { query: { limit: RANK_ROWS } } })).then((value) => (clients.value = value)),
-    call(client.GET('/audit/rank/slowest', { params: { query: { limit: RANK_ROWS } } })).then((value) => (slowest.value = value)),
-    call(client.GET('/audit/rank/domain_set', { params: { query: { limit: 500 } } })).then((value) => (sets.value = value)),
+    loadRanks(),
     call(client.GET('/caches')).then((value) => (caches.value = value.caches)),
     call(client.GET('/stats/upstreams')).then((value) => (upstreamStats.value = value.groups)),
     loadUpstreams(),
