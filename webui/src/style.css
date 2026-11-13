@@ -177,6 +177,8 @@ a.nav{text-decoration:none}
 .gnow .cur{color:var(--text)}
 .gnow .sp{flex:1}
 .dots{display:flex;gap:5px;flex-wrap:wrap;margin-top:10px}
+.gnow,.dots{cursor:pointer;user-select:none;-webkit-user-select:none}
+.gcards.editing .gnow,.gcards.editing .dots{cursor:grab}
 .sq{width:12px;height:12px;border-radius:4px;background:var(--idle)}
 .sq.ok{background:var(--ok)}.sq.warn{background:var(--warn)}.sq.bad{background:var(--bad)}
 .sq.cur{outline:2px solid var(--text);outline-offset:1px}

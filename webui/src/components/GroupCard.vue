@@ -76,14 +76,14 @@ const memberTesting = (member: string) => testing[isGroup(member) ? `m:${member}
         </button>
       </template>
     </div>
-    <div class="gnow">
+    <div class="gnow" @click="!editing && emit('toggle')">
       <span>→</span>
       <span class="cur">{{ nameOf(current) }}</span>
       <span v-if="current && isGroup(current)" class="tag">组</span>
       <span class="sp"></span>
       <span v-if="traffic !== undefined" class="tnum" style="font-size: 12px">{{ rate(traffic) }}</span>
     </div>
-    <div v-if="!open || editing" class="dots">
+    <div v-if="!open || editing" class="dots" @click="!editing && emit('toggle')">
       <span v-for="member in view.members" :key="member" class="sq" :class="[lat(member).kind, { cur: member === current }]" :title="nameOf(member)"></span>
       <span v-if="!view.members.length" class="hint" style="color: var(--bad)">空组</span>
     </div>
