@@ -1062,10 +1062,82 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether a login is on and whether this request is signed in */
+        get: operations["getAuth"];
+        /**
+         * Set or change the user name and password
+         * @description Draws a new key, which ends every session; the reply sets a new
+         *     cookie for this browser. With a login on, a request signed in by a
+         *     session must give `current_password` (400 without it, 403 when wrong).
+         */
+        put: operations["putAuth"];
+        post?: never;
+        /**
+         * Turn the login off
+         * @description The body may be empty; `current_password` as for PUT.
+         */
+        delete: operations["deleteAuth"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sign in; the reply sets the session cookie
+         * @description A wrong name or password is 401 after a one-second delay; 409 when no login is on.
+         */
+        post: operations["login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sign out (clears this browser's cookie) */
+        post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AuthStatus: {
+            /** @description A login is configured. */
+            enabled: boolean;
+            /** @description This request may use the API (always true without a login). */
+            authenticated: boolean;
+            /** @description The user name, when signed in. */
+            username: string | null;
+        };
         Cache: {
             tag: string;
             label: string;
@@ -3958,6 +4030,144 @@ export interface operations {
                 };
             };
             400: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    getAuth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The login state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthStatus"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    putAuth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Trimmed; 1 to 64 characters, no control characters. */
+                    username: string;
+                    /** @description 1 to 256 bytes. */
+                    password: string;
+                    current_password?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Saved; signed in. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthStatus"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    deleteAuth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    current_password?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description No login any more. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthStatus"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    username: string;
+                    password: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Signed in. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthStatus"];
+                };
+            };
+            401: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    logout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Signed out. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                    };
+                };
+            };
             default: components["responses"]["Error"];
         };
     };

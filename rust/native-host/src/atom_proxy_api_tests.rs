@@ -1107,6 +1107,10 @@ fn the_openapi_document_matches_the_routes() {
             );
             continue;
         }
+        if path == "auth" || path.starts_with("auth/") {
+            // The panel login: `api.rs` serves it before dispatch (`panel_auth`, tested there).
+            continue;
+        }
         let (status, value) = api.call(method, &format!("/api/v1/atom/{}", concrete(path)), "{}");
         assert!(
             !fallback(status, &value),
@@ -1127,7 +1131,7 @@ fn the_openapi_document_matches_the_routes() {
     }
     for path in paths.keys() {
         let path = path.strip_prefix('/').unwrap();
-        if path.starts_with("audit/") {
+        if path.starts_with("audit/") || path == "auth" || path.starts_with("auth/") {
             continue;
         }
         let (status, value) = api.call("PATCH", &format!("/api/v1/atom/{}", concrete(path)), "{}");

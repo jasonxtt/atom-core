@@ -164,6 +164,11 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "audit/rank/domain_set"),
     ("GET", "audit/rank/effective"),
     ("GET", "audit/rank/slowest"),
+    ("GET", "auth"),
+    ("PUT", "auth"),
+    ("DELETE", "auth"),
+    ("POST", "auth/login"),
+    ("POST", "auth/logout"),
 ];
 
 /// Display names of the builtin sets atom's configuration offers (an

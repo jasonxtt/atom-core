@@ -267,6 +267,8 @@ pub struct ApiServer {
     audit_clock: Arc<dyn AuditClock>,
     audit_read_slots: Arc<Semaphore>,
     external_ui: Arc<crate::external_ui::Registry>,
+    /// atom fork: the panel login (`panel_auth`).
+    auth: Rc<crate::panel_auth::PanelAuth>,
     static_slots: Arc<Semaphore>,
     accept_fault_after: Cell<Option<usize>>,
 }
@@ -295,8 +297,11 @@ impl ApiServer {
             .await
             .map_err(|error| ApiServerError::Bind(io::Error::other(error)))?,
         );
+        let auth = crate::panel_auth::PanelAuth::load(state_root.as_deref())
+            .map_err(|error| ApiServerError::Bind(io::Error::other(error)))?;
         Ok(Self {
             external_ui,
+            auth: Rc::new(auth),
             control: None,
             listener,
             fixed: Some((config, cache)),
@@ -372,6 +377,7 @@ impl ApiServer {
                             let audit_read_slots = Arc::clone(&self.audit_read_slots);
                             let static_slots = self.static_slots.clone();
                             let external_ui = self.external_ui.clone();
+                            let auth = Rc::clone(&self.auth);
                             let connection_shutdown = shutdown.child_token();
                             tasks.spawn_local(async move {
                                 let _ = process_connection(
@@ -386,6 +392,7 @@ impl ApiServer {
                                     audit_read_slots,
                                     static_slots,
                                     external_ui,
+                                    auth,
                                     connection_shutdown,
                                 )
                                 .await;
@@ -440,6 +447,9 @@ struct Request {
     method: String,
     target: String,
     body: Vec<u8>,
+    /// atom fork: the `Cookie` and `Authorization` headers (`panel_auth`).
+    cookie: Option<String>,
+    authorization: Option<String>,
 }
 
 struct Response {
@@ -560,6 +570,7 @@ async fn process_connection(
     audit_read_slots: Arc<Semaphore>,
     static_slots: Arc<Semaphore>,
     external_ui: Arc<crate::external_ui::Registry>,
+    auth: Rc<crate::panel_auth::PanelAuth>,
     shutdown: TransportCancellation,
 ) -> io::Result<()> {
     let request = tokio::select! {
@@ -638,6 +649,42 @@ async fn process_connection(
         .await?
     {
         return Ok(());
+    }
+    // atom fork: the panel login. The UI files and the health document above
+    // are public; everything else needs a session or the key.
+    let path = request.target.split('?').next().unwrap_or_default();
+    let auth_reply = if path == crate::panel_auth::PATH
+        || path.starts_with(&format!("{}/", crate::panel_auth::PATH))
+    {
+        auth.handle(
+            &request.method,
+            path,
+            &request.body,
+            request.cookie.as_deref(),
+            request.authorization.as_deref(),
+        )
+        .await
+    } else if auth.authorized(request.cookie.as_deref(), request.authorization.as_deref()) {
+        None
+    } else if request.target.starts_with(crate::atom_rules_api::PREFIX) {
+        Some(crate::atom_rules_api::error(401, "未登录"))
+    } else {
+        Some(crate::rule_sources::Reply {
+            status: 401,
+            content_type: Some("text/plain; charset=utf-8"),
+            body: b"unauthorized\n".to_vec(),
+            headers: Vec::new(),
+        })
+    };
+    if let Some(reply) = auth_reply {
+        let response = Response {
+            status: reply.status,
+            content_type: reply.content_type,
+            body: reply.body,
+            headers: reply.headers,
+        };
+        let (_reader, mut writer) = stream.into_split();
+        return write_response(&mut writer, &response).await;
     }
     let _management_lease = if request_mutates_managed_state(&request) {
         if let Some(control) = control.as_ref() {
@@ -845,7 +892,7 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         buffer.extend_from_slice(&chunk[..read]);
     };
 
-    let (method, target, content_length) = {
+    let (method, target, content_length, cookie, authorization) = {
         let head = std::str::from_utf8(&buffer[..head_end])
             .map_err(|_| io::Error::other("request head is not UTF-8"))?;
         let mut lines = head.split("\r\n");
@@ -861,9 +908,15 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
             .ok_or_else(|| io::Error::other("missing request target"))?;
 
         let mut content_length = 0_usize;
+        let mut cookie = None;
+        let mut authorization = None;
         for line in lines {
             if let Some((key, value)) = line.split_once(':') {
-                if key.trim().eq_ignore_ascii_case("content-length") {
+                if key.trim().eq_ignore_ascii_case("cookie") {
+                    cookie = Some(value.trim().to_owned());
+                } else if key.trim().eq_ignore_ascii_case("authorization") {
+                    authorization = Some(value.trim().to_owned());
+                } else if key.trim().eq_ignore_ascii_case("content-length") {
                     content_length = value
                         .trim()
                         .parse()
@@ -871,7 +924,13 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
                 }
             }
         }
-        (method.to_owned(), target.to_owned(), content_length)
+        (
+            method.to_owned(),
+            target.to_owned(),
+            content_length,
+            cookie,
+            authorization,
+        )
     };
     if content_length > MAX_BODY_BYTES {
         return Err(io::Error::other("request body too large"));
@@ -898,6 +957,8 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         method,
         target,
         body,
+        cookie,
+        authorization,
     }))
 }
 
@@ -1147,6 +1208,8 @@ pub(crate) fn local_plugin_request<'a>(
             method: method.to_owned(),
             target: target.to_owned(),
             body: body.to_vec(),
+            cookie: None,
+            authorization: None,
         };
         if !control.admission_open() {
             return Some((503, b"host is applying configuration\n".to_vec()));
@@ -2891,6 +2954,8 @@ mod tests {
             method: "GET".to_owned(),
             target: target.to_owned(),
             body: Vec::new(),
+            cookie: None,
+            authorization: None,
         };
         let refused = busy_refusal(&request("/api/v1/atom/rules"), "host is applying configuration");
         assert_eq!((refused.status, refused.content_type), (503, Some("application/json")));
@@ -2995,6 +3060,89 @@ mod tests {
             shutdown.cancel();
             serving.await.unwrap().unwrap();
             control.close().await.unwrap();
+        });
+    }
+
+    /// atom fork: with a login, only the UI, the health document and the
+    /// login routes are open; the key or a session opens the rest.
+    #[test]
+    fn the_panel_login_guards_everything_but_health_and_auth() {
+        let root = test_root("panel-auth");
+        fs::create_dir_all(root.join("webinfo")).unwrap();
+        let host = crate::HostAssembly::from_config(
+            crate::compile_yaml(include_str!(
+                "../../../tests/phase5a-baseline/configs/forward-udp.yaml"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        host.block_on(async {
+            let setup = crate::panel_auth::PanelAuth::load(Some(&root)).unwrap();
+            let set = setup
+                .handle("PUT", crate::panel_auth::PATH, br#"{"username":"u","password":"p"}"#, None, None)
+                .await
+                .unwrap();
+            assert_eq!(set.status, 200);
+            let stored: serde_json::Value = serde_json::from_slice(
+                &fs::read(root.join("webinfo").join(crate::panel_auth::AUTH_FILE)).unwrap(),
+            )
+            .unwrap();
+            let key = stored["key"].as_str().unwrap().to_owned();
+            let shutdown = TransportCancellation::new();
+            let server = super::ApiServer::bind(
+                host.config_handle(),
+                host.cache_handle(),
+                host.observer_handle(),
+                Some(root.clone()),
+                super::AuditPersistenceFaults::default(),
+                host.options().audit_clock.clone(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            let address = server.local_addr().unwrap();
+            let serving = tokio::task::spawn_local(server.serve(shutdown.clone()));
+            async fn status(address: std::net::SocketAddr, request: String) -> (u16, String) {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+                client.write_all(request.as_bytes()).await.unwrap();
+                let mut bytes = Vec::new();
+                client.read_to_end(&mut bytes).await.unwrap();
+                let text = String::from_utf8(bytes).unwrap();
+                (text.split_whitespace().nth(1).unwrap().parse().unwrap(), text)
+            }
+            let get = |path: &str, extra: &str| format!("GET {path} HTTP/1.1\r\nHost: t\r\n{extra}\r\n");
+            assert_eq!(status(address, get("/api/v1/atom/rules", "")).await.0, 401);
+            assert_eq!(status(address, get("/metrics", "")).await.0, 401);
+            assert_eq!(status(address, get("/plugins/x/show", "")).await.0, 401);
+            assert_ne!(status(address, get("/api/v1/system/health", "")).await.0, 401);
+            let (code, text) = status(address, get("/api/v1/atom/auth", "")).await;
+            assert_eq!(code, 200);
+            assert!(text.contains(r#""authenticated":false"#), "{text}");
+            let bearer = format!("Authorization: Bearer {key}\r\n");
+            assert_ne!(status(address, get("/api/v1/atom/rules", &bearer)).await.0, 401);
+            let body = r#"{"username":"u","password":"p"}"#;
+            let (code, text) = status(
+                address,
+                format!(
+                    "POST /api/v1/atom/auth/login HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            )
+            .await;
+            assert_eq!(code, 200, "{text}");
+            let cookie = text
+                .lines()
+                .find_map(|line| line.strip_prefix("Set-Cookie: "))
+                .and_then(|value| value.split(';').next())
+                .unwrap()
+                .to_owned();
+            assert_ne!(
+                status(address, get("/api/v1/atom/rules", &format!("Cookie: {cookie}\r\n"))).await.0,
+                401
+            );
+            shutdown.cancel();
+            serving.await.unwrap().unwrap();
         });
     }
 

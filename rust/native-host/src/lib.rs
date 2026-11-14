@@ -35,6 +35,7 @@ mod managed;
 mod matchers;
 mod memory;
 mod observer;
+mod panel_auth;
 mod plugins;
 mod policy;
 mod process_metrics;

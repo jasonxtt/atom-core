@@ -6,6 +6,9 @@ import { health, refreshStatus, singboxVersion, status } from './composables/sta
 import { setTheme, theme, themeLabels } from './composables/theme'
 import { dismiss, toasts } from './composables/toast'
 import { usePoll } from './composables/poll'
+import { signedOut } from './api/client'
+import { auth, loadAuth, logout } from './composables/auth'
+import LoginPage from './pages/LoginPage.vue'
 
 const route = useRoute()
 const drawer = ref(false)
@@ -15,7 +18,20 @@ watch(() => route.fullPath, () => (drawer.value = false))
 const active = (path: string) => (path === '/' ? route.path === '/' : route.path === path || route.path.startsWith(`${path}/`))
 const nextTheme = { system: 'light', light: 'dark', dark: 'system' } as const
 
-usePoll(refreshStatus, 5000)
+// The shell waits for the login state; an unreadable one shows the shell (its pages show the failure).
+const ready = ref(false)
+const needLogin = computed(() => signedOut.value || (auth.value?.enabled === true && !auth.value.authenticated))
+
+loadAuth()
+  .catch(() => {})
+  .finally(() => {
+    ready.value = true
+    if (!needLogin.value) refreshStatus().catch(() => {})
+  })
+
+usePoll(async () => {
+  if (ready.value && !needLogin.value) await refreshStatus()
+}, 5000)
 
 const versions = computed(() => {
   const atomdns = status.value?.atomdns.version
@@ -24,7 +40,8 @@ const versions = computed(() => {
 </script>
 
 <template>
-  <div class="shell">
+  <LoginPage v-if="ready && needLogin" />
+  <div v-else-if="ready" class="shell">
     <aside class="side" :class="{ open: drawer }">
       <div class="brand"><i>a</i>atom</div>
       <RouterLink v-for="item in navItems" :key="item.path" :to="item.path" class="nav" :class="{ on: active(item.path) }">
@@ -47,6 +64,9 @@ const versions = computed(() => {
         <div id="top-actions" class="row"></div>
         <button class="ico" :aria-label="`主题：${themeLabels[theme]}`" :title="`主题：${themeLabels[theme]}`" @click="setTheme(nextTheme[theme])">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2" /></svg>
+        </button>
+        <button v-if="auth?.enabled" class="ico" aria-label="退出登录" title="退出登录" @click="logout().catch(() => {})">
+          <svg viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10" /></svg>
         </button>
       </div>
       <div class="content">

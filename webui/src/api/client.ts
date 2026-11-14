@@ -1,4 +1,5 @@
 import createClient from 'openapi-fetch'
+import { ref } from 'vue'
 import type { components, paths } from './schema'
 
 export type Schemas = components['schemas']
@@ -30,9 +31,13 @@ async function refusedBeforeHandling(response: Response): Promise<boolean> {
   }
 }
 
+/** Set when a request outside `auth` is refused for want of a login (401): the app shows the login page. */
+export const signedOut = ref(false)
+
 async function retrying(request: Request): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     const response = await fetch(request.clone())
+    if (response.status === 401 && !new URL(request.url).pathname.startsWith('/api/v1/atom/auth')) signedOut.value = true
     if (attempt >= RETRIES || !(await refusedBeforeHandling(response))) return response
     await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)))
   }

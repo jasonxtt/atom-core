@@ -16,7 +16,11 @@ info:
 
     Conventions:
 
-    * No authentication (design 7.1): the API listens on the LAN.
+    * Login (`auth`): optional. Without `webinfo/atom_auth.json` nothing needs
+      one. With it every route except `auth` and `auth/login` answers 401
+      unless the request carries the session cookie `atom_session` (set by
+      `auth/login`, 30 days) or `Authorization: Bearer <key>` (the `key` of
+      that file, for the installer).
     * Bodies are JSON. Unknown fields are refused with 400 where a schema says
       `additionalProperties: false`.
     * Every error is `{"error": "..."}` (`Error`). A stale `version` (409) adds
@@ -79,6 +83,8 @@ tags:
     description: What sing-box runs right now (current members, delays, connections) and the machine's load.
   - name: state
     description: What the DNS side holds right now (caches, upstream counters, learned names, re-query runs).
+  - name: auth
+    description: The panel login.
   - name: audit
     description: AtomDNS's query audit (DNS logs and statistics), also served at `/api/v2/audit/` and `/api/v1/audit/` in their original form.
 
@@ -2278,6 +2284,140 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /auth:
+    get:
+      tags: [auth]
+      summary: Whether a login is on and whether this request is signed in
+      operationId: getAuth
+      responses:
+        "200":
+          description: The login state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthStatus"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [auth]
+      summary: Set or change the user name and password
+      description: |
+        Draws a new key, which ends every session; the reply sets a new
+        cookie for this browser. With a login on, a request signed in by a
+        session must give `current_password` (400 without it, 403 when wrong).
+      operationId: putAuth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  description: Trimmed; 1 to 64 characters, no control characters.
+                password:
+                  type: string
+                  description: 1 to 256 bytes.
+                current_password:
+                  type: string
+      responses:
+        "200":
+          description: Saved; signed in.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthStatus"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [auth]
+      summary: Turn the login off
+      description: The body may be empty; `current_password` as for PUT.
+      operationId: deleteAuth
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                current_password:
+                  type: string
+      responses:
+        "200":
+          description: No login any more.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthStatus"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Sign in; the reply sets the session cookie
+      description: A wrong name or password is 401 after a one-second delay; 409 when no login is on.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Signed in.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthStatus"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Sign out (clears this browser's cookie)
+      operationId: logout
+      responses:
+        "200":
+          description: Signed out.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+        default:
+          $ref: "#/components/responses/Error"
 components:
   parameters:
     AuditPage:
@@ -2367,6 +2507,20 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
+    AuthStatus:
+      type: object
+      required: [enabled, authenticated, username]
+      properties:
+        enabled:
+          type: boolean
+          description: A login is configured.
+        authenticated:
+          type: boolean
+          description: This request may use the API (always true without a login).
+        username:
+          type: string
+          nullable: true
+          description: The user name, when signed in.
     Cache:
       type: object
       required: [tag, label, switch, group, entries, queries, hits, lazy_hits, capacity, lazy_cache_ttl, dump_interval]
