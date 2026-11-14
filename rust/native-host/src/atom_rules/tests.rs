@@ -69,32 +69,29 @@ fn ip(text: &str) -> Option<IpAddr> {
     Some(text.parse().unwrap())
 }
 
+/// The default table has no ads rule: a configured `adguard` builtin is
+/// only a set rules may name.
 #[test]
-fn default_table_sends_lan_direct_and_blocks_ads() {
+fn default_table_sends_lan_direct() {
     let rules = owner(Path::new(""));
     let (version, list) = rules.rules();
     assert_eq!(version, 0);
     assert_eq!(
         list.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
-        ["r-lan", "r-ads"]
+        ["r-lan"]
     );
     assert_eq!(hit(&rules, "nas.lan"), Some(Action::Direct));
     assert_eq!(hit(&rules, "printer.home.arpa."), Some(Action::Direct));
     assert_eq!(hit(&rules, "localhost"), Some(Action::Direct));
     assert_eq!(
         rules.test("ads.example", None, ADS).map(|(_, r)| r.action),
-        Some(Action::Block)
+        None
     );
     assert_eq!(hit(&rules, "example.com"), None, "falls through");
-    // Without the adguard builtin only the LAN rule is installed.
-    let bare =
-        AtomRules::load(Path::new(""), MARKS, None, String::new(), Vec::new(), None).unwrap();
-    assert_eq!(bare.rules().1.len(), 1);
 }
 
-/// The corrections of the geosite lists follow the ads rule (atom step 6):
-/// a name in `cusnocn` goes to Final, one in `cuscn` direct; ahead of them
-/// the LAN and ads rules still win.
+/// The corrections of the geosite lists follow the LAN rule (atom step 6):
+/// a name in `cusnocn` goes to Final, one in `cuscn` direct.
 #[test]
 fn default_table_carries_the_geosite_corrections_when_configured() {
     const CUSNOCN: u64 = 1 << 15;
@@ -115,12 +112,12 @@ fn default_table_carries_the_geosite_corrections_when_configured() {
     let list = rules.rules().1;
     assert_eq!(
         list.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
-        ["r-lan", "r-ads", "r-cusnocn", "r-cuscn"]
+        ["r-lan", "r-cusnocn", "r-cuscn"]
     );
     let action = |flags: u64| rules.test("x.example", None, flags).map(|(_, r)| r.action);
     assert_eq!(action(CUSNOCN), Some(proxy("final")));
     assert_eq!(action(CUSCN), Some(Action::Direct));
-    assert_eq!(action(CUSNOCN | ADS), Some(Action::Block), "ads first");
+    assert_eq!(action(CUSNOCN | ADS), Some(proxy("final")), "no ads rule");
     assert_eq!(
         action(CUSNOCN | CUSCN),
         Some(proxy("final")),
@@ -207,7 +204,7 @@ fn stale_versions_are_refused_with_the_current_one() {
         .unwrap_err();
     assert_eq!((stale.status, stale.version), (409, Some(version)));
     assert_eq!(rules.delete(&rule.id, Some(0)).unwrap_err().status, 409);
-    assert_eq!(rules.rules().1.len(), 3, "nothing changed");
+    assert_eq!(rules.rules().1.len(), 2, "nothing changed");
     assert_eq!(rules.delete("r-none", None).unwrap_err().status, 404);
     assert_eq!(
         rules
@@ -320,7 +317,7 @@ fn invalid_rules_are_refused_and_change_nothing() {
     refuse(suffix(&["a.com"]), proxy(" g"));
     refuse(suffix(&["a.com"]), proxy(&"g".repeat(65)));
     assert_eq!(rules.rules().0, 0);
-    assert_eq!(rules.rules().1.len(), 2);
+    assert_eq!(rules.rules().1.len(), 1);
 }
 
 #[test]
@@ -883,7 +880,7 @@ fn the_fixture_marks_the_action_and_records_the_group() {
     let mut ads = state("ads.example", None);
     ads.fast_flags = ADS;
     executor.execute(&mut ads).unwrap();
-    assert_eq!(ads.fast_flags, ADS | 1 << 40);
+    assert_eq!(ads.fast_flags, ADS, "no default ads rule");
     let mut other = state("example.com", None);
     executor.execute(&mut other).unwrap();
     assert_eq!((other.fast_flags, other.outbound.clone()), (0, None));

@@ -480,8 +480,8 @@ pub(crate) struct AtomRules {
 }
 
 /// The default table of a new installation (design §4.4). Each rule after
-/// the LAN rule needs its builtin set (`adguard`, `cusnocn`, `cuscn`) and is
-/// left out of a configuration without it.
+/// the LAN rule needs its builtin set (`cusnocn`, `cuscn`) and is left out of
+/// a configuration without it.
 fn default_rules(builtin: &dyn Fn(&str) -> bool) -> Vec<Rule> {
     let mut rules = vec![Rule {
         id: "r-lan".to_owned(),
@@ -507,7 +507,6 @@ fn default_rules(builtin: &dyn Fn(&str) -> bool) -> Vec<Rule> {
     // The corrections of the geosite lists the original judgement uses
     // (design §4.4, atom step 6): they were ahead of geosite there.
     for (id, remark, set, action) in [
-        ("r-ads", "广告", "adguard", Action::Block),
         (
             "r-cusnocn",
             "代理修正（geosite-cn 里的国外域名）",
