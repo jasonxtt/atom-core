@@ -479,31 +479,11 @@ pub(crate) struct AtomRules {
     catalog_pins: RefCell<BTreeMap<String, usize>>,
 }
 
-/// The default table of a new installation (design §4.4). Each rule after
-/// the LAN rule needs its builtin set (`cusnocn`, `cuscn`) and is left out of
-/// a configuration without it.
+/// The default table of a new installation (design §4.4): the corrections
+/// of the geosite lists, each only when its builtin set (`cusnocn`, `cuscn`)
+/// is configured.
 fn default_rules(builtin: &dyn Fn(&str) -> bool) -> Vec<Rule> {
-    let mut rules = vec![Rule {
-        id: "r-lan".to_owned(),
-        enabled: true,
-        remark: "局域网和私有域名".to_owned(),
-        matches: Match {
-            suffix: [
-                "lan",
-                "local",
-                "localhost",
-                "localdomain",
-                "home.arpa",
-                "internal",
-            ]
-            .map(str::to_owned)
-            .to_vec(),
-            ..Match::default()
-        },
-        action: Action::Direct,
-        dns: None,
-        cache: true,
-    }];
+    let mut rules = Vec::new();
     // The corrections of the geosite lists the original judgement uses
     // (design §4.4, atom step 6): they were ahead of geosite there.
     for (id, remark, set, action) in [

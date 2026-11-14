@@ -163,7 +163,7 @@ fn a_recomputation_skips_rules_with_a_client_condition() {
                 Action::Direct,
             ),
             None,
-            Some("r-lan"),
+            None,
             None,
         )
         .unwrap();
@@ -177,7 +177,7 @@ fn a_recomputation_skips_rules_with_a_client_condition() {
                 Action::Block,
             ),
             None,
-            Some("r-lan"),
+            None,
             None,
         )
         .unwrap();
@@ -190,7 +190,6 @@ fn a_recomputation_skips_rules_with_a_client_condition() {
         rules.decide(&wire("www.a.com"), 0),
         Some(Verdict::Proxy(Arc::from("g-x")))
     );
-    assert_eq!(rules.decide(&wire("nas.lan"), 0), Some(Verdict::Direct(None)));
     assert_eq!(rules.decide(&wire("b.com"), 0), None);
     assert_eq!(
         rules

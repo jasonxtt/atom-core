@@ -97,8 +97,8 @@ fn crud_move_and_test_over_http_shapes() {
     assert_eq!(list["version"], 0);
     assert_eq!(
         list["rules"].as_array().unwrap().len(),
-        1,
-        "LAN only: no adguard"
+        0,
+        "no defaults without the corrections"
     );
 
     let (status, created) = api.call(
@@ -155,7 +155,7 @@ fn crud_move_and_test_over_http_shapes() {
     );
     assert_eq!(status, 200, "{moved}");
     assert_eq!(moved["version"], 3);
-    assert_eq!(moved["rules"][1]["id"], direct.as_str());
+    assert_eq!(moved["rules"][0]["id"], direct.as_str());
     assert_eq!(test("www.video.example")["action"], "direct");
     let (status, _) = api.call(
         "POST",

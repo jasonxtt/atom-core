@@ -3,7 +3,7 @@
 # ==============================================================================
 # 规则本身不写在这里：存在 webinfo/atom_rules.json，由管理 API /api/v1/atom/rules 增删改查、拖动排序；
 # 自定义规则集（远程 URL / 本地列表）存在 webinfo/atom_rulesets.json 和 webinfo/atom_rulesets/<id>-<revision>.txt，
-# 由 /api/v1/atom/rulesets 管理。没有 atom_rules.json 时使用默认规则表：局域网和私有域名 → 直连，广告 → 屏蔽，
+# 由 /api/v1/atom/rulesets 管理。没有 atom_rules.json 时使用默认规则表：
 # 代理修正（cusnocn）→ 代理到 Final，直连修正（cuscn）→ 直连。
 #
 # 主流程（config_custom.yaml）在系统固定项（重写、类型屏蔽）之后执行 $atom_rules：

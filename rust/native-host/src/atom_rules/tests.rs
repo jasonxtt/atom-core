@@ -69,20 +69,15 @@ fn ip(text: &str) -> Option<IpAddr> {
     Some(text.parse().unwrap())
 }
 
-/// The default table has no ads rule: a configured `adguard` builtin is
-/// only a set rules may name.
+/// The default table has neither an ads nor a LAN rule: a configured
+/// `adguard` builtin is only a set rules may name.
 #[test]
-fn default_table_sends_lan_direct() {
+fn default_table_is_empty_without_the_corrections() {
     let rules = owner(Path::new(""));
     let (version, list) = rules.rules();
     assert_eq!(version, 0);
-    assert_eq!(
-        list.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
-        ["r-lan"]
-    );
-    assert_eq!(hit(&rules, "nas.lan"), Some(Action::Direct));
-    assert_eq!(hit(&rules, "printer.home.arpa."), Some(Action::Direct));
-    assert_eq!(hit(&rules, "localhost"), Some(Action::Direct));
+    assert!(list.is_empty());
+    assert_eq!(hit(&rules, "nas.lan"), None);
     assert_eq!(
         rules.test("ads.example", None, ADS).map(|(_, r)| r.action),
         None
@@ -90,8 +85,8 @@ fn default_table_sends_lan_direct() {
     assert_eq!(hit(&rules, "example.com"), None, "falls through");
 }
 
-/// The corrections of the geosite lists follow the LAN rule (atom step 6):
-/// a name in `cusnocn` goes to Final, one in `cuscn` direct.
+/// The corrections of the geosite lists (atom step 6): a name in `cusnocn`
+/// goes to Final, one in `cuscn` direct.
 #[test]
 fn default_table_carries_the_geosite_corrections_when_configured() {
     const CUSNOCN: u64 = 1 << 15;
@@ -112,7 +107,7 @@ fn default_table_carries_the_geosite_corrections_when_configured() {
     let list = rules.rules().1;
     assert_eq!(
         list.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
-        ["r-lan", "r-cusnocn", "r-cuscn"]
+        ["r-cusnocn", "r-cuscn"]
     );
     let action = |flags: u64| rules.test("x.example", None, flags).map(|(_, r)| r.action);
     assert_eq!(action(CUSNOCN), Some(proxy("final")));
@@ -140,7 +135,7 @@ fn default_table_carries_the_geosite_corrections_when_configured() {
             .iter()
             .map(|rule| rule.id.as_str())
             .collect::<Vec<_>>(),
-        ["r-lan", "r-cuscn"]
+        ["r-cuscn"]
     );
 }
 
@@ -186,11 +181,14 @@ fn first_enabled_match_wins_and_move_changes_it() {
 #[test]
 fn stale_versions_are_refused_with_the_current_one() {
     let rules = owner(Path::new(""));
+    let (_, other) = rules
+        .create(input(suffix(&["z.test"]), Action::Block), None, None, None)
+        .unwrap();
     let (version, rule) = rules
         .create(input(suffix(&["a.test"]), Action::Block), None, None, None)
         .unwrap();
     let stale = rules
-        .move_rule(&rule.id, Some("r-lan"), None, version - 1)
+        .move_rule(&rule.id, Some(&other.id), None, version - 1)
         .unwrap_err();
     assert_eq!(stale.status, 409);
     assert_eq!(stale.version, Some(version));
@@ -317,7 +315,7 @@ fn invalid_rules_are_refused_and_change_nothing() {
     refuse(suffix(&["a.com"]), proxy(" g"));
     refuse(suffix(&["a.com"]), proxy(&"g".repeat(65)));
     assert_eq!(rules.rules().0, 0);
-    assert_eq!(rules.rules().1.len(), 1);
+    assert!(rules.rules().1.is_empty());
 }
 
 #[test]
@@ -329,7 +327,7 @@ fn changes_persist_and_loading_writes_nothing() {
         .create(
             input(suffix(&["kept.test"]), proxy("g-1")),
             None,
-            Some("r-lan"),
+            None,
             None,
         )
         .unwrap();
@@ -337,7 +335,7 @@ fn changes_persist_and_loading_writes_nothing() {
     let again = owner(&root);
     let (loaded, list) = again.rules();
     assert_eq!(loaded, version);
-    assert_eq!(list[0], rule, "inserted before r-lan");
+    assert_eq!(list[0], rule);
     assert_eq!(hit(&again, "a.kept.test"), Some(proxy("g-1")));
     let text = std::fs::read_to_string(root.join(RULES_FILE)).unwrap();
     assert!(text.contains("\"group_id\": \"g-1\""), "{text}");
@@ -874,9 +872,6 @@ fn the_fixture_marks_the_action_and_records_the_group() {
             .as_deref()
             .is_some_and(|source| source.starts_with("atom_rule:r-"))
     );
-    let mut lan = state("nas.lan", None);
-    executor.execute(&mut lan).unwrap();
-    assert_eq!((lan.fast_flags, lan.outbound.clone()), (1 << 42, None));
     let mut ads = state("ads.example", None);
     ads.fast_flags = ADS;
     executor.execute(&mut ads).unwrap();
@@ -1181,7 +1176,7 @@ fn an_inverted_client_condition_matches_the_clients_outside_the_list() {
         .create(
             input(outside.clone(), Action::Direct),
             Some(0),
-            Some("r-lan"),
+            None,
             None,
         )
         .unwrap();

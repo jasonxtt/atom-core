@@ -592,9 +592,8 @@ fn a_direct_rule_asks_its_group_with_or_without_the_cache() {
         assert_eq!(status, 201, "{value}");
     }
     let (_, rules) = host.call("GET", "rules", &Value::Null);
-    // After the default LAN rule.
-    assert_eq!(rules["rules"][2]["cache"], false, "{rules}");
-    assert!(rules["rules"][1].get("cache").is_none(), "the default is left out: {rules}");
+    assert_eq!(rules["rules"][1]["cache"], false, "{rules}");
+    assert!(rules["rules"][0].get("cache").is_none(), "the default is left out: {rules}");
 
     let control = host.host.control();
     let local = crate::local_url::LocalApi {
