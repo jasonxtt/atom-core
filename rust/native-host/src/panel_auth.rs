@@ -360,13 +360,19 @@ impl PanelAuth {
             return reply;
         }
         if let Some(path) = &self.path {
-            let removed = match std::fs::remove_file(path) {
-                Ok(()) => sync_directory(path.parent().unwrap_or_else(|| Path::new("."))),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e),
-            };
-            if let Err(e) = removed {
-                return error(500, format!("{}: {e}", path.display()));
+            match std::fs::remove_file(path) {
+                // gone: the memory follows even when the directory cannot be synced
+                Ok(()) => {
+                    if let Err(e) = sync_directory(path.parent().unwrap_or_else(|| Path::new(".")))
+                    {
+                        eprintln!(
+                            "atomdns: {}: cannot sync the directory: {e}",
+                            path.display()
+                        );
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return error(500, format!("{}: {e}", path.display())),
             }
         }
         *self.stored.borrow_mut() = None;
@@ -494,13 +500,21 @@ fn save(path: &Path, stored: &Stored) -> std::io::Result<()> {
     let outcome = (|| {
         file.write_all(&bytes)?;
         file.sync_all()?;
-        std::fs::rename(&temporary, path)?;
-        sync_directory(directory)
+        std::fs::rename(&temporary, path)
     })();
     if outcome.is_err() {
         let _ = std::fs::remove_file(&temporary);
+        return outcome;
     }
-    outcome
+    // The rename is done: the new credentials are the file. A failed directory sync only means the rename
+    // may not survive a crash; the in-memory state must follow the file, so it is not an error here.
+    if let Err(e) = sync_directory(directory) {
+        eprintln!(
+            "atomdns: {}: cannot sync the directory: {e}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn create_temporary(directory: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
