@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { describe } from '../api/client'
-import { login } from '../composables/auth'
+import { ApiError, describe } from '../api/client'
+import { loadAuth, login } from '../composables/auth'
 
 const username = ref('')
 const password = ref('')
@@ -16,6 +16,9 @@ async function submit() {
     location.reload()
   } catch (failure) {
     error.value = describe(failure)
+    // 409: the login was changed or turned off meanwhile; reading it again leaves this page when it is off
+    if (failure instanceof ApiError && failure.status === 409) await loadAuth().catch(() => {})
+  } finally {
     busy.value = false
   }
 }

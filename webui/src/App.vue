@@ -30,7 +30,10 @@ loadAuth()
   })
 
 usePoll(async () => {
-  if (ready.value && !needLogin.value) await refreshStatus()
+  if (!ready.value) return
+  // on the login page: the login may have been turned off from elsewhere; the page is left then
+  if (needLogin.value) await loadAuth().catch(() => {})
+  else await refreshStatus()
 }, 5000)
 
 const versions = computed(() => {

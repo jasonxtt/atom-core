@@ -1100,7 +1100,9 @@ export interface paths {
         put?: never;
         /**
          * Sign in; the reply sets the session cookie
-         * @description A wrong name or password is 401 after a one-second delay; 409 when no login is on.
+         * @description A wrong name or password is 401 after a one-second delay; 409 when no
+         *     login is on or it was changed while the password was checked; 429
+         *     when too many passwords are being checked.
          */
         post: operations["login"];
         delete?: never;
@@ -4085,6 +4087,8 @@ export interface operations {
             400: components["responses"]["Error"];
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            429: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };
     };
@@ -4115,6 +4119,8 @@ export interface operations {
             400: components["responses"]["Error"];
             401: components["responses"]["Error"];
             403: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            429: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };
     };
@@ -4143,8 +4149,10 @@ export interface operations {
                     "application/json": components["schemas"]["AuthStatus"];
                 };
             };
+            400: components["responses"]["Error"];
             401: components["responses"]["Error"];
             409: components["responses"]["Error"];
+            429: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };
     };

@@ -50,7 +50,8 @@ export async function call<T>(request: Promise<{ data?: T; error?: unknown; resp
   let answer
   try {
     answer = await request
-  } catch {
+  } catch (failure) {
+    if (failure instanceof DOMException && (failure.name === 'TimeoutError' || failure.name === 'AbortError')) throw new ApiError(0, '请求超时，请重试')
     throw new ApiError(0, '无法连接 atomdns')
   }
   const { data, error, response } = answer

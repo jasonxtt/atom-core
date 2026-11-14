@@ -17,10 +17,14 @@ info:
     Conventions:
 
     * Login (`auth`): optional. Without `webinfo/atom_auth.json` nothing needs
-      one. With it every route except `auth` and `auth/login` answers 401
-      unless the request carries the session cookie `atom_session` (set by
-      `auth/login`, 30 days) or `Authorization: Bearer <key>` (the `key` of
-      that file, for the installer).
+      one. With it every route answers 401 unless the request carries the
+      session cookie `atom_session` (set by `auth/login`, 30 days) or
+      `Authorization: Bearer <key>` (the `key` of that file, for the
+      installer). Only three requests are open: `GET auth`, `POST auth/login`
+      and `POST auth/logout` (they say `security: []`); `PUT auth` and
+      `DELETE auth` need the login like the rest. Changes to the credentials
+      run one at a time (a request overtaken by another change answers 409),
+      and at most two password checks run at once (more answer 429).
     * Bodies are JSON. Unknown fields are refused with 400 where a schema says
       `additionalProperties: false`.
     * Every error is `{"error": "..."}` (`Error`). A stale `version` (409) adds
@@ -58,8 +62,11 @@ info:
       503 (`host is applying configuration`); retry it.
 servers:
   - url: /api/v1/atom
-# No authentication (design 7.1).
-security: []
+# Without a login nothing needs authentication (design 7.1); with one, a request
+# needs the cookie or the key. The three open `auth` requests override this.
+security:
+  - cookieAuth: []
+  - bearerAuth: []
 tags:
   - name: rules
     description: The ordered rule table (first match wins).
@@ -2289,6 +2296,7 @@ paths:
       tags: [auth]
       summary: Whether a login is on and whether this request is signed in
       operationId: getAuth
+      security: []
       responses:
         "200":
           description: The login state.
@@ -2336,6 +2344,10 @@ paths:
           $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
     delete:
@@ -2366,14 +2378,22 @@ paths:
           $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
   /auth/login:
     post:
       tags: [auth]
       summary: Sign in; the reply sets the session cookie
-      description: A wrong name or password is 401 after a one-second delay; 409 when no login is on.
+      description: |
+        A wrong name or password is 401 after a one-second delay; 409 when no
+        login is on or it was changed while the password was checked; 429
+        when too many passwords are being checked.
       operationId: login
+      security: []
       requestBody:
         required: true
         content:
@@ -2394,9 +2414,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthStatus"
+        "400":
+          $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/Error"
         "409":
+          $ref: "#/components/responses/Error"
+        "429":
           $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
@@ -2405,6 +2429,7 @@ paths:
       tags: [auth]
       summary: Sign out (clears this browser's cookie)
       operationId: logout
+      security: []
       responses:
         "200":
           description: Signed out.
@@ -2419,6 +2444,16 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: atom_session
+      description: Set by `POST auth/login`.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: The `key` of `webinfo/atom_auth.json` (read by the installer).
   parameters:
     AuditPage:
       name: page
