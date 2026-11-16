@@ -17,7 +17,6 @@ const devTarget = process.env.ATOMDNS_DEV_TARGET || 'http://127.0.0.1:9099'
 
 export default defineConfig({
   base: './',
-  define: { __UI_VERSION__: JSON.stringify(version) },
   plugins: [
     vue(),
     {

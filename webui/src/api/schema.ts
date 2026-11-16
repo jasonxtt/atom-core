@@ -546,6 +546,92 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/maintenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Installed Atom version and latest maintenance task */
+        get: operations["getMaintenance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/maintenance/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check for a newer signed Atom release */
+        post: operations["checkAtomUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/maintenance/upgrade": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upgrade to a newer signed Atom release */
+        post: operations["upgradeAtom"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/maintenance/network": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Installed network settings and host interfaces */
+        get: operations["getAtomNetwork"];
+        put?: never;
+        /** Try new host network settings */
+        post: operations["tryAtomNetwork"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/maintenance/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm the trial through the new panel listener */
+        post: operations["confirmAtomNetwork"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/status": {
         parameters: {
             query?: never;
@@ -1132,6 +1218,54 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Maintenance: {
+            version: string;
+            online: boolean;
+            job?: components["schemas"]["MaintenanceJob"];
+        };
+        MaintenanceJob: {
+            id: string;
+            /** @enum {string} */
+            kind: "check" | "upgrade" | "network";
+            /** @enum {string} */
+            phase: "checking" | "downloading" | "validating" | "applying" | "awaiting_confirmation" | "restoring" | "success" | "failed" | "restored" | "recovery_failed";
+            source?: string;
+            version?: string;
+            error?: string;
+            blocking: boolean;
+            done: boolean;
+            /** Format: date-time */
+            updated_at: string;
+            /** Format: date-time */
+            deadline?: string;
+            old_urls?: string[];
+            new_urls?: string[];
+            same_access?: boolean;
+        };
+        MaintenanceNetwork: {
+            /** @enum {string} */
+            topology: "bypass" | "gateway";
+            lan: string[];
+            wan: string;
+            accept_gateway: boolean;
+            lan_gateway: string;
+            client_nets: string;
+            reply_via: boolean;
+            router: string;
+            panel_port: number;
+        };
+        MaintenanceNetworkRequest: components["schemas"]["MaintenanceNetwork"] & {
+            revision: string;
+        };
+        MaintenanceNetworkView: {
+            revision: string;
+            ifaces: {
+                name: string;
+                addrs: string[];
+                default: boolean;
+            }[];
+            config: components["schemas"]["MaintenanceNetwork"];
+        };
         AuthStatus: {
             /** @description A login is configured. */
             enabled: boolean;
@@ -1781,6 +1915,15 @@ export interface components {
         };
     };
     responses: {
+        /** @description Task started. Poll the maintenance overview for progress. */
+        MaintenanceAccepted: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["MaintenanceJob"];
+            };
+        };
         /** @description The path does not take this method. */
         MethodNotAllowed: {
             headers: {
@@ -3177,6 +3320,130 @@ export interface operations {
                 };
             };
             500: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    getMaintenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Maintenance"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    checkAtomUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            202: components["responses"]["MaintenanceAccepted"];
+            default: components["responses"]["Error"];
+        };
+    };
+    upgradeAtom: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    version: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["MaintenanceAccepted"];
+            default: components["responses"]["Error"];
+        };
+    };
+    getAtomNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Installed network configuration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenanceNetworkView"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    tryAtomNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MaintenanceNetworkRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["MaintenanceAccepted"];
+            default: components["responses"]["Error"];
+        };
+    };
+    confirmAtomNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Confirmation accepted. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                    };
+                };
+            };
             default: components["responses"]["Error"];
         };
     };

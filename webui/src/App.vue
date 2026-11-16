@@ -2,7 +2,8 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { navItems } from './nav'
-import { health, refreshStatus, singboxVersion, status } from './composables/status'
+import { health, refreshStatus } from './composables/status'
+import { maintenance, refreshMaintenance } from './composables/maintenance'
 import { setTheme, theme, themeLabels } from './composables/theme'
 import { dismiss, toasts } from './composables/toast'
 import { usePoll } from './composables/poll'
@@ -26,20 +27,19 @@ loadAuth()
   .catch(() => {})
   .finally(() => {
     ready.value = true
-    if (!needLogin.value) refreshStatus().catch(() => {})
+    if (!needLogin.value) {
+      refreshStatus().catch(() => {})
+      void refreshMaintenance()
+    }
   })
 
 usePoll(async () => {
   if (!ready.value) return
   // on the login page: the login may have been turned off from elsewhere; the page is left then
   if (needLogin.value) await loadAuth().catch(() => {})
-  else await refreshStatus()
+  else await Promise.allSettled([refreshStatus(), refreshMaintenance()])
 }, 5000)
 
-const versions = computed(() => {
-  const atomdns = status.value?.atomdns.version
-  return [atomdns && `atomdns ${atomdns}`, singboxVersion.value && `sing-box ${singboxVersion.value}`].filter(Boolean)
-})
 </script>
 
 <template>
@@ -50,9 +50,7 @@ const versions = computed(() => {
       <RouterLink v-for="item in navItems" :key="item.path" :to="item.path" class="nav" :class="{ on: active(item.path) }">
         <svg viewBox="0 0 24 24" v-html="item.icon"></svg>{{ item.label }}
       </RouterLink>
-      <div class="foot">
-        <div v-for="line in versions" :key="String(line)">{{ line }}</div>
-      </div>
+      <div v-if="maintenance" class="foot">Atom v{{ maintenance.version }}</div>
     </aside>
     <div v-if="drawer" class="mask drawer-mask" @click="drawer = false"></div>
 

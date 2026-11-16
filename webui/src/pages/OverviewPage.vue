@@ -4,7 +4,7 @@ import { RouterLink } from 'vue-router'
 import { call, client, describe, type Schemas } from '../api/client'
 import { usePoll } from '../composables/poll'
 import { loadRuntime, runtime } from '../composables/proxy'
-import { refreshStatus, singboxVersion, status } from '../composables/status'
+import { refreshStatus, status } from '../composables/status'
 import { sparkArea, sparkLine } from '../composables/spark'
 import { toast } from '../composables/toast'
 import { ago, bytes, duration, latency, latencyText, rate, triggers } from '../format'
@@ -181,14 +181,14 @@ async function reapply() {
     </div>
     <div class="grid g3">
       <div class="tile">
-        <div class="k">atomdns</div>
-        <div class="v">{{ status ? `运行中 · ${status.atomdns.version ?? ''}` : '—' }}</div>
+        <div class="k">DNS 服务</div>
+        <div class="v">{{ status ? '运行中' : '—' }}</div>
         <div class="s" v-if="uptime">运行 {{ uptime }}</div>
       </div>
       <div class="tile">
         <div class="k">sing-box</div>
         <div class="v" :style="status && !status.singbox.running ? { color: 'var(--bad)' } : undefined">
-          {{ !status ? '—' : status.singbox.running ? `运行中 · ${singboxVersion}` : '未运行' }}
+          {{ !status ? '—' : status.singbox.running ? '运行中' : '未运行' }}
         </div>
         <div class="s" v-if="status">{{ status.singbox.in_sync ? '配置已同步' : '配置未同步' }}</div>
       </div>

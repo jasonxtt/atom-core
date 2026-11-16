@@ -86,6 +86,8 @@ tags:
     description: The fixed item ahead of the rule table (rewrite rules).
   - name: status
     description: Status of both processes and of the latest application.
+  - name: maintenance
+    description: Atom release upgrades and trial network changes.
   - name: runtime
     description: What sing-box runs right now (current members, delays, connections) and the machine's load.
   - name: state
@@ -1467,6 +1469,114 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /maintenance:
+    get:
+      tags: [maintenance]
+      summary: Installed Atom version and latest maintenance task
+      operationId: getMaintenance
+      responses:
+        "200":
+          description: Current state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Maintenance"
+        default:
+          $ref: "#/components/responses/Error"
+  /maintenance/check:
+    post:
+      tags: [maintenance]
+      summary: Check for a newer signed Atom release
+      operationId: checkAtomUpdate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "202":
+          $ref: "#/components/responses/MaintenanceAccepted"
+        default:
+          $ref: "#/components/responses/Error"
+  /maintenance/upgrade:
+    post:
+      tags: [maintenance]
+      summary: Upgrade to a newer signed Atom release
+      operationId: upgradeAtom
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                version: {type: string}
+      responses:
+        "202":
+          $ref: "#/components/responses/MaintenanceAccepted"
+        default:
+          $ref: "#/components/responses/Error"
+  /maintenance/network:
+    post:
+      tags: [maintenance]
+      summary: Try new host network settings
+      operationId: tryAtomNetwork
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaintenanceNetworkRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/MaintenanceAccepted"
+        default:
+          $ref: "#/components/responses/Error"
+    get:
+      tags: [maintenance]
+      summary: Installed network settings and host interfaces
+      operationId: getAtomNetwork
+      responses:
+        "200":
+          description: Installed network configuration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceNetworkView"
+        default:
+          $ref: "#/components/responses/Error"
+  /maintenance/confirm:
+    post:
+      tags: [maintenance]
+      summary: Confirm the trial through the new panel listener
+      operationId: confirmAtomNetwork
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              additionalProperties: false
+              properties:
+                id: {type: string}
+      responses:
+        "202":
+          description: Confirmation accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: {type: boolean}
+        default:
+          $ref: "#/components/responses/Error"
+
   /status:
     get:
       tags: [status]
@@ -2500,6 +2610,12 @@ components:
         type: integer
         minimum: 0
   responses:
+    MaintenanceAccepted:
+      description: Task started. Poll the maintenance overview for progress.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MaintenanceJob"
     MethodNotAllowed:
       description: The path does not take this method.
       content:
@@ -2542,6 +2658,81 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
+    Maintenance:
+      type: object
+      required: [version, online]
+      properties:
+        version: {type: string}
+        online: {type: boolean}
+        job:
+          $ref: "#/components/schemas/MaintenanceJob"
+    MaintenanceJob:
+      type: object
+      required: [id, kind, phase, blocking, done, updated_at]
+      properties:
+        id: {type: string}
+        kind:
+          type: string
+          enum: [check, upgrade, network]
+        phase:
+          type: string
+          enum: [checking, downloading, validating, applying, awaiting_confirmation, restoring, success, failed, restored, recovery_failed]
+        source: {type: string}
+        version: {type: string}
+        error: {type: string}
+        blocking: {type: boolean}
+        done: {type: boolean}
+        updated_at: {type: string, format: date-time}
+        deadline: {type: string, format: date-time}
+        old_urls:
+          type: array
+          items: {type: string}
+        new_urls:
+          type: array
+          items: {type: string}
+        same_access: {type: boolean}
+    MaintenanceNetwork:
+      type: object
+      required: [topology, lan, wan, accept_gateway, lan_gateway, client_nets, reply_via, router, panel_port]
+      properties:
+        topology:
+          type: string
+          enum: [bypass, gateway]
+        lan:
+          type: array
+          items: {type: string}
+        wan: {type: string}
+        accept_gateway: {type: boolean}
+        lan_gateway: {type: string}
+        client_nets: {type: string}
+        reply_via: {type: boolean}
+        router: {type: string}
+        panel_port: {type: integer, minimum: 1, maximum: 65535}
+    MaintenanceNetworkRequest:
+      allOf:
+        - $ref: "#/components/schemas/MaintenanceNetwork"
+        - type: object
+          required: [revision]
+          properties:
+            revision: {type: string}
+    MaintenanceNetworkView:
+      type: object
+      required: [revision, ifaces, config]
+      properties:
+        revision: {type: string}
+        ifaces:
+          type: array
+          items:
+            type: object
+            required: [name, addrs, default]
+            properties:
+              name: {type: string}
+              addrs:
+                type: array
+                items: {type: string}
+              default: {type: boolean}
+        config:
+          $ref: "#/components/schemas/MaintenanceNetwork"
     AuthStatus:
       type: object
       required: [enabled, authenticated, username]

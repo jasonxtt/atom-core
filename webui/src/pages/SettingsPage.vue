@@ -6,6 +6,7 @@ import { setTheme, theme, themeLabels, type Theme } from '../composables/theme'
 import { toast } from '../composables/toast'
 import { auth, loadAuth } from '../composables/auth'
 import { ago, triggers } from '../format'
+import MaintenanceCards from './MaintenanceCards.vue'
 
 const settings = ref<Schemas['Settings'] | null>(null)
 const form = reactive({ fakeip_range: '', resolver: '', mixed_port: '' })
@@ -124,44 +125,43 @@ async function disableLogin() {
 }
 
 const themes: Theme[] = ['system', 'light', 'dark']
-const uiVersion = __UI_VERSION__
 </script>
 
 <template>
-  <div class="grid g2" style="align-items: start">
-    <form class="card grid" style="gap: 12px" @submit.prevent="save">
-      <!-- The fields open once the settings were read. -->
-      <div class="hd" style="margin: 0">
-        <h2>代理（sing-box）</h2>
-        <span class="sp"></span>
-        <button class="btn sm pri" type="submit" :disabled="!changed || saving">保存</button>
-      </div>
-      <div class="field">
-        <label for="fakeip">FakeIP 网段</label>
-        <input id="fakeip" v-model="form.fakeip_range" class="inp mono" autocomplete="off" :disabled="saving || !settings" />
-      </div>
-      <div class="field">
-        <label for="resolver">解析节点域名用的 DNS</label>
-        <input
-          id="resolver"
-          v-model="form.resolver"
-          class="inp mono"
-          autocomplete="off"
-          :disabled="saving || !settings"
-          :placeholder="settings ? `留空：${settings.resolver_effective}` : ''"
-        />
-      </div>
-      <div class="field">
-        <label for="mixed">mixed 代理端口</label>
-        <input id="mixed" v-model="form.mixed_port" class="inp mono" inputmode="numeric" autocomplete="off" :disabled="saving || !settings" />
-      </div>
-      <div v-if="error" class="row">
-        <div class="err" style="flex: 1">{{ error }}</div>
-        <button v-if="!settings" class="btn" type="button" @click="load">重试</button>
-      </div>
-    </form>
+  <div class="settings-layout grid">
+    <div class="settings-column grid">
+      <form class="settings-proxy card grid" style="gap: 12px" @submit.prevent="save">
+        <!-- The fields open once the settings were read. -->
+        <div class="hd" style="margin: 0">
+          <h2>代理（sing-box）</h2>
+          <span class="sp"></span>
+          <button class="btn sm pri" type="submit" :disabled="!changed || saving">保存</button>
+        </div>
+        <div class="field">
+          <label for="fakeip">FakeIP 网段</label>
+          <input id="fakeip" v-model="form.fakeip_range" class="inp mono" autocomplete="off" :disabled="saving || !settings" />
+        </div>
+        <div class="field">
+          <label for="resolver">解析节点域名用的 DNS</label>
+          <input
+            id="resolver"
+            v-model="form.resolver"
+            class="inp mono"
+            autocomplete="off"
+            :disabled="saving || !settings"
+            :placeholder="settings ? `留空：${settings.resolver_effective}` : ''"
+          />
+        </div>
+        <div class="field">
+          <label for="mixed">mixed 代理端口</label>
+          <input id="mixed" v-model="form.mixed_port" class="inp mono" inputmode="numeric" autocomplete="off" :disabled="saving || !settings" />
+        </div>
+        <div v-if="error" class="row">
+          <div class="err" style="flex: 1">{{ error }}</div>
+          <button v-if="!settings" class="btn" type="button" @click="load">重试</button>
+        </div>
+      </form>
 
-    <div class="grid" style="gap: 16px">
       <div class="card grid" style="gap: 10px">
         <h2>应用</h2>
         <div class="row" v-if="status">
@@ -203,14 +203,46 @@ const uiVersion = __UI_VERSION__
           <button v-for="item in themes" :key="item" type="button" :class="{ on: theme === item }" @click="setTheme(item)">{{ themeLabels[item] }}</button>
         </div>
       </div>
+    </div>
+
+    <div class="settings-column grid">
+      <div class="settings-maintenance grid">
+        <MaintenanceCards />
+      </div>
       <div class="card grid" style="gap: 10px">
         <h2>关于</h2>
-        <div class="grid g3" style="gap: 8px">
-          <div class="tile"><div class="k">atomdns</div><div class="v mono">{{ status?.atomdns.version ?? '—' }}</div></div>
-          <div class="tile"><div class="k">sing-box</div><div class="v mono">{{ singboxVersion || '—' }}</div></div>
-          <div class="tile"><div class="k">WebUI</div><div class="v mono">{{ uiVersion }}</div></div>
-        </div>
+        <details>
+          <summary>诊断详情</summary>
+          <div class="row" style="margin-top: 8px">
+            <span>sing-box</span><span class="mono">{{ singboxVersion || '—' }}</span>
+          </div>
+        </details>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.settings-layout {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+@media (max-width: 950px) {
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-column {
+    display: contents;
+  }
+
+  .settings-proxy {
+    order: -2;
+  }
+
+  .settings-maintenance {
+    order: -1;
+  }
+}
+</style>

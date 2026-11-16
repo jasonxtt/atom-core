@@ -52,7 +52,7 @@ export async function call<T>(request: Promise<{ data?: T; error?: unknown; resp
     answer = await request
   } catch (failure) {
     if (failure instanceof DOMException && (failure.name === 'TimeoutError' || failure.name === 'AbortError')) throw new ApiError(0, '请求超时，请重试')
-    throw new ApiError(0, '无法连接 atomdns')
+    throw new ApiError(0, '无法连接 Atom 面板')
   }
   const { data, error, response } = answer
   if (!response.ok || error !== undefined) {

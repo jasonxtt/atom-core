@@ -748,9 +748,40 @@ async fn process_connection(
     // atom fork: the panel login. The UI files and the health document above
     // are public; everything else needs a session or the key.
     let path = request.target.split('?').next().unwrap_or_default();
-    let auth_reply = if path == crate::panel_auth::PATH
-        || path.starts_with(&format!("{}/", crate::panel_auth::PATH))
-    {
+    let maintenance_path = crate::atom_maintenance::route(&request.method, path);
+    let maintenance_socket = crate::atom_maintenance::socket();
+    let auth_route = path == crate::panel_auth::PATH
+        || path.starts_with(&format!("{}/", crate::panel_auth::PATH));
+    let maintenance_guard_needed = if auth_route {
+        path == crate::panel_auth::PATH && matches!(request.method.as_str(), "PUT" | "DELETE")
+    } else {
+        maintenance_path.is_none()
+            && (request_mutates_managed_state(&request)
+                || (path.starts_with(crate::atom_rules_api::PREFIX)
+                    && matches!(request.method.as_str(), "POST" | "PUT" | "DELETE")))
+    };
+    let maintenance_write = if let Some(socket) = maintenance_socket.as_deref().filter(|_| {
+        maintenance_guard_needed
+            && auth.authorized(
+                request.cookie.as_deref(),
+                request.authorization.as_deref(),
+            )
+    }) {
+        match crate::atom_maintenance::write_guard(socket) {
+            Ok(lock) => lock,
+            Err(_) => {
+                let response = Response::json_with_status(
+                    409,
+                    &serde_json::json!({"error": "Atom 正在维护，配置暂时不可修改"}),
+                );
+                let (_reader, mut writer) = stream.into_split();
+                return write_response(&mut writer, &response).await;
+            }
+        }
+    } else {
+        None
+    };
+    let auth_reply = if auth_route {
         auth.handle(
             &request.method,
             path,
@@ -780,6 +811,44 @@ async fn process_connection(
         };
         let (_reader, mut writer) = stream.into_split();
         return write_response(&mut writer, &response).await;
+    }
+    if let Some(path) = maintenance_path {
+        let unavailable = || {
+            Response::json_with_status(
+                503,
+                &serde_json::json!({"error": "面板维护服务暂时不可用"}),
+            )
+        };
+        let response = if request.method != "GET"
+            && request.http.atom_request.as_deref() != Some("1")
+        {
+            Response::json_with_status(
+                403,
+                &serde_json::json!({"error": "缺少 X-Atom-Request 请求头"}),
+            )
+        } else if let (Some(socket), Ok(local)) = (maintenance_socket.as_deref(), stream.local_addr()) {
+            match crate::atom_maintenance::request(
+                socket,
+                &request.method,
+                path,
+                &request.body,
+                local,
+            )
+            .await
+            {
+                Ok((status, body)) => Response {
+                    status,
+                    content_type: Some("application/json"),
+                    body,
+                    headers: vec![("Cache-Control", "no-store".to_owned())],
+                },
+                Err(_) => unavailable(),
+            }
+        } else {
+            unavailable()
+        };
+        let (_reader, mut writer) = stream.into_split();
+        return write_response(&mut writer, &atom_envelope(response)).await;
     }
     let _management_lease = if request_mutates_managed_state(&request) {
         if let Some(control) = control.as_ref() {
@@ -832,6 +901,7 @@ async fn process_connection(
     // Mutation ownership covers the disk/runtime operation, not a slow
     // response write after the operation has already completed.
     drop(_management_lease);
+    drop(maintenance_write);
     if let Some(control) = control
         .as_ref()
         .filter(|control| control.recovery_required())
@@ -3275,6 +3345,14 @@ mod tests {
             assert!(text.contains(r#""authenticated":false"#), "{text}");
             let bearer = format!("Authorization: Bearer {key}\r\n");
             assert_ne!(status(address, get("/api/v1/atom/rules", &bearer)).await.0, 401);
+            assert_eq!(status(address, get("/api/v1/atom/maintenance", "")).await.0, 401);
+            assert_eq!(status(address, get("/api/v1/atom/maintenance", &bearer)).await.0, 503);
+            let maintenance_check = |origin: &str, header: &str| format!(
+                "POST /api/v1/atom/maintenance/check HTTP/1.1\r\nHost: localhost\r\nOrigin: {origin}\r\n{bearer}{header}Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+            );
+            assert_eq!(status(address, maintenance_check("http://localhost", "")).await.0, 403);
+            assert_eq!(status(address, maintenance_check("http://elsewhere", "X-Atom-Request: 1\r\n")).await.0, 403);
+            assert_eq!(status(address, maintenance_check("http://localhost", "X-Atom-Request: 1\r\n")).await.0, 503);
             let body = r#"{"username":"u","password":"p"}"#;
             let (code, text) = status(
                 address,

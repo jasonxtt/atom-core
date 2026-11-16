@@ -8,6 +8,7 @@ mod atom_dns_api;
 mod atom_dryrun;
 mod atom_ledger;
 mod atom_links;
+mod atom_maintenance;
 mod atom_proxy;
 mod atom_proxy_api;
 mod atom_rules;

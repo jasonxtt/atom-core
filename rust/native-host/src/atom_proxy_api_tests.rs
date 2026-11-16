@@ -1283,6 +1283,13 @@ fn the_openapi_document_matches_the_routes() {
             // The panel login: `api.rs` serves it before dispatch (`panel_auth`, tested there).
             continue;
         }
+        if path == "maintenance" || path.starts_with("maintenance/") {
+            assert!(
+                crate::atom_maintenance::route(method, &format!("/api/v1/atom/{path}")).is_some(),
+                "{method} {path} reaches no maintenance handler"
+            );
+            continue;
+        }
         let (status, value) = api.call(method, &format!("/api/v1/atom/{}", concrete(path)), "{}");
         assert!(
             !fallback(status, &value),
@@ -1303,7 +1310,12 @@ fn the_openapi_document_matches_the_routes() {
     }
     for path in paths.keys() {
         let path = path.strip_prefix('/').unwrap();
-        if path.starts_with("audit/") || path == "auth" || path.starts_with("auth/") {
+        if path.starts_with("audit/")
+            || path == "auth"
+            || path.starts_with("auth/")
+            || path == "maintenance"
+            || path.starts_with("maintenance/")
+        {
             continue;
         }
         let (status, value) = api.call("PATCH", &format!("/api/v1/atom/{}", concrete(path)), "{}");
