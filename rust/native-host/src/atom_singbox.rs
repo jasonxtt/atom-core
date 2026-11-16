@@ -767,6 +767,15 @@ pub(crate) fn version(host: &Host, secret: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+pub(crate) fn rebind_removed_group(host: &Host, secret: &str, id: &str) -> Result<(), String> {
+    let path = format!("/cache/fakeip/group/{id}/final");
+    let (status, body) = clash(host.clash_api, secret, "POST", &path, None)?;
+    if status != 204 {
+        return Err(format!("迁移已删除组 {id} 的 FakeIP 绑定失败（{status}）: {}", String::from_utf8_lossy(&body)));
+    }
+    Ok(())
+}
+
 pub(crate) fn read_live(host: &Host) -> Option<Vec<u8>> {
     std::fs::read(host.config_path()).ok()
 }

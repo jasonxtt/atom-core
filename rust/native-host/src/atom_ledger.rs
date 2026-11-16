@@ -21,11 +21,14 @@
 //! restart. It is cleared when the FakeIP range changes (sing-box drops
 //! every mapping and binding then).
 
-use std::collections::{BTreeMap, HashMap};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+use atomdns_upstream_core::TransportCancellation;
 use serde::Serialize;
 
 use crate::atom_rules::{AtomRules, Verdict};
@@ -65,6 +68,8 @@ pub(crate) struct Lru {
     tick: u64,
     entries: HashMap<Vec<u8>, (Binding, u64)>,
     order: BTreeMap<u64, Vec<u8>>,
+    uncertain: BTreeSet<Vec<u8>>,
+    epoch: u64,
 }
 
 impl Lru {
@@ -74,12 +79,15 @@ impl Lru {
             tick: 0,
             entries: HashMap::new(),
             order: BTreeMap::new(),
+            uncertain: BTreeSet::new(),
+            epoch: 0,
         }
     }
 
     /// Records `binding` for `name` as the most recent entry, dropping the
     /// least recent one beyond the capacity.
     pub(crate) fn record(&mut self, name: &[u8], binding: Binding) {
+        self.uncertain.remove(name);
         self.tick += 1;
         if let Some((_, tick)) = self.entries.get(name) {
             self.order.remove(tick);
@@ -91,6 +99,7 @@ impl Lru {
                 break;
             };
             self.entries.remove(&oldest);
+            self.uncertain.remove(&oldest);
         }
     }
 
@@ -106,6 +115,8 @@ impl Lru {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
+        self.uncertain.clear();
+        self.epoch += 1;
     }
 
     /// Every entry, least recent first.
@@ -128,15 +139,24 @@ pub(crate) fn wanted(verdict: Option<Verdict>) -> Binding {
 }
 
 /// The entries whose directive changes under `decide`, with the new one.
+#[cfg(test)]
 pub(crate) fn plan(
     entries: &[(Vec<u8>, Binding)],
+    decide: impl Fn(&[u8]) -> Option<Verdict>,
+) -> Vec<(Vec<u8>, Binding)> {
+    plan_with_uncertain(entries, &BTreeSet::new(), decide)
+}
+
+fn plan_with_uncertain(
+    entries: &[(Vec<u8>, Binding)],
+    uncertain: &BTreeSet<Vec<u8>>,
     decide: impl Fn(&[u8]) -> Option<Verdict>,
 ) -> Vec<(Vec<u8>, Binding)> {
     entries
         .iter()
         .filter_map(|(name, old)| {
             let new = wanted(decide(name));
-            (new != *old).then(|| (name.clone(), new))
+            (new != *old || uncertain.contains(name)).then(|| (name.clone(), new))
         })
         .collect()
 }
@@ -160,6 +180,81 @@ static LAST: Mutex<Option<SyncRecord>> = Mutex::new(None);
 /// One recomputation at a time: a later one starts from what the earlier
 /// one left and decides with the newest table.
 static RESYNC: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+#[derive(Default)]
+pub(crate) struct Updates {
+    pending: RefCell<Option<String>>,
+    running: Cell<bool>,
+    wake: tokio::sync::Notify,
+    cleanup_error: RefCell<Option<String>>,
+}
+
+impl Updates {
+    pub(crate) fn schedule(&self, trigger: &str) {
+        self.pending.replace(Some(trigger.to_owned()));
+        self.wake.notify_one();
+    }
+}
+
+pub(crate) fn spawn_worker(
+    rules: Rc<AtomRules>,
+    control: crate::runtime_snapshot::RuntimeControlWeak,
+    cancel: TransportCancellation,
+) {
+    if rules.proxy_host().is_none() {
+        return;
+    }
+    rules.bindings.schedule("startup");
+    tokio::task::spawn_local(async move {
+        let updates = &rules.bindings;
+        loop {
+            if updates.pending.borrow().is_none() {
+                let retry = updates.cleanup_error.borrow().is_some();
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return,
+                    () = updates.wake.notified() => continue,
+                    () = tokio::time::sleep(Duration::from_secs(15)), if retry => {},
+                }
+            }
+            if cancel.is_cancelled() {
+                return;
+            }
+            let Some(control) = control.upgrade() else {
+                return;
+            };
+            let view = control.view();
+            if !view
+                .config
+                .local
+                .atom_rules
+                .as_ref()
+                .is_some_and(|current| Rc::ptr_eq(current, &rules))
+            {
+                return;
+            }
+            drop(control);
+            let trigger = updates.pending.take();
+            updates.running.set(true);
+            let cleanup_error = rules.rebind_removed_groups().await.err();
+            if cleanup_error != *updates.cleanup_error.borrow() {
+                if let Some(error) = &cleanup_error {
+                    crate::diag::warn_line!(
+                        "atom ledger: removed-group cleanup will retry: {error}"
+                    );
+                }
+            }
+            updates.cleanup_error.replace(cleanup_error);
+            if let Some(trigger) = trigger {
+                resync(&view.config, &rules, &trigger, || {
+                    !cancel.is_cancelled() && updates.pending.borrow().is_none()
+                })
+                .await;
+            }
+            updates.running.set(false);
+        }
+    });
+}
 
 fn ledger() -> std::sync::MutexGuard<'static, Lru> {
     LEDGER
@@ -207,20 +302,38 @@ pub(crate) fn clear() {
     ledger().clear();
 }
 
-/// `{size, capacity, last}` for `GET status`.
-pub(crate) fn view() -> serde_json::Value {
+pub(crate) fn rebound_group(id: &str) {
+    let mut ledger = ledger();
+    let replacement = Binding::Set(Arc::from(crate::atom_proxy::FINAL));
+    for (binding, _) in ledger.entries.values_mut() {
+        if binding.tag() == Some(id) {
+            *binding = replacement.clone();
+        }
+    }
+}
+
+/// Binding count, pending work and its most recent result for `GET status`.
+pub(crate) fn view(updates: &Updates) -> serde_json::Value {
     let last = LAST
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    serde_json::json!({ "size": ledger().len(), "capacity": CAPACITY, "last": last })
+    serde_json::json!({ "size": ledger().len(), "capacity": CAPACITY, "last": last,
+        "pending": updates.pending.borrow().is_some(), "running": updates.running.get(),
+        "cleanup_error": *updates.cleanup_error.borrow(),
+    })
 }
 
 /// Decides every remembered name again with `rules`' current table and
 /// sends each changed directive to sing-box. A directive sing-box does not
 /// acknowledge leaves the entry as it was. Without a proxy side nothing is
 /// done.
-pub(crate) async fn resync(config: &CompiledConfig, rules: &AtomRules, trigger: &str) {
+async fn resync(
+    config: &CompiledConfig,
+    rules: &AtomRules,
+    trigger: &str,
+    current: impl Fn() -> bool,
+) {
     // The builtin sets a mapper marks: what it would set for the name.
     let mapper = rules.mapper.as_deref().and_then(|tag| {
         config
@@ -229,7 +342,7 @@ pub(crate) async fn resync(config: &CompiledConfig, rules: &AtomRules, trigger: 
             .find(|mapper| mapper.tag == tag)
     });
     let fast_flags = |name: &[u8]| mapper.map_or(0, |mapper| mapper.evaluate_wire(name).fast_flags);
-    if let Some(done) = resync_with(&LEDGER, rules, fast_flags, trigger).await {
+    if let Some(done) = resync_with(&LEDGER, rules, fast_flags, trigger, current).await {
         if done.failed > 0 {
             crate::diag::warn_line!(
                 "atom ledger: {} of {} directives to sing-box failed: {}",
@@ -251,6 +364,7 @@ async fn resync_with(
     rules: &AtomRules,
     fast_flags: impl Fn(&[u8]) -> u64,
     trigger: &str,
+    current: impl Fn() -> bool,
 ) -> Option<SyncRecord> {
     let lock = || {
         ledger
@@ -259,25 +373,43 @@ async fn resync_with(
     };
     let dns_in = rules.proxy_host()?.dns_in;
     let _serial = RESYNC.lock().await;
-    let entries = lock().snapshot();
-    let changes = plan(&entries, |name| rules.decide(name, fast_flags(name)));
+    let (entries, uncertain, epoch) = {
+        let ledger = lock();
+        (ledger.snapshot(), ledger.uncertain.clone(), ledger.epoch)
+    };
+    let changes = plan_with_uncertain(&entries, &uncertain, |name| {
+        rules.decide(name, fast_flags(name))
+    });
     if changes.is_empty() {
         return None;
     }
-    let (acknowledged, error) = send_all(dns_in, &changes).await;
+    let (acknowledged, attempted, error) =
+        send_all(dns_in, &changes, || current() && lock().epoch == epoch).await;
+    if !attempted.iter().any(|sent| *sent) {
+        return None;
+    }
     {
         let mut ledger = lock();
+        if ledger.epoch != epoch {
+            return None;
+        }
         for (index, (name, binding)) in changes.iter().enumerate() {
             if acknowledged[index] {
                 ledger.record(name, binding.clone());
+            } else if attempted[index] && ledger.entries.contains_key(name) {
+                ledger.uncertain.insert(name.clone());
             }
         }
     }
     Some(SyncRecord {
         at: crate::atom_rules::now(),
         trigger: trigger.to_owned(),
-        changed: changes.len(),
-        failed: acknowledged.iter().filter(|ok| !**ok).count(),
+        changed: attempted.iter().filter(|sent| **sent).count(),
+        failed: acknowledged
+            .iter()
+            .zip(attempted)
+            .filter(|(ok, sent)| *sent && !**ok)
+            .count(),
         error,
     })
 }
@@ -297,8 +429,13 @@ pub(crate) fn directive_query(id: u16, name: &[u8], binding: &Binding) -> Option
 /// Sends every directive (at most [`WINDOW`] in flight, each tried
 /// [`ATTEMPTS`] times) and returns which ones sing-box answered, with the
 /// last error.
-async fn send_all(dns_in: SocketAddr, changes: &[(Vec<u8>, Binding)]) -> (Vec<bool>, String) {
+async fn send_all(
+    dns_in: SocketAddr,
+    changes: &[(Vec<u8>, Binding)],
+    current: impl Fn() -> bool,
+) -> (Vec<bool>, Vec<bool>, String) {
     let mut acknowledged = vec![false; changes.len()];
+    let mut attempted = vec![false; changes.len()];
     let local: SocketAddr = if dns_in.is_ipv4() {
         ([127, 0, 0, 1], 0).into()
     } else {
@@ -306,10 +443,20 @@ async fn send_all(dns_in: SocketAddr, changes: &[(Vec<u8>, Binding)]) -> (Vec<bo
     };
     let socket = match tokio::net::UdpSocket::bind(local).await {
         Ok(socket) => socket,
-        Err(error) => return (acknowledged, format!("bind: {error}")),
+        Err(error) => {
+            return (
+                acknowledged,
+                vec![true; changes.len()],
+                format!("bind: {error}"),
+            );
+        }
     };
     if let Err(error) = socket.connect(dns_in).await {
-        return (acknowledged, format!("connect {dns_in}: {error}"));
+        return (
+            acknowledged,
+            vec![true; changes.len()],
+            format!("connect {dns_in}: {error}"),
+        );
     }
     let mut seed = [0u8; 2];
     let _ = getrandom::fill(&mut seed);
@@ -319,8 +466,12 @@ async fn send_all(dns_in: SocketAddr, changes: &[(Vec<u8>, Binding)]) -> (Vec<bo
     let mut todo: Vec<usize> = (0..changes.len()).collect();
     for _ in 0..ATTEMPTS {
         for window in todo.chunks(WINDOW) {
+            if !current() {
+                return (acknowledged, attempted, error);
+            }
             let mut waiting: HashMap<u16, usize> = HashMap::new();
             for &index in window {
+                attempted[index] = true;
                 let (name, binding) = &changes[index];
                 let id = next_id;
                 next_id = next_id.wrapping_add(1);
@@ -370,10 +521,10 @@ async fn send_all(dns_in: SocketAddr, changes: &[(Vec<u8>, Binding)]) -> (Vec<bo
         }
         todo.retain(|&index| !acknowledged[index]);
         if todo.is_empty() {
-            return (acknowledged, String::new());
+            return (acknowledged, attempted, String::new());
         }
     }
-    (acknowledged, error)
+    (acknowledged, attempted, error)
 }
 
 #[cfg(test)]

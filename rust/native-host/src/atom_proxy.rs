@@ -238,7 +238,7 @@ fn invalid(message: impl Into<String>) -> Refusal {
     Refusal::new(400, message)
 }
 
-fn is_id(value: &str, prefix: &str) -> bool {
+pub(crate) fn is_id(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(|rest| {
         rest.len() == 8
             && rest

@@ -757,7 +757,7 @@ fn a_failed_save_keeps_other_changes_out_until_sing_box_is_compensated() {
 
 #[test]
 fn a_confirmed_group_deletion_writes_rules_first_and_undoes_them_on_failure() {
-    let api = Api::new("delete-order");
+    let mut api = Api::new("delete-order");
     let (_, imported) = api.call("POST", "/api/v1/atom/nodes", TWO_LINKS);
     let hk = imported["nodes"][0]["id"].as_str().unwrap().to_owned();
     let (_, created) = api.call(
@@ -799,6 +799,17 @@ fn a_confirmed_group_deletion_writes_rules_first_and_undoes_them_on_failure() {
         group.as_str()
     );
     api.reloads_from_disk().unwrap();
+    let marker = api.root.join("webinfo/atom_removed_groups").join(&group);
+    assert!(marker.exists());
+    let rules = api.assembly.config().local.atom_rules.as_ref().unwrap();
+    api.assembly
+        .block_on(rules.rebind_removed_groups())
+        .unwrap();
+    let last_rebind = api.fake.host.dir.join("last-rebind");
+    assert!(
+        !last_rebind.exists(),
+        "the rolled-back group is still active"
+    );
 
     // A crash between the two writes leaves new rules beside the old groups:
     // that loads. The other order (old rules, new groups) would not.
@@ -820,6 +831,44 @@ fn a_confirmed_group_deletion_writes_rules_first_and_undoes_them_on_failure() {
     let refused = api.reloads_from_disk().unwrap_err();
     assert!(refused.contains("不存在"), "{refused}");
     std::fs::write(&rules_file, &new_rules).unwrap();
+
+    let fail = api.fake.host.dir.join("fail-rebind");
+    std::fs::write(&fail, b"").unwrap();
+    let rules = api.assembly.config().local.atom_rules.as_ref().unwrap();
+    let (_, status) = api.call("GET", "/api/v1/atom/status", "");
+    assert_eq!(status["bindings"]["pending"], true);
+    assert!(!last_rebind.exists(), "deleting did not wait for migration");
+    assert!(
+        api.assembly
+            .block_on(rules.rebind_removed_groups())
+            .is_err()
+    );
+    assert!(marker.exists(), "a failed migration must survive a restart");
+    std::fs::remove_file(&last_rebind).unwrap();
+    std::fs::remove_file(fail).unwrap();
+    api.restart();
+    let rules = api.assembly.config().local.atom_rules.clone().unwrap();
+    let control = api.assembly.control();
+    api.assembly.block_on(async {
+        let cancel = TransportCancellation::new();
+        crate::atom_ledger::spawn_worker(
+            rules,
+            crate::runtime_snapshot::RuntimeControlWeak::from_control(&control),
+            cancel.clone(),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+    });
+    assert_eq!(
+        std::fs::read_to_string(last_rebind).unwrap(),
+        format!("/cache/fakeip/group/{group}/final")
+    );
 }
 
 #[test]

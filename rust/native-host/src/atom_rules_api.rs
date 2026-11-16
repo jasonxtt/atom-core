@@ -432,8 +432,7 @@ pub(crate) async fn handle(
     Some(match reply {
         Ok(reply) => {
             let flushed = flush_global_caches(config, cache).await;
-            // Names clients already hold follow the new rules at once.
-            crate::atom_ledger::resync(config, rules, segments[0]).await;
+            rules.bindings.schedule(segments[0]);
             match flushed {
                 Ok(()) => reply,
                 Err(e) => error(
@@ -553,6 +552,7 @@ pub(crate) fn spawn_updates(rules: &std::rc::Rc<AtomRules>, api: &crate::local_u
     rules.set_updates(cancel.clone());
     let rules = std::rc::Rc::clone(rules);
     let control = api.control.clone();
+    crate::atom_ledger::spawn_worker(rules.clone(), control.clone(), cancel.clone());
     tokio::task::spawn_local(async move {
         let mut wait = UPDATE_FIRST;
         loop {
@@ -606,8 +606,7 @@ async fn update_round(
         // No cache is emptied: a stale global cache entry answered lazily
         // runs the whole flow again in the background and corrects itself.
         if installed {
-            let view = control.view();
-            crate::atom_ledger::resync(&view.config, rules, "rulesets").await;
+            rules.bindings.schedule("rulesets");
         }
         if reply.status != 200 {
             crate::diag::warn_line!(

@@ -111,6 +111,14 @@ impl FakeSingbox {
                         )
                     } else if method == "DELETE" && path.starts_with("/connections") {
                         ("204 No Content", String::new())
+                    } else if method == "POST" && path.starts_with("/cache/fakeip/group/") {
+                        let dir = running.parent().unwrap();
+                        std::fs::write(dir.join("last-rebind"), &path).unwrap();
+                        if dir.join("fail-rebind").exists() {
+                            ("409 Conflict", "{}".to_owned())
+                        } else {
+                            ("204 No Content", String::new())
+                        }
                     } else if method == "PUT" && path.starts_with("/proxies/") {
                         selects.lock().unwrap().push((
                             path["/proxies/".len()..].to_owned(),

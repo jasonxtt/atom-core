@@ -265,6 +265,33 @@ fn host(dns_in: SocketAddr) -> crate::atom_singbox::Host {
 }
 
 #[test]
+fn a_new_update_replaces_pending_work_and_stops_old_batches() {
+    let fake = FakeDnsIn::start(BTreeSet::new(), BTreeSet::new());
+    let changes: Vec<_> = (0..WINDOW + 1)
+        .map(|index| (wire(&format!("q{index}.example")), set("final")))
+        .collect();
+    let updates = Updates::default();
+    let started = Cell::new(false);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (acknowledged, attempted, error) =
+        runtime.block_on(send_all(fake.address, &changes, || {
+            if started.replace(true) {
+                updates.schedule("rules");
+                updates.schedule("groups");
+            }
+            updates.pending.borrow().is_none()
+        }));
+    assert!(error.is_empty(), "{error}");
+    assert_eq!(acknowledged, attempted);
+    assert!(attempted[..WINDOW].iter().all(|sent| *sent));
+    assert!(!attempted[WINDOW]);
+    assert_eq!(updates.pending.take().as_deref(), Some("groups"));
+}
+
+#[test]
 fn a_resync_sends_the_changes_and_keeps_what_failed() {
     let silent = wire("www.ledger-e.test");
     let refused = wire("www.ledger-g.test");
@@ -312,7 +339,7 @@ fn a_resync_sends_the_changes_and_keeps_what_failed() {
         .build()
         .unwrap();
     let done = runtime
-        .block_on(resync_with(&ledger, &rules, |_| 0, "rules"))
+        .block_on(resync_with(&ledger, &rules, |_| 0, "rules", || true))
         .unwrap();
     assert_eq!(
         fake.got("www.ledger-a.test"),
@@ -359,7 +386,7 @@ fn a_resync_sends_the_changes_and_keeps_what_failed() {
     );
     // The next recomputation tries the failed one again, and only it.
     let again = runtime
-        .block_on(resync_with(&ledger, &rules, |_| 0, "rules"))
+        .block_on(resync_with(&ledger, &rules, |_| 0, "rules", || true))
         .unwrap();
     assert_eq!((again.changed, again.failed), (2, 2));
     assert_eq!(fake.got("www.ledger-e.test").len(), 4);

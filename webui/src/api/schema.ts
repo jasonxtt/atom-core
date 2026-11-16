@@ -1759,6 +1759,12 @@ export interface components {
             last_apply?: components["schemas"]["ApplyRecord"];
             /** @description The binding ledger (design 4.5.1). */
             bindings: {
+                /** @description A recomputation is queued. */
+                pending?: boolean;
+                /** @description The worker is migrating deleted groups or recomputing bindings. */
+                running?: boolean;
+                /** @description The last error migrating deleted groups, if a retry is pending. */
+                cleanup_error?: string | null;
                 size?: number;
                 capacity?: number;
                 last?: {

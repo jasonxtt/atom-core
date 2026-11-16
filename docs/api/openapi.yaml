@@ -3690,6 +3690,16 @@ components:
           type: object
           description: The binding ledger (design 4.5.1).
           properties:
+            pending:
+              type: boolean
+              description: A recomputation is queued.
+            running:
+              type: boolean
+              description: The worker is migrating deleted groups or recomputing bindings.
+            cleanup_error:
+              type: string
+              nullable: true
+              description: The last error migrating deleted groups, if a retry is pending.
             size:
               type: integer
             capacity:

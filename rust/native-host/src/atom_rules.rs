@@ -471,6 +471,7 @@ pub(crate) struct AtomRules {
     /// Stops the daily ruleset refresh of this configuration
     /// (`atom_rules_api::spawn_updates`).
     updates: RefCell<Option<atomdns_upstream_core::TransportCancellation>>,
+    pub(crate) bindings: crate::atom_ledger::Updates,
     /// One initialization (create and first download) of a catalog set at a
     /// time, per ID.
     catalog_locks: RefCell<BTreeMap<String, Rc<tokio::sync::Mutex<()>>>>,
@@ -952,6 +953,7 @@ impl AtomRules {
             ip_builtin: RefCell::new(Vec::new()),
             removed: RefCell::new(removed),
             updates: RefCell::new(None),
+            bindings: crate::atom_ledger::Updates::default(),
             catalog_locks: RefCell::new(BTreeMap::new()),
             catalog_pins: RefCell::new(BTreeMap::new()),
         };

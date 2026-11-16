@@ -23,6 +23,8 @@ use super::{AtomRules, Refusal, State, ip_rules, now};
 use crate::atom_proxy::{self, FINAL, ProxyState};
 use crate::atom_singbox::{self as sb, ApplyError, ApplyGuard, Host};
 
+const REMOVED_GROUPS: &str = "webinfo/atom_removed_groups";
+
 pub(crate) struct Proxy {
     pub(super) host: Host,
     pub(super) state: std::cell::RefCell<ProxyState>,
@@ -559,8 +561,49 @@ impl AtomRules {
             Some(rules)
         };
         let version = next.version;
+        if !self.root.as_os_str().is_empty() {
+            // Persist the intent before applying. A failed or interrupted
+            // deletion still has the old group in the committed proxy state.
+            let marker = self.root.join(REMOVED_GROUPS).join(id);
+            crate::runtime_snapshot::write_durably_private(&marker, b"").map_err(|error| {
+                Refusal::new(500, format!("记录待迁移的 FakeIP 绑定失败: {error}"))
+            })?;
+        }
         self.transact(rules, Some(next), "groups").await?;
         Ok(version)
+    }
+
+    pub(crate) async fn rebind_removed_groups(&self) -> Result<(), String> {
+        let Some(owner) = &self.proxy else {
+            return Ok(());
+        };
+        let entries = match std::fs::read_dir(self.root.join(REMOVED_GROUPS)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let id = entry.file_name().into_string().unwrap_or_default();
+            if !atom_proxy::is_id(&id, "g-") || owner.state.borrow().group(&id).is_some() {
+                continue;
+            }
+            let secret = self.live_secret().ok_or("sing-box 配置未就绪")?;
+            let host = owner.host.clone();
+            let path = entry.path();
+            let group = id.clone();
+            tokio::task::spawn_blocking(move || sb::rebind_removed_group(&host, &secret, &group))
+                .await
+                .map_err(|error| error.to_string())??;
+            crate::atom_ledger::rebound_group(&id);
+            // The operation is idempotent, including after a crash before removal.
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(())
     }
 
     /// Switches a selector group or Final at runtime (Clash API), records

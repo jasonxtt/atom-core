@@ -282,12 +282,11 @@ async fn update_group(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
     ))
 }
 
-/// `(reply, rules changed)`: a confirmed deletion moves rules to Final.
 async fn delete_group(
     rules: &AtomRules,
     id: &str,
     query: Option<&str>,
-) -> Result<(Reply, bool), Reply> {
+) -> Answer {
     rules
         .check_proxy_version(query_version(query)?)
         .map_err(|e| fail(&e))?;
@@ -298,17 +297,14 @@ async fn delete_group(
         .map_err(|e| fail(&e))?;
     let (after, list) = rules.rules();
     let moved = after != before;
-    Ok((
-        reply_json(
-            200,
-            &json!({
-                "version": version,
-                "deleted": id,
-                "rules_version": after,
-                "rules": if moved { json!(list) } else { Value::Null },
-            }),
-        ),
-        moved,
+    Ok(reply_json(
+        200,
+        &json!({
+            "version": version,
+            "deleted": id,
+            "rules_version": after,
+            "rules": if moved { json!(list) } else { Value::Null },
+        }),
     ))
 }
 
@@ -783,7 +779,7 @@ async fn status(rules: &AtomRules) -> Reply {
                 "host": host_view,
             },
             "last_apply": crate::atom_rules::last_apply(),
-            "bindings": crate::atom_ledger::view(),
+            "bindings": crate::atom_ledger::view(&rules.bindings),
             "warnings": {"empty_groups": current.empty_groups()},
         }),
     )
@@ -865,14 +861,12 @@ pub(crate) async fn handle(
         }
         ("PUT", ["groups", id]) => update_group(rules, id, body).await,
         ("DELETE", ["groups", id]) => match delete_group(rules, id, query).await {
-            // Rules moved to Final: sing-box still binds names to the deleted
-            // group. No cache holds an answer of those rules (a proxy rule's
-            // query reaches neither the global cache nor an upstream one).
-            Ok((reply, true)) => {
-                crate::atom_ledger::resync(config, rules, "groups").await;
+            // The worker migrates on-disk bindings also when no current rule
+            // still referenced the deleted group.
+            Ok(reply) => {
+                rules.bindings.schedule("groups");
                 Ok(reply)
             }
-            Ok((reply, false)) => Ok(reply),
             Err(reply) => Err(reply),
         },
         ("POST", ["groups", id, "select"]) => select(rules, id, body).await,
