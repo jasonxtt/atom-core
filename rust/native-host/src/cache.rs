@@ -4,7 +4,7 @@ use hickory_proto::op::Message;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +14,7 @@ use atomdns_dns_core::{
     patch_response_id_ra, validate_response,
 };
 
+use crate::atom_proxy::FakeIpPrefix;
 use crate::config::CacheId;
 
 const CACHE_CAPACITY: u64 = 64;
@@ -140,6 +141,7 @@ pub struct NativeCacheAdapter {
     lazy_ttl: u32,
     enable_ecs: bool,
     exclusions: Rc<IpPrefixList>,
+    fakeip_rules: Weak<crate::atom_rules::AtomRules>,
     owner: Rc<CacheOwner>,
     dump_file: Option<std::path::PathBuf>,
     dump_interval: u64,
@@ -176,6 +178,7 @@ impl NativeCacheAdapter {
             owner: Rc::new(CacheOwner::new()),
             dump_file: None,
             dump_interval: 600,
+            fakeip_rules: Weak::new(),
             exclusions: Rc::new({
                 let mut list = IpPrefixList::new();
                 list.rebuild();
@@ -216,6 +219,44 @@ impl NativeCacheAdapter {
         list.rebuild();
         self.exclusions = Rc::new(list);
         self
+    }
+
+    pub(crate) fn with_fakeip_exclusion(
+        mut self,
+        rules: Option<&Rc<crate::atom_rules::AtomRules>>,
+    ) -> Self {
+        self.fakeip_rules = rules.map(Rc::downgrade).unwrap_or_default();
+        self
+    }
+
+    fn fakeip_prefix(&self) -> Option<FakeIpPrefix> {
+        self.fakeip_rules.upgrade()?.fakeip_prefix()
+    }
+
+    fn excludes_response(
+        &self,
+        response: &[u8],
+        fakeip: Option<FakeIpPrefix>,
+        origin: Option<&atomdns_sequence_core::ResponseOrigin>,
+    ) -> Result<bool, CacheAdapterError> {
+        // The managed sing-box DNS listener serves FakeIP address answers.
+        // Provenance covers an answer from a different range during reload,
+        // and older dumps that still carry the upstream's identity.
+        let from_fakeip = origin.and_then(|origin| origin.peer).is_some_and(|peer| {
+            self.fakeip_rules
+                .upgrade()
+                .is_some_and(|rules| rules.proxy_host().is_some_and(|host| host.dns_in == peer))
+        });
+        if fakeip.is_none() && !from_fakeip && self.exclusions.is_empty() {
+            return Ok(false);
+        }
+        Ok(atomdns_dns_core::observe_answer_addresses(response)?
+            .into_iter()
+            .any(|address| {
+                from_fakeip
+                    || self.exclusions.contains(address)
+                    || fakeip.is_some_and(|range| range.contains(address))
+            }))
     }
 
     /// Wraps this store as a one-entry catalog at [`CacheId(0)`](CacheId).
@@ -302,6 +343,7 @@ impl NativeCacheAdapter {
             key,
             question,
             generation: self.owner.generation.get(),
+            fakeip_prefix: self.fakeip_prefix(),
         }))
     }
 
@@ -429,6 +471,7 @@ impl NativeCacheAdapter {
             return Err(CacheAdapterError::ClockOverflow);
         }
         let mut prepared = Vec::new();
+        let fakeip = self.fakeip_prefix();
         for mut entry in crate::cache_dump::decode(bytes)? {
             let [stored, msg, cache] = entry.wall_times.ok_or(CacheAdapterError::InvalidQuery)?;
             if stored < 0 || msg < stored || cache < stored || stored > wall {
@@ -465,6 +508,12 @@ impl NativeCacheAdapter {
                 ));
             }
             entry.key = normalized.ok_or(CacheAdapterError::InvalidQuery)?;
+            let origin = entry.attachment.as_ref().and_then(|attachment| {
+                attachment.downcast_ref::<atomdns_sequence_core::ResponseOrigin>()
+            });
+            if self.excludes_response(&entry.response, fakeip, origin)? {
+                continue;
+            }
             // Validate even expired entries: malformed data never hides behind expiry.
             let convert = |at: i64| {
                 now.checked_add(
@@ -968,6 +1017,18 @@ fn same_cache_dependencies(
     next_config: &crate::config::CompiledConfig,
     next: &crate::config::CachePluginConfig,
 ) -> bool {
+    let fakeip_prefix = |config: &crate::config::CompiledConfig| {
+        config
+            .local
+            .atom_rules
+            .as_ref()
+            .and_then(|rules| rules.fakeip_prefix())
+    };
+    if crate::atom_rules_api::is_global_cache(&old.tag)
+        && fakeip_prefix(old_config) != fakeip_prefix(next_config)
+    {
+        return false;
+    }
     old_config
         .cache_dependencies
         .get(old.id.0)
@@ -1083,6 +1144,7 @@ impl CacheCatalog {
                 .caches
                 .iter()
                 .map(|next| {
+                    let candidate = self.get(next.id).expect("candidate cache IDs");
                     old_config
                         .caches
                         .iter()
@@ -1092,7 +1154,11 @@ impl CacheCatalog {
                                 .then(|| current.get(old.id).cloned())
                                 .flatten()
                         })
-                        .unwrap_or_else(|| self.get(next.id).expect("candidate cache IDs").clone())
+                        .map(|mut adapter| {
+                            adapter.fakeip_rules = candidate.fakeip_rules.clone();
+                            adapter
+                        })
+                        .unwrap_or_else(|| candidate.clone())
                 })
                 .collect(),
         )
@@ -1218,6 +1284,7 @@ pub struct PendingStore {
     key: Vec<u8>,
     question: ResponseQuestion,
     generation: u64,
+    fakeip_prefix: Option<FakeIpPrefix>,
 }
 
 impl PendingStore {
@@ -1261,10 +1328,9 @@ impl PendingStore {
         if !eligible_response(&metadata, &self.question) || validate_response(response).is_err() {
             return Ok(false);
         }
-        let addresses = atomdns_dns_core::observe_answer_addresses(response)?;
-        if addresses
-            .iter()
-            .any(|ip| self.adapter.exclusions.contains(*ip))
+        let fakeip = self.adapter.fakeip_prefix();
+        if self.fakeip_prefix != fakeip
+            || self.adapter.excludes_response(response, fakeip, origin.as_ref())?
         {
             return Ok(false);
         }

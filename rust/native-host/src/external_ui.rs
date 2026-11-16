@@ -468,7 +468,7 @@ async fn header<W: AsyncWrite + Unpin>(
         503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
-    writer.write_all(format!("HTTP/1.1 {status} {reason}\r\n{extra}Content-Length: {length}\r\nConnection: close\r\n\r\n").as_bytes()).await
+    writer.write_all(format!("HTTP/1.1 {status} {reason}\r\n{extra}X-Frame-Options: DENY\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n").as_bytes()).await
 }
 #[cfg(target_os = "linux")]
 enum Event {

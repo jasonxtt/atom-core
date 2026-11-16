@@ -592,6 +592,10 @@ pub(crate) fn build_cache_catalog(
             .caches
             .iter()
             .map(|compiled| {
+                let fakeip_rules = config.local.atom_rules.as_ref().filter(|_| {
+                    compiled.kind == crate::config::CacheKind::Named
+                        && crate::atom_rules_api::is_global_cache(&compiled.tag)
+                });
                 crate::cache::NativeCacheAdapter::with_options_and_clock(
                     compiled.capacity,
                     compiled.lazy_cache_ttl_secs,
@@ -601,6 +605,7 @@ pub(crate) fn build_cache_catalog(
                     adapter
                         .with_ecs(compiled.enable_ecs)
                         .with_exclusions(&compiled.exclude_ip)
+                        .with_fakeip_exclusion(fakeip_rules)
                         .with_persistence(compiled.dump_file.clone(), compiled.dump_interval_secs)
                 })
             })

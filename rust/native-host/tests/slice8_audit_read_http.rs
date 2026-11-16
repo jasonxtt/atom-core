@@ -230,7 +230,7 @@ async fn http_request(address: SocketAddr, method: &str, target: &str) -> HttpRe
         .await
         .expect("HTTP connect");
     let request =
-        format!("{method} {target} HTTP/1.1\r\nHost: native\r\nConnection: close\r\n\r\n");
+        format!("{method} {target} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -257,7 +257,7 @@ async fn open_and_disconnect_http_request(address: SocketAddr, target: &str) {
     let mut stream = tokio::net::TcpStream::connect(address)
         .await
         .expect("HTTP disconnect connect");
-    let request = format!("GET {target} HTTP/1.1\r\nHost: native\r\nConnection: close\r\n\r\n");
+    let request = format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -270,7 +270,7 @@ async fn http_post(address: SocketAddr, target: &str, body: &str) -> HttpRespons
         .await
         .expect("HTTP POST connect");
     let request = format!(
-        "POST {target} HTTP/1.1\r\nHost: native\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST {target} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream

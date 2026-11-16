@@ -20,6 +20,12 @@ plugins:
   - tag: cache_all
     type: cache
     args: {{size: 64}}
+  - tag: cache_all_noleak
+    type: cache
+    args: {{size: 64}}
+  - tag: cache_upstream
+    type: cache
+    args: {{size: 64}}
   - tag: domestic
     type: forward
     args: {{upstreams: [{{addr: 'udp://127.0.0.1:15000'}}]}}
@@ -445,6 +451,123 @@ fn settings_are_validated_and_applied() {
     let (status, reapplied) = api.call("POST", "/api/v1/atom/apply", "");
     assert_eq!(status, 200, "{reapplied}");
     assert_eq!(reapplied["last_apply"]["trigger"], "apply");
+}
+
+#[test]
+fn global_caches_exclude_current_fakeip_and_filter_old_dumps() {
+    let api = Api::new("fakeip-cache");
+    let cache = |tag: &str| {
+        let item = api
+            .assembly
+            .config()
+            .named_caches()
+            .find(|item| item.tag == tag)
+            .unwrap();
+        api.assembly.cache().get(item.id).unwrap()
+    };
+    let wire = |name: u8, address: [u8; 4]| {
+        let query = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, name, 0, 0, 1, 0, 1];
+        let mut response = query.clone();
+        response[2] = 0x81;
+        response[3] = 0x80;
+        response[7] = 1;
+        response.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+        response.extend_from_slice(&address);
+        (query, response)
+    };
+    let (fake_query, fake) = wire(b'a', [28, 0, 0, 2]);
+    let (real_query, real) = wire(b'b', [192, 0, 2, 1]);
+    let (previous_query, previous_fake) = wire(b'c', [198, 18, 0, 2]);
+    let fakeip_host = api
+        .assembly
+        .config()
+        .local
+        .atom_rules
+        .as_ref()
+        .unwrap()
+        .proxy_host()
+        .unwrap();
+    let origin = atomdns_sequence_core::ResponseOrigin {
+        identity: "nocnfake".into(),
+        peer: Some(fakeip_host.dns_in),
+        transport: Some("udp"),
+    };
+    let source = cache("cache_upstream");
+    for (query, response, origin) in [
+        (&fake_query, &fake, None),
+        (&real_query, &real, None),
+        (&previous_query, &previous_fake, Some(origin.clone())),
+    ] {
+        assert!(
+            source
+                .begin_store(query)
+                .unwrap()
+                .unwrap()
+                .publish_with_origin(response, "", origin)
+                .unwrap()
+        );
+    }
+    let legacy_dump = source.dump().unwrap();
+
+    for tag in ["cache_all", "cache_all_noleak"] {
+        let store = cache(tag);
+        assert!(
+            !store
+                .begin_store(&fake_query)
+                .unwrap()
+                .unwrap()
+                .publish(&fake)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .begin_store(&previous_query)
+                .unwrap()
+                .unwrap()
+                .publish_with_origin(&previous_fake, "", Some(origin.clone()))
+                .unwrap()
+        );
+        if tag == "cache_all" {
+            let path = api.root.join("legacy.dump");
+            std::fs::write(&path, &legacy_dump).unwrap();
+            let startup = store.clone().with_persistence(Some(path), 600).catalog();
+            api.assembly.block_on(startup.load_startup());
+        } else {
+            api.assembly
+                .block_on(store.import_dump(legacy_dump.clone()))
+                .unwrap();
+        }
+        assert!(store.lookup(&fake_query).unwrap().is_none());
+        assert!(store.lookup(&previous_query).unwrap().is_none());
+        assert!(store.lookup(&real_query).unwrap().is_some());
+    }
+
+    let (status, result) = api.call(
+        "PUT",
+        "/api/v1/atom/settings",
+        r#"{"fakeip_range":"198.18.0.0/15"}"#,
+    );
+    assert_eq!(status, 200, "{result}");
+    for tag in ["cache_all", "cache_all_noleak"] {
+        let store = cache(tag);
+        assert!(
+            !store
+                .begin_store(&previous_query)
+                .unwrap()
+                .unwrap()
+                .publish(&previous_fake)
+                .unwrap()
+        );
+        assert!(
+            store
+                .begin_store(&real_query)
+                .unwrap()
+                .unwrap()
+                .publish(&real)
+                .unwrap()
+        );
+    }
+    assert!(source.lookup(&previous_query).unwrap().is_some());
 }
 
 #[test]

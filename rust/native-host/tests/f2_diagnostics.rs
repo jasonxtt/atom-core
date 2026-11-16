@@ -151,7 +151,7 @@ fn http(port: u16, method: &str, path: &str, body: &[u8]) -> Option<Reply> {
         .set_read_timeout(Some(Duration::from_secs(10)))
         .ok()?;
     let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).ok()?;

@@ -559,6 +559,7 @@ pub struct ListenerConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApiConfig {
     pub http: SocketAddr,
+    pub public_origin: Option<url::Url>,
 }
 
 /// One compiled `domain_set` plus its management eligibility. Query-only
@@ -1706,15 +1707,29 @@ fn sequence_can_return(
     true
 }
 
-/// Compiles the scoped management listener. Only `http` is supported; every
-/// other Go `api` field is rejected rather than silently ignored.
+/// Compiles the management listener and its optional browser-facing origin.
 fn compile_api(value: &RawValue) -> Result<ApiConfig, ConfigError> {
     let path = "$.api";
     let map = expect_map(value, path, "api must be a mapping")?;
-    map.reject_unknown(&["http"], path)?;
+    map.reject_unknown(&["http", "public_origin"], path)?;
     let http = expect_string(map.required("http", path)?, "$.api.http")?;
     let http = parse_socket_addr(&http, "$.api.http")?;
-    Ok(ApiConfig { http })
+    let public_origin = map
+        .get("public_origin")
+        .map(|value| {
+            let path = "$.api.public_origin";
+            let raw = expect_string(value, path)?;
+            let origin = url::Url::parse(&raw).ok().filter(|origin| {
+                matches!(origin.scheme(), "http" | "https")
+                    && raw.trim_end_matches('/') == origin.origin().ascii_serialization()
+            });
+            origin.ok_or_else(|| ConfigError::new(path, "expected an HTTP(S) origin without a path"))
+        })
+        .transpose()?;
+    Ok(ApiConfig {
+        http,
+        public_origin,
+    })
 }
 
 /// Loads one plugins-only included file and appends its definitions in file

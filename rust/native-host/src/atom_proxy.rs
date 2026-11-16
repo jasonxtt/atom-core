@@ -15,6 +15,7 @@
 //! than sent direct.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,30 @@ pub(crate) const DEFAULT_URL: &str = "https://www.gstatic.com/generate_204";
 pub(crate) const DEFAULT_INTERVAL: &str = "3m";
 pub(crate) const DEFAULT_TOLERANCE: u16 = 50;
 pub(crate) const DEFAULT_FAKEIP_RANGE: &str = "28.0.0.0/8";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FakeIpPrefix {
+    network: u32,
+    mask: u32,
+}
+
+impl FakeIpPrefix {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let (IpAddr::V4(address), bits) = crate::rule_formats::parse_prefix(value)? else {
+            return None;
+        };
+        let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
+        Some(Self {
+            network: u32::from(address) & mask,
+            mask,
+        })
+    }
+
+    pub(crate) fn contains(self, address: IpAddr) -> bool {
+        matches!(address, IpAddr::V4(address) if u32::from(address) & self.mask == self.network)
+    }
+}
+
 pub(crate) const DEFAULT_MIXED_PORT: u16 = 7890;
 /// The TTL caps of the answers AtomDNS sends (design §4.5): real addresses
 /// (a change of the rules reaches them when it expires) and FakeIPs.
@@ -61,7 +86,6 @@ const NODE_TYPES: &[&str] = &[
     "hysteria2",
     "anytls",
     "ssh",
-    "tor",
 ];
 
 // ---------------------------------------------------------------------------
@@ -273,12 +297,15 @@ pub(crate) fn check_outbound(outbound: &Map<String, Value>) -> Result<(), Refusa
     if !NODE_TYPES.contains(&kind) {
         return Err(invalid(format!("不支持的节点类型 `{kind}`")));
     }
+    if outbound.keys().any(|name| name != "type" && fold(name) == "type") {
+        return Err(invalid("节点的 outbound 只能用小写 `type` 指定类型"));
+    }
     for key in ["tag", "detour"] {
         if outbound.keys().any(|name| fold(name) == key) {
             return Err(invalid(format!("节点的 outbound 不能带 `{key}`")));
         }
     }
-    if !matches!(kind, "wireguard" | "tor") {
+    if kind != "wireguard" {
         let server = outbound.get("server").and_then(Value::as_str).unwrap_or("");
         if server.trim().is_empty() {
             return Err(invalid(format!("{kind} 节点需要 server")));

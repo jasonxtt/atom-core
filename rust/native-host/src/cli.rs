@@ -13,6 +13,9 @@ pub enum CliCommand {
         config: PathBuf,
         dir: Option<PathBuf>,
     },
+    SetPanelLogin {
+        dir: PathBuf,
+    },
     Version,
 }
 
@@ -34,7 +37,7 @@ impl std::fmt::Display for CliError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "{}; usage: atomdns start [-d <dir>] -c <config> | atomdns check [-d <dir>] -c <config> | atomdns version",
+            "{}; usage: atomdns start [-d <dir>] -c <config> | atomdns check [-d <dir>] -c <config> | atomdns set-panel-login <dir> | atomdns version",
             self.message
         )
     }
@@ -42,8 +45,8 @@ impl std::fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
-/// Parses `atomdns start|check [-d <dir>] -c <path>` and the `--config` /
-/// `--dir` spellings, options in either order.
+/// Parses the host commands. For `start` and `check`, the config and directory
+/// options can appear in either order.
 pub fn parse_args<I, S>(args: I) -> Result<CliCommand, CliError>
 where
     I: IntoIterator<Item = S>,
@@ -62,9 +65,19 @@ where
         }
         return Ok(CliCommand::Version);
     }
+    if command == OsStr::new("set-panel-login") {
+        let dir = args
+            .next()
+            .filter(|arg| !arg.is_empty())
+            .ok_or_else(|| CliError::new("missing configuration directory"))?;
+        if args.next().is_some() {
+            return Err(CliError::new("unexpected argument"));
+        }
+        return Ok(CliCommand::SetPanelLogin { dir: dir.into() });
+    }
     let check = command == OsStr::new("check");
     if command != OsStr::new("start") && !check {
-        return Err(CliError::new("expected start, check or version"));
+        return Err(CliError::new("unknown command"));
     }
 
     let mut config = None;

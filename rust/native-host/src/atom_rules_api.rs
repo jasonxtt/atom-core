@@ -302,7 +302,7 @@ pub(crate) fn query_version(query: Option<&str>) -> Result<Option<u64>, Reply> {
 
 /// The global caches (`cache_all`, `cache_all_noleak`): ahead of the
 /// original judgement, behind the rule table, so only queries no rule
-/// matched reach them; they also hold FakeIP answers.
+/// matched reach them.
 pub(crate) fn is_global_cache(tag: &str) -> bool {
     tag.starts_with("cache_all")
 }

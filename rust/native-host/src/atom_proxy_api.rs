@@ -715,8 +715,8 @@ async fn put_settings(
     if let Err(e) = rules.transact(None, Some(next.clone()), "settings").await {
         return fail(&e);
     }
-    // The global caches hold FakeIPs of the old range (the upstream answer
-    // caches never hold one); sing-box dropped every mapping and binding.
+    // sing-box dropped every mapping and binding. A real address previously
+    // cached by AtomDNS might now fall inside the new range.
     if next.settings.fakeip_range != current.settings.fakeip_range {
         crate::atom_ledger::clear();
         if let Err(e) = flush_global_caches(config, cache).await {

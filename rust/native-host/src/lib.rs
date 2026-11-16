@@ -36,6 +36,7 @@ mod matchers;
 mod memory;
 mod observer;
 mod panel_auth;
+pub use panel_auth::set_panel_login;
 mod plugins;
 mod policy;
 mod process_metrics;
@@ -108,6 +109,9 @@ where
         ))),
         CliCommand::Check { .. } => Err(HostError::Cli(CliError::new(
             "check does not prepare a host",
+        ))),
+        CliCommand::SetPanelLogin { .. } => Err(HostError::Cli(CliError::new(
+            "set-panel-login does not prepare a host",
         ))),
         CliCommand::Start { config, dir } => {
             let (config, root) =

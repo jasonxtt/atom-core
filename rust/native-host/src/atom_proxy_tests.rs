@@ -177,6 +177,8 @@ fn selection_rules() {
 #[test]
 fn outbounds_are_proxy_types_without_tag_or_detour() {
     let check = |value: Value| check_outbound(value.as_object().unwrap()).map_err(|r| r.message);
+    assert!(check(json!({"type": "tor", "executable_path": "/usr/bin/tor"})).is_err());
+    assert!(check(json!({"type": "socks", "TYPE": "tor", "server": "proxy.example"})).is_err());
     check(json!({"type": "vless", "server": "a", "server_port": 1})).unwrap();
     check(json!({"type": "wireguard", "peers": []})).unwrap();
     assert!(

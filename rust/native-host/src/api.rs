@@ -269,6 +269,7 @@ pub struct ApiServer {
     external_ui: Arc<crate::external_ui::Registry>,
     /// atom fork: the panel login (`panel_auth`).
     auth: Rc<crate::panel_auth::PanelAuth>,
+    panel_http: Rc<PanelHttp>,
     static_slots: Arc<Semaphore>,
     accept_fault_after: Cell<Option<usize>>,
 }
@@ -299,9 +300,17 @@ impl ApiServer {
         );
         let auth = crate::panel_auth::PanelAuth::load(state_root.as_deref())
             .map_err(|error| ApiServerError::Bind(io::Error::other(error)))?;
+        let panel_http = Rc::new(PanelHttp {
+            hostname: std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|name| name.trim().trim_end_matches('.').to_ascii_lowercase())
+                .filter(|name| !name.is_empty()),
+            public_origin: config.api.as_ref().and_then(|api| api.public_origin.clone()),
+        });
         Ok(Self {
             external_ui,
             auth: Rc::new(auth),
+            panel_http,
             control: None,
             listener,
             fixed: Some((config, cache)),
@@ -378,6 +387,7 @@ impl ApiServer {
                             let static_slots = self.static_slots.clone();
                             let external_ui = self.external_ui.clone();
                             let auth = Rc::clone(&self.auth);
+                            let panel_http = Rc::clone(&self.panel_http);
                             let connection_shutdown = shutdown.child_token();
                             tasks.spawn_local(async move {
                                 let _ = process_connection(
@@ -393,6 +403,7 @@ impl ApiServer {
                                     static_slots,
                                     external_ui,
                                     auth,
+                                    panel_http,
                                     connection_shutdown,
                                 )
                                 .await;
@@ -450,6 +461,85 @@ struct Request {
     /// atom fork: the `Cookie` and `Authorization` headers (`panel_auth`).
     cookie: Option<String>,
     authorization: Option<String>,
+    http: PanelHeaders,
+}
+
+#[derive(Default)]
+struct PanelHeaders {
+    host: Option<String>,
+    origin: Option<String>,
+    content_type: Option<String>,
+    atom_request: Option<String>,
+}
+
+struct PanelHttp {
+    hostname: Option<String>,
+    public_origin: Option<url::Url>,
+}
+
+impl PanelHttp {
+    fn origin_for_host(&self, host: &str) -> Option<String> {
+        if host.is_empty()
+            || host.contains(['/', '\\', '@', '?', '#', '%', ','])
+            || host.chars().any(char::is_whitespace)
+        {
+            return None;
+        }
+        if let Some(public) = &self.public_origin {
+            let candidate = url::Url::parse(&format!("{}://{host}", public.scheme())).ok()?;
+            if candidate.origin() == public.origin() {
+                return Some(public.origin().ascii_serialization());
+            }
+        }
+        let direct = url::Url::parse(&format!("http://{host}")).ok()?;
+        let trusted = match direct.host()? {
+            url::Host::Ipv4(_) | url::Host::Ipv6(_) => true,
+            url::Host::Domain(domain) => {
+                let domain = domain.trim_end_matches('.');
+                domain == "localhost"
+                    || self.hostname.as_deref().is_some_and(|name| {
+                        domain == name
+                            || domain.strip_suffix(".local") == Some(name)
+                            || domain.strip_suffix(".lan") == Some(name)
+                    })
+            }
+        };
+        trusted.then(|| direct.origin().ascii_serialization())
+    }
+
+    fn refusal(&self, request: &Request) -> Option<Response> {
+        let origin = request
+            .http
+            .host
+            .as_deref()
+            .and_then(|host| self.origin_for_host(host));
+        let supplied = request.http.origin.as_deref();
+        if origin.is_none() || supplied.is_some_and(|given| Some(given) != origin.as_deref()) {
+            return Some(Response::error(403, "请求地址或来源不受信任"));
+        }
+        let path = request.target.split('?').next().unwrap_or_default();
+        let json = request
+            .http
+            .content_type
+            .as_deref()
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("application/json"));
+        let explicit = request.http.atom_request.as_deref() == Some("1");
+        if matches!(request.method.as_str(), "GET" | "HEAD") {
+            // Legacy plugin actions use GET. Embedded images and links cannot send this header.
+            if !explicit && matches!(route(path), Route::Plugin { action: "save" | "flush", .. }) {
+                return Some(Response::error(403, "缺少 X-Atom-Request 请求头"));
+            }
+            return None;
+        }
+        if !request.body.is_empty() && path.starts_with(crate::atom_rules_api::PREFIX) && !json {
+            return Some(Response::error(415, "请求正文必须是 application/json"));
+        }
+        if supplied.is_none() && !json && !explicit {
+            return Some(Response::error(403, "缺少请求来源或 X-Atom-Request 请求头"));
+        }
+        None
+    }
 }
 
 struct Response {
@@ -571,6 +661,7 @@ async fn process_connection(
     static_slots: Arc<Semaphore>,
     external_ui: Arc<crate::external_ui::Registry>,
     auth: Rc<crate::panel_auth::PanelAuth>,
+    panel_http: Rc<PanelHttp>,
     shutdown: TransportCancellation,
 ) -> io::Result<()> {
     let request = tokio::select! {
@@ -592,6 +683,10 @@ async fn process_connection(
             }
         },
     };
+    if let Some(response) = panel_http.refusal(&request) {
+        let (_reader, mut writer) = stream.into_split();
+        return write_response(&mut writer, &atom_envelope(response)).await;
+    }
     // Exact read-only health is available through admission pause. It takes no
     // lease and cannot resume admission or trigger recovery shutdown.
     if request.target.split('?').next() == Some("/api/v1/system/health") {
@@ -892,7 +987,7 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         buffer.extend_from_slice(&chunk[..read]);
     };
 
-    let (method, target, content_length, cookie, authorization) = {
+    let (method, target, content_length, cookie, authorization, http) = {
         let head = std::str::from_utf8(&buffer[..head_end])
             .map_err(|_| io::Error::other("request head is not UTF-8"))?;
         let mut lines = head.split("\r\n");
@@ -910,6 +1005,7 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         let mut content_length = 0_usize;
         let mut cookie = None;
         let mut authorization = None;
+        let mut http = PanelHeaders::default();
         for line in lines {
             if let Some((key, value)) = line.split_once(':') {
                 if key.trim().eq_ignore_ascii_case("cookie") {
@@ -921,6 +1017,17 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
                         .trim()
                         .parse()
                         .map_err(|_| io::Error::other("invalid content length"))?;
+                } else {
+                    let header = match key.trim().to_ascii_lowercase().as_str() {
+                        "host" => &mut http.host,
+                        "origin" => &mut http.origin,
+                        "content-type" => &mut http.content_type,
+                        "x-atom-request" => &mut http.atom_request,
+                        _ => continue,
+                    };
+                    if header.replace(value.trim().to_owned()).is_some() {
+                        return Err(io::Error::other("duplicate management request header"));
+                    }
                 }
             }
         }
@@ -930,6 +1037,7 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
             content_length,
             cookie,
             authorization,
+            http,
         )
     };
     if content_length > MAX_BODY_BYTES {
@@ -959,6 +1067,7 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         body,
         cookie,
         authorization,
+        http,
     }))
 }
 
@@ -1210,6 +1319,7 @@ pub(crate) fn local_plugin_request<'a>(
             body: body.to_vec(),
             cookie: None,
             authorization: None,
+            http: PanelHeaders::default(),
         };
         if !control.admission_open() {
             return Some((503, b"host is applying configuration\n".to_vec()));
@@ -2949,6 +3059,49 @@ mod tests {
     };
 
     #[test]
+    fn panel_http_rejects_cross_origin_writes_and_rebound_hosts() {
+        let policy = super::PanelHttp {
+            hostname: Some("gateway".into()),
+            public_origin: Some(url::Url::parse("https://panel.example").unwrap()),
+        };
+        let mut request = Request {
+            method: "POST".into(),
+            target: "/api/v1/atom/rules".into(),
+            body: b"{}".to_vec(),
+            cookie: None,
+            authorization: None,
+            http: super::PanelHeaders {
+                host: Some("192.168.1.10:8080".into()),
+                content_type: Some("application/json; charset=utf-8".into()),
+                ..Default::default()
+            },
+        };
+        let status = |req: &Request| policy.refusal(req).map_or(200, |response| response.status);
+        assert_eq!(status(&request), 200); // direct CLI access in passwordless mode
+        request.http.origin = Some("http://192.168.1.10:8080".into());
+        assert_eq!(status(&request), 200);
+        request.http.origin = Some("https://192.168.1.10:8080".into());
+        assert_eq!(status(&request), 403);
+        request.http.origin = Some("null".into());
+        assert_eq!(status(&request), 403);
+        request.http.host = Some("rebound.example".into());
+        request.http.origin = Some("http://rebound.example".into());
+        assert_eq!(status(&request), 403);
+        request.http.host = Some("panel.example".into());
+        request.http.origin = Some("https://panel.example".into());
+        assert_eq!(status(&request), 200);
+        request.http.content_type = Some("text/plain".into());
+        assert_eq!(status(&request), 415);
+        request.http.origin = None;
+        request.method = "GET".into();
+        request.target = "/plugins/cache/flush".into();
+        request.body.clear();
+        assert_eq!(status(&request), 403);
+        request.http.atom_request = Some("1".into());
+        assert_eq!(status(&request), 200);
+    }
+
+    #[test]
     fn atom_routes_answer_refusals_and_audit_text_as_json() {
         let request = |target: &str| Request {
             method: "GET".to_owned(),
@@ -2956,6 +3109,7 @@ mod tests {
             body: Vec::new(),
             cookie: None,
             authorization: None,
+            http: super::PanelHeaders::default(),
         };
         let refused = busy_refusal(&request("/api/v1/atom/rules"), "host is applying configuration");
         assert_eq!((refused.status, refused.content_type), (503, Some("application/json")));
@@ -3011,7 +3165,7 @@ mod tests {
                 let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
                 client
                     .write_all(
-                        format!("{method} /api/v1/system/health HTTP/1.1\r\nHost: test\r\n\r\n")
+                        format!("{method} /api/v1/system/health HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\n\r\n")
                             .as_bytes(),
                     )
                     .await
@@ -3111,7 +3265,7 @@ mod tests {
                 let text = String::from_utf8(bytes).unwrap();
                 (text.split_whitespace().nth(1).unwrap().parse().unwrap(), text)
             }
-            let get = |path: &str, extra: &str| format!("GET {path} HTTP/1.1\r\nHost: t\r\n{extra}\r\n");
+            let get = |path: &str, extra: &str| format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\n{extra}\r\n");
             assert_eq!(status(address, get("/api/v1/atom/rules", "")).await.0, 401);
             assert_eq!(status(address, get("/metrics", "")).await.0, 401);
             assert_eq!(status(address, get("/plugins/x/show", "")).await.0, 401);
@@ -3125,7 +3279,7 @@ mod tests {
             let (code, text) = status(
                 address,
                 format!(
-                    "POST /api/v1/atom/auth/login HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n{body}",
+                    "POST /api/v1/atom/auth/login HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
                 ),
             )

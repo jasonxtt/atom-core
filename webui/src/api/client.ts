@@ -43,7 +43,7 @@ async function retrying(request: Request): Promise<Response> {
   }
 }
 
-export const client = createClient<paths>({ baseUrl: '/api/v1/atom', fetch: retrying })
+export const client = createClient<paths>({ baseUrl: '/api/v1/atom', fetch: retrying, headers: { 'X-Atom-Request': '1' } })
 
 /** The data of an answer, or an `ApiError` with the server's `error` text. */
 export async function call<T>(request: Promise<{ data?: T; error?: unknown; response: Response }>): Promise<T> {

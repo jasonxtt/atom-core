@@ -218,6 +218,7 @@ fn retained_audit_api_response_bytes_equal_base_fixture() {
                     body: body.as_bytes().to_vec(),
                     cookie: None,
                     authorization: None,
+                    http: Default::default(),
                 },
             )
             .await;

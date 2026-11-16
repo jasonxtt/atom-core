@@ -219,16 +219,16 @@ fn parse_http_response(bytes: &[u8]) -> HttpResponse {
 }
 
 fn get(path: &str) -> String {
-    format!("GET {path} HTTP/1.1\r\nHost: native\r\nConnection: close\r\n\r\n")
+    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\nConnection: close\r\n\r\n")
 }
 
 fn raw(method: &str, path: &str) -> String {
-    format!("{method} {path} HTTP/1.1\r\nHost: native\r\nConnection: close\r\n\r\n")
+    format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\nConnection: close\r\n\r\n")
 }
 
 fn post(path: &str, body: &str) -> String {
     format!(
-        "POST {path} HTTP/1.1\r\nHost: native\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
 }
@@ -722,7 +722,7 @@ fn ui_main_is_the_root_served_live_over_real_http_without_audit_or_metrics() {
             assert_eq!(response.header("cache-control"), Some("no-store"));
             assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
             let head =
-                http_request(api, &format!("HEAD {path} HTTP/1.1\r\nHost: test\r\n\r\n")).await;
+                http_request(api, &format!("HEAD {path} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\n\r\n")).await;
             assert_eq!(head.status, 200);
             assert!(head.body.is_empty());
             assert_eq!(
@@ -820,7 +820,7 @@ fn external_ui_is_live_confined_and_root_pinned() {
         let dir = http_request(api, &get("/demo/nested?x=1")).await;
         assert_eq!(dir.status, 301);
         assert_eq!(dir.header("location"), Some("/demo/nested/?x=1"));
-        let head = http_request(api, "HEAD /demo/ HTTP/1.1\r\nHost: test\r\n\r\n").await;
+        let head = http_request(api, "HEAD /demo/ HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\n\r\n").await;
         assert_eq!(head.status, 200);
         assert!(head.body.is_empty());
         assert_eq!(head.header("content-length"), Some("7"));
@@ -1020,7 +1020,7 @@ fn external_ui_packages_use_any_directory_name_and_a_manifest_decides_mounting()
 
 #[cfg(target_os = "linux")]
 async fn exercise_encoded_redirects(api: SocketAddr) {
-    let get = |path: &str| format!("GET {path} HTTP/1.1\r\nHost: test\r\n\r\n");
+    let get = |path: &str| format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nX-Atom-Request: 1\r\n\r\n");
     for (path, body) in [
         ("/a%3Fb%25%23%20%E7%A9%BA", "reserved root"),
         ("/demo/n%3F%25%23%20%E7%A9%BA", "reserved nested"),

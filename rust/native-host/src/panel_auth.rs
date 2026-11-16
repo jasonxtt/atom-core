@@ -270,31 +270,16 @@ impl PanelAuth {
     }
 
     async fn set(&self, cookie: Option<&str>, authorization: Option<&str>, body: &[u8]) -> Reply {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Set {
-            username: String,
-            password: String,
-            #[serde(default)]
-            current_password: Option<String>,
-        }
         let before = self.caller(cookie, authorization);
         if before == Caller::None {
             return error(401, "未登录");
         }
-        let input: Set = match crate::atom_rules_api::body(body) {
+        let mut input: LoginInput = match crate::atom_rules_api::body(body) {
             Ok(input) => input,
             Err(reply) => return reply,
         };
-        let username = input.username.trim().to_owned();
-        if username.is_empty() || username.chars().count() > MAX_USERNAME_CHARS {
-            return error(400, "用户名不能为空，最长 64 个字符");
-        }
-        if username.chars().any(char::is_control) {
-            return error(400, "用户名不能含控制字符");
-        }
-        if input.password.is_empty() || input.password.len() > MAX_PASSWORD_BYTES {
-            return error(400, "密码不能为空，最长 256 字节");
+        if let Err(message) = input.validate() {
+            return error(400, message);
         }
         let (_write, caller) = match self.lock_for_change(before, cookie, authorization).await {
             Ok(held) => held,
@@ -311,7 +296,7 @@ impl PanelAuth {
             Err(reply) => return reply,
         };
         let stored = match tokio::task::spawn_blocking(move || {
-            new_stored(username, &input.password)
+            new_stored(input.username, &input.password)
         })
         .await
         {
@@ -461,6 +446,40 @@ async fn verify(stored: &Stored, password: String) -> bool {
     })
     .await
     .unwrap_or(false)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginInput {
+    username: String,
+    password: String,
+    #[serde(default)]
+    current_password: Option<String>,
+}
+
+impl LoginInput {
+    fn validate(&mut self) -> Result<(), &'static str> {
+        self.username = self.username.trim().to_owned();
+        if self.username.is_empty() || self.username.chars().count() > MAX_USERNAME_CHARS {
+            return Err("用户名不能为空，最长 64 个字符");
+        }
+        if self.username.chars().any(char::is_control) {
+            return Err("用户名不能含控制字符");
+        }
+        if self.password.is_empty() || self.password.len() > MAX_PASSWORD_BYTES {
+            return Err("密码不能为空，最长 256 字节");
+        }
+        Ok(())
+    }
+}
+
+/// Writes panel credentials before the installer starts the HTTP listener.
+pub fn set_panel_login(root: &Path, input: impl std::io::Read) -> Result<(), String> {
+    let mut input: LoginInput = serde_json::from_reader(input.take(4096))
+        .map_err(|_| "无效的面板登录设置".to_owned())?;
+    input.validate()?;
+    let stored = new_stored(input.username, &input.password)?;
+    save(&root.join("webinfo").join(AUTH_FILE), &stored).map_err(|error| error.to_string())
 }
 
 fn new_stored(username: String, password: &str) -> Result<Stored, String> {

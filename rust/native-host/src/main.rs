@@ -25,6 +25,9 @@ fn main() {
             atomdns_native_host::configure_process_memory();
             serve(&config, dir.as_deref())
         }
+        Ok(atomdns_native_host::CliCommand::SetPanelLogin { dir }) => {
+            atomdns_native_host::set_panel_login(&dir, std::io::stdin().lock())
+        }
         Err(error) => Err(error.to_string()),
     };
     if let Err(error) = result {
