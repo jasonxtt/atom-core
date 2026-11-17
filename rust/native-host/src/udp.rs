@@ -16,6 +16,9 @@ use crate::config::{CompiledConfig, ListenerKind};
 use crate::execution::{ExecutionRequest, execute_request};
 use crate::observer::{QueryObserver, QueryTerminalOutcome, QueryTransport, TerminalObservation};
 
+#[cfg(target_os = "linux")]
+pub(crate) mod packet_info;
+
 const MAX_UDP_PACKET: usize = 65535;
 #[cfg(test)]
 const REFUSED: u8 = 5;
@@ -124,6 +127,8 @@ impl UdpServer {
     /// Receives datagrams concurrently, stops admission on cancellation, then
     /// cancels/joins every request task before draining the upstream owner.
     pub async fn serve(self, shutdown: TransportCancellation) -> Result<(), UdpServerError> {
+        #[cfg(target_os = "linux")]
+        let wildcard = self.local_addr()?.ip().is_unspecified();
         let mut tasks = JoinSet::new();
         let mut packet = vec![0_u8; MAX_UDP_PACKET];
         let mut receive_error = None;
@@ -139,9 +144,17 @@ impl UdpServer {
                         shutdown.cancel();
                     }
                 }
-                received = self.socket.recv_from(&mut packet) => {
+                received = async {
+                    #[cfg(target_os = "linux")]
+                    if wildcard {
+                        return packet_info::recv(&self.socket, &mut packet).await;
+                    }
+                    self.socket.recv_from(&mut packet).await.map(|(length, peer)| {
+                        Some((length, ReplyTo::new(peer)))
+                    })
+                } => {
                     match received {
-                        Ok((length, peer)) => {
+                        Ok(Some((length, reply_to))) => {
                             let raw = packet[..length].to_vec();
                             let socket = Arc::clone(&self.socket);
                             let Some(admission) = self.control.capture(&self.listener_tag, ListenerKind::Udp, self.listener_addr) else { continue; };
@@ -162,7 +175,7 @@ impl UdpServer {
                                     observer,
                                     options,
                                     raw,
-                                    peer,
+                                    reply_to,
                                     request_shutdown,
                                     enable_audit,
                                     _admission: admission,
@@ -170,6 +183,7 @@ impl UdpServer {
                                 .await;
                             });
                         }
+                        Ok(None) => continue,
                         Err(error) => {
                             receive_error = Some(error);
                             shutdown.cancel();
@@ -201,6 +215,31 @@ impl UdpServer {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ReplyTo {
+    peer: SocketAddr,
+    #[cfg(target_os = "linux")]
+    source: Option<packet_info::Source>,
+}
+
+impl ReplyTo {
+    fn new(peer: SocketAddr) -> Self {
+        Self {
+            peer,
+            #[cfg(target_os = "linux")]
+            source: None,
+        }
+    }
+
+    async fn send(self, socket: &UdpSocket, wire: &[u8]) -> io::Result<usize> {
+        #[cfg(target_os = "linux")]
+        if let Some(source) = self.source {
+            return source.send(socket, wire, self.peer).await;
+        }
+        socket.send_to(wire, self.peer).await
+    }
+}
+
 struct RequestTask {
     socket: Arc<UdpSocket>,
     config: Rc<CompiledConfig>,
@@ -209,7 +248,7 @@ struct RequestTask {
     observer: Arc<QueryObserver>,
     options: HostOptions,
     raw: Vec<u8>,
-    peer: SocketAddr,
+    reply_to: ReplyTo,
     request_shutdown: TransportCancellation,
     enable_audit: bool,
     _admission: crate::runtime_snapshot::AdmittedSnapshot,
@@ -224,7 +263,7 @@ async fn process_request(task: RequestTask) {
         observer,
         options,
         raw,
-        peer,
+        reply_to,
         request_shutdown,
         enable_audit,
         _admission,
@@ -237,7 +276,7 @@ async fn process_request(task: RequestTask) {
             // and is not itself a response, so clients do not wait for a timeout.
             observer.record_malformed();
             if let Some(reply) = atomdns_dns_core::query_error_reply(&raw, error) {
-                let _ = send_with_control(&request_shutdown, socket.send_to(&reply, peer)).await;
+                let _ = send_with_control(&request_shutdown, reply_to.send(&socket, &reply)).await;
             }
             return;
         }
@@ -245,7 +284,7 @@ async fn process_request(task: RequestTask) {
 
     // A dual-stack wildcard socket reports IPv4 peers as IPv4-mapped IPv6;
     // audit and client matching see the plain IPv4 address.
-    let client_addr = crate::bind::canonical_peer(peer);
+    let client_addr = crate::bind::canonical_peer(reply_to.peer);
     let mut admitted = match observer.try_admit_on_listener(
         enable_audit,
         client_addr,
@@ -334,7 +373,7 @@ async fn process_request(task: RequestTask) {
             send_response(
                 socket,
                 framed_response.expect("response is framed before the send await"),
-                peer,
+                reply_to,
                 request_shutdown,
             )
             .await
@@ -346,13 +385,13 @@ async fn process_request(task: RequestTask) {
 async fn send_response(
     socket: Arc<UdpSocket>,
     response: Vec<u8>,
-    peer: SocketAddr,
+    reply_to: ReplyTo,
     request_shutdown: TransportCancellation,
 ) -> QueryTerminalOutcome {
     send_response_after_gate(
         socket,
         response,
-        peer,
+        reply_to,
         request_shutdown,
         std::future::ready(()),
     )
@@ -362,7 +401,7 @@ async fn send_response(
 async fn send_response_after_gate<F>(
     socket: Arc<UdpSocket>,
     response: Vec<u8>,
-    peer: SocketAddr,
+    reply_to: ReplyTo,
     request_shutdown: TransportCancellation,
     before_send: F,
 ) -> QueryTerminalOutcome
@@ -370,7 +409,7 @@ where
     F: Future<Output = ()>,
 {
     before_send.await;
-    send_with_control(&request_shutdown, socket.send_to(&response, peer)).await
+    send_with_control(&request_shutdown, reply_to.send(&socket, &response)).await
 }
 
 async fn send_with_control<F>(
@@ -597,7 +636,7 @@ mod tests {
             let send = tokio::task::spawn_local(send_response_after_gate(
                 sender,
                 vec![0xaa, 0xbb],
-                peer,
+                super::ReplyTo::new(peer),
                 cancellation.clone(),
                 Arc::clone(&gate).notified_owned(),
             ));

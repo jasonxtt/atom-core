@@ -50,6 +50,8 @@ fn plain_udp(address: SocketAddr) -> io::Result<Socket> {
     )?;
     if address.ip().is_unspecified() {
         socket.set_reuse_address(true)?;
+        #[cfg(target_os = "linux")]
+        crate::udp::packet_info::enable(&socket, false)?;
     }
     socket.bind(&address.into())?;
     socket.set_nonblocking(true)?;
@@ -193,6 +195,10 @@ fn wildcard(ty: Type, protocol: Protocol, address: SocketAddr) -> io::Result<Wil
     socket.set_only_v6(false)?;
     // TCP: rebinding during TIME_WAIT; UDP: see the module comment.
     socket.set_reuse_address(true)?;
+    #[cfg(target_os = "linux")]
+    if protocol == Protocol::UDP {
+        crate::udp::packet_info::enable(&socket, true)?;
+    }
     socket.bind(&address.into())?;
     socket.set_nonblocking(true)?;
     Ok(Wildcard::Bound(socket))

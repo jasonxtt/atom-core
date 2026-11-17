@@ -276,18 +276,23 @@ fn a_duplicate_protocol_and_address_is_still_rejected() {
 }
 
 async fn udp_exchange(target: std::net::SocketAddr) -> Vec<u8> {
+    udp_exchange_wire(target, &query()).await
+}
+
+async fn udp_exchange_wire(target: std::net::SocketAddr, wire: &[u8]) -> Vec<u8> {
     let bind = if target.is_ipv6() {
         "[::1]:0"
     } else {
         "127.0.0.1:0"
     };
     let socket = tokio::net::UdpSocket::bind(bind).await.unwrap();
-    socket.send_to(&query(), target).await.unwrap();
+    socket.send_to(wire, target).await.unwrap();
     let mut packet = vec![0; 4096];
-    let (length, _) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut packet))
+    let (length, source) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut packet))
         .await
         .expect("udp response in time")
         .unwrap();
+    assert_eq!(source, target, "UDP reply source must equal the query target");
     packet.truncate(length);
     packet
 }
@@ -433,6 +438,35 @@ fn a_bare_port_listens_dual_stack_and_audits_ipv4_clients_as_ipv4() {
         shutdown.cancel();
         serving.await.unwrap().expect("clean shutdown");
     });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn wildcard_udp_replies_from_each_query_destination() {
+    for wildcard in ["", "0.0.0.0"] {
+        let port = free_port();
+        let listen = format!("{wildcard}:{port}");
+        let yaml = reject_config("", &listener("udp", "udp_server", &listen, ""));
+        let dir = TempDir::new(&format!("udp-source-{port}"));
+        let host = HostAssembly::from_config_file(&dir.write("config.yaml", &yaml)).unwrap();
+        host.block_on(async {
+            let bound = host.bind_host().await.expect("wildcard binds");
+            let shutdown = TransportCancellation::new();
+            let serving = tokio::task::spawn_local(bound.serve(shutdown.clone()));
+            let primary = ([127, 0, 0, 1], port).into();
+            let secondary = ([127, 0, 0, 2], port).into();
+            let (first, second, malformed) = tokio::join!(
+                udp_exchange(primary),
+                udp_exchange(secondary),
+                udp_exchange_wire(secondary, &[0; 12]),
+            );
+            assert_eq!(first[3] & 15, 3);
+            assert_eq!(second[3] & 15, 3);
+            assert_eq!(malformed[3] & 15, 1);
+            shutdown.cancel();
+            serving.await.unwrap().expect("clean shutdown");
+        });
+    }
 }
 
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, (bool, u64, std::time::SystemTime, Vec<u8>)> {
