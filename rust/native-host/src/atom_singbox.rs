@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use crate::atom_proxy::{FINAL, GroupKind, ProxyState};
+use crate::atom_proxy::{Backend, FINAL, GroupKind, ProxyState};
 use crate::atom_rules::Action;
 
 pub(crate) const CONFIG_FILE: &str = "config.json";
@@ -39,6 +39,9 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// arguments; not user settings).
 #[derive(Clone, Debug)]
 pub(crate) struct Host {
+    pub(crate) backend: Backend,
+    pub(crate) stop: Vec<String>,
+    pub(crate) mihomo: Option<Box<Host>>,
     pub(crate) binary: PathBuf,
     /// The working directory: `config.json`, `cache.db`.
     pub(crate) dir: PathBuf,
@@ -67,8 +70,29 @@ impl Host {
         ]
     }
 
+    fn file_name(&self) -> &str {
+        match self.backend {
+            Backend::SingBox => CONFIG_FILE,
+            Backend::Mihomo => "config.yaml",
+        }
+    }
+
+    fn next_path(&self) -> PathBuf {
+        match self.backend {
+            Backend::SingBox => self.dir.join(NEXT_FILE),
+            Backend::Mihomo => self.dir.join("config.yaml.next"),
+        }
+    }
+
+    pub(crate) fn for_backend(&self, backend: Backend) -> Option<&Host> {
+        match backend {
+            Backend::SingBox => Some(self),
+            Backend::Mihomo => self.mihomo.as_deref(),
+        }
+    }
+
     pub(crate) fn config_path(&self) -> PathBuf {
-        self.dir.join(CONFIG_FILE)
+        self.dir.join(self.file_name())
     }
 }
 
@@ -111,6 +135,9 @@ pub(crate) fn generate(
     resolver: &str,
     secret: &str,
 ) -> Result<Vec<u8>, String> {
+    if host.backend == Backend::Mihomo {
+        return crate::atom_mihomo::generate(host, state, ip_rules, resolver, secret);
+    }
     let (resolver_kind, resolver_ip, resolver_port) = crate::atom_proxy::parse_resolver(resolver)?;
     let mut outbounds = Vec::new();
     for node in &state.nodes {
@@ -121,7 +148,10 @@ pub(crate) fn generate(
     for group in &state.groups {
         let mut outbound = Map::new();
         outbound.insert("tag".into(), json!(group.id));
-        outbound.insert("outbounds".into(), json!(members_or_block(&state.members_of(group))));
+        outbound.insert(
+            "outbounds".into(),
+            json!(members_or_block(&state.members_of(group))),
+        );
         match group.kind {
             GroupKind::Selector => {
                 outbound.insert("type".into(), json!("selector"));
@@ -277,6 +307,7 @@ pub(crate) fn secret_of(bytes: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
     value
         .pointer("/experimental/clash_api/secret")
+        .or_else(|| value.get("secret"))
         .and_then(Value::as_str)
         .map(str::to_owned)
 }
@@ -398,21 +429,29 @@ fn run(command: &[String], timeout: Duration, what: &str) -> Result<(), String> 
 /// `sing-box check` on the candidate (written next to the live file).
 pub(crate) fn check(host: &Host, bytes: &[u8]) -> Result<(), String> {
     // Nothing is written where sing-box is not installed.
+    let (engine, validation) = match host.backend {
+        Backend::SingBox => ("sing-box", "sing-box check"),
+        Backend::Mihomo => ("mihomo", "mihomo -t"),
+    };
     if !host.binary.is_file() {
-        return Err(format!("找不到 sing-box 程序 {}", host.binary.display()));
+        return Err(format!("找不到 {engine} 程序 {}", host.binary.display()));
     }
-    let next = host.dir.join(NEXT_FILE);
+    let next = host.next_path();
     write_private(&next, bytes)
         .map_err(|error| format!("写入 {} 失败: {error}", next.display()))?;
+    let args = match host.backend {
+        Backend::SingBox => ["check", "-D", "-c"],
+        Backend::Mihomo => ["-t", "-d", "-f"],
+    };
     let command = vec![
         host.binary.display().to_string(),
-        "check".to_owned(),
-        "-D".to_owned(),
+        args[0].to_owned(),
+        args[1].to_owned(),
         host.dir.display().to_string(),
-        "-c".to_owned(),
+        args[2].to_owned(),
         next.display().to_string(),
     ];
-    let result = run(&command, CHECK_TIMEOUT, "sing-box check ");
+    let result = run(&command, CHECK_TIMEOUT, &format!("{validation} "));
     if result.is_err() {
         let _ = std::fs::remove_file(&next);
     }
@@ -433,8 +472,64 @@ fn install(host: &Host, bytes: Option<&[u8]>) -> Result<(), String> {
     .map_err(|error| format!("写入 {} 失败: {error}", live.display()))
 }
 
+pub(crate) fn stop(host: &Host) -> Result<(), String> {
+    run(&host.stop, RELOAD_TIMEOUT, "停止代理 ")
+}
+
+pub(crate) fn switch_blocking(
+    old: &Host,
+    next: &Host,
+    bytes: &[u8],
+    secret: &str,
+    chosen: &[(String, String)],
+    old_chosen: &[(String, String)],
+) -> Result<(), ApplyError> {
+    check(next, bytes).map_err(ApplyError::Check)?;
+    if let Err(error) = stop(old) {
+        let _ = std::fs::remove_file(next.next_path());
+        return Err(ApplyError::Runtime(error));
+    }
+    let failure = match std::fs::rename(next.next_path(), next.config_path())
+        .map_err(|e| e.to_string())
+        .and_then(|()| reload(next))
+        .and_then(|()| confirm(next, secret))
+        .and_then(|()| flush_fakeip(next, secret))
+        .and_then(|()| sync_selections(next, secret, chosen))
+    {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    Err(ApplyError::Runtime(format!(
+        "{failure}；{}",
+        switch_back(old, next, old_chosen)
+    )))
+}
+
+pub(crate) fn switch_back(old: &Host, next: &Host, old_chosen: &[(String, String)]) -> String {
+    if let Err(error) = stop(next) {
+        return format!("停止新内核失败: {error}");
+    }
+    let bytes = read_live(old);
+    rollback(old, bytes.as_deref(), old_chosen)
+}
+
+fn flush_fakeip(host: &Host, secret: &str) -> Result<(), String> {
+    match clash(host.clash_api, secret, "POST", "/cache/fakeip/flush", None)? {
+        (204, _) => Ok(()),
+        (status, _) => Err(format!("清空 FakeIP 缓存失败（{status}）")),
+    }
+}
+
+fn mihomo_range(bytes: &[u8]) -> Option<String> {
+    let config: Value = serde_json::from_slice(bytes).ok()?;
+    config
+        .pointer("/dns/fake-ip-range")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 fn reload(host: &Host) -> Result<(), String> {
-    run(&host.reload, RELOAD_TIMEOUT, "重载 sing-box ")
+    run(&host.reload, RELOAD_TIMEOUT, "重载代理内核 ")
 }
 
 /// Waits until the Clash API answers `/proxies` with `secret` and lists
@@ -446,10 +541,13 @@ fn confirm(host: &Host, secret: &str) -> Result<(), String> {
         match clash(host.clash_api, secret, "GET", "/proxies", None) {
             Ok((200, body)) => {
                 let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                if value.pointer(&format!("/proxies/{FINAL}")).is_some() {
+                last = if value.pointer(&format!("/proxies/{FINAL}")).is_none() {
+                    "Clash API 里没有 Final".to_owned()
+                } else if host.backend == Backend::Mihomo {
+                    return confirm_mihomo(host, secret);
+                } else {
                     return Ok(());
-                }
-                last = "Clash API 里没有 Final".to_owned();
+                };
             }
             Ok((status, _)) => last = format!("Clash API 返回 {status}"),
             Err(error) => last = error,
@@ -462,6 +560,25 @@ fn confirm(host: &Host, secret: &str) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn confirm_mihomo(host: &Host, secret: &str) -> Result<(), String> {
+    let (status, bytes) = clash(host.clash_api, secret, "GET", "/configs", None)?;
+    let config: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let live: Value = serde_json::from_slice(&read_live(host).ok_or("找不到 mihomo 配置")?)
+        .map_err(|error| error.to_string())?;
+    if status != 200
+        || ["mixed-port", "redir-port", "tproxy-port"]
+            .iter()
+            .any(|key| config.get(key) != live.get(key))
+    {
+        return Err("mihomo 监听端口没有全部就绪".to_owned());
+    }
+    let (status, _) = clash(host.clash_api, secret, "GET", "/atom/ready", None)?;
+    if status != 204 {
+        return Err("mihomo 的 FakeIP DNS 或透明代理还没有就绪".to_owned());
+    }
+    Ok(())
 }
 
 /// Why an application failed: `sing-box check` refused the candidate
@@ -507,22 +624,42 @@ pub(crate) fn apply_blocking(
     old_chosen: &[(String, String)],
 ) -> Result<(), ApplyError> {
     check(host, bytes).map_err(ApplyError::Check)?;
+    apply_checked(host, secret, chosen, old_chosen)
+}
+
+fn apply_checked(
+    host: &Host,
+    secret: &str,
+    chosen: &[(String, String)],
+    old_chosen: &[(String, String)],
+) -> Result<(), ApplyError> {
     let live = host.config_path();
     let old = match std::fs::read(&live) {
         Ok(old) => Some(old),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            let _ = std::fs::remove_file(host.dir.join(NEXT_FILE));
+            let _ = std::fs::remove_file(host.next_path());
             return Err(ApplyError::Runtime(format!(
                 "读取 {} 失败: {error}",
                 live.display()
             )));
         }
     };
-    std::fs::rename(host.dir.join(NEXT_FILE), &live)
+    std::fs::rename(host.next_path(), &live)
         .map_err(|error| ApplyError::Runtime(format!("替换 {} 失败: {error}", live.display())))?;
     let failure = match reload(host)
         .and_then(|()| confirm(host, secret))
+        .and_then(|()| {
+            let old_range = old.as_deref().and_then(mihomo_range);
+            if host.backend == Backend::Mihomo
+                && old_range.is_some()
+                && old_range != read_live(host).as_deref().and_then(mihomo_range)
+            {
+                flush_fakeip(host, secret)
+            } else {
+                Ok(())
+            }
+        })
         .and_then(|()| sync_selections(host, secret, chosen))
     {
         Ok(()) => return Ok(()),
@@ -542,7 +679,11 @@ pub(crate) fn rollback(host: &Host, old: Option<&[u8]>, old_chosen: &[(String, S
     }
     let Some(old) = old else {
         // There was no configuration: nothing to bring back up.
-        let _ = reload(host);
+        if host.stop.is_empty() {
+            let _ = reload(host);
+        } else if let Err(error) = stop(host) {
+            return format!("已删除新配置，但停止代理失败: {error}");
+        }
         return "已删除新配置（之前没有配置）".to_owned();
     };
     match reload(host).and_then(|()| match secret_of(old) {
@@ -754,6 +895,11 @@ pub(crate) fn close_connections(host: &Host, secret: &str, id: Option<&str>) -> 
     }
 }
 
+pub(crate) fn ready(host: &Host, secret: &str) -> bool {
+    version(host, secret).is_some()
+        && (host.backend == Backend::SingBox || confirm_mihomo(host, secret).is_ok())
+}
+
 /// sing-box's version through the Clash API, if it answers.
 pub(crate) fn version(host: &Host, secret: &str) -> Option<String> {
     let (status, body) = clash(host.clash_api, secret, "GET", "/version", None).ok()?;
@@ -771,7 +917,10 @@ pub(crate) fn rebind_removed_group(host: &Host, secret: &str, id: &str) -> Resul
     let path = format!("/cache/fakeip/group/{id}/final");
     let (status, body) = clash(host.clash_api, secret, "POST", &path, None)?;
     if status != 204 {
-        return Err(format!("迁移已删除组 {id} 的 FakeIP 绑定失败（{status}）: {}", String::from_utf8_lossy(&body)));
+        return Err(format!(
+            "迁移已删除组 {id} 的 FakeIP 绑定失败（{status}）: {}",
+            String::from_utf8_lossy(&body)
+        ));
     }
     Ok(())
 }

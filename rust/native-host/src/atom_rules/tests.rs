@@ -1115,6 +1115,9 @@ fn ttls(wire: &[u8]) -> Vec<u32> {
 #[test]
 fn answers_have_their_ttls_capped() {
     let host = crate::atom_singbox::Host {
+        backend: crate::atom_proxy::Backend::SingBox,
+        stop: vec![],
+        mihomo: None,
         binary: "/bin/true".into(),
         dir: "/nonexistent".into(),
         reload: vec!["true".into()],

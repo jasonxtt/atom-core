@@ -3872,6 +3872,8 @@ fn compile_singbox_host(
     args.reject_unknown(
         &[
             "binary",
+            "stop",
+            "mihomo",
             "dir",
             "reload",
             "clash_api",
@@ -3919,7 +3921,25 @@ fn compile_singbox_host(
     if reload.is_empty() {
         return Err(ConfigError::new(reload_path, "reload needs a command"));
     }
-    Ok(crate::atom_singbox::Host {
+    let command = |map: &RawMap, path: &str, field: &str| -> Result<Vec<String>, ConfigError> {
+        let field_path = format!("{path}.{field}");
+        let values = expect_sequence(map.required(field, path)?, &field_path)?;
+        if values.is_empty() {
+            return Err(ConfigError::new(&field_path, "command cannot be empty"));
+        }
+        values
+            .iter()
+            .map(|value| expect_string(value, &field_path))
+            .collect()
+    };
+    let mut host = crate::atom_singbox::Host {
+        backend: crate::atom_proxy::Backend::SingBox,
+        stop: if args.get("stop").is_some() {
+            command(args, path, "stop")?
+        } else {
+            Vec::new()
+        },
+        mihomo: None,
         binary: under_root(string("binary")?),
         dir: under_root(string("dir")?),
         reload,
@@ -3929,7 +3949,40 @@ fn compile_singbox_host(
         redirect_port: port("redirect_port")?,
         tproxy_port: port("tproxy_port")?,
         resolver_group: string("resolver_group")?,
-    })
+    };
+    if let Some(value) = args.get("mihomo") {
+        let other_path = format!("{path}.mihomo");
+        let other = expect_map(value, &other_path, "mihomo must be a mapping")?;
+        other.reject_unknown(&["binary", "dir", "reload", "stop"], &other_path)?;
+        if host.stop.is_empty() {
+            return Err(ConfigError::new(
+                path,
+                "switching proxy backends requires a sing-box stop command",
+            ));
+        }
+        let string = |key| {
+            expect_string(
+                other.required(key, &other_path)?,
+                &format!("{other_path}.{key}"),
+            )
+        };
+        let dir = under_root(string("dir")?);
+        if dir == host.dir {
+            return Err(ConfigError::new(
+                format!("{other_path}.dir"),
+                "the two proxy backends need separate working directories",
+            ));
+        }
+        host.mihomo = Some(Box::new(crate::atom_singbox::Host {
+            backend: crate::atom_proxy::Backend::Mihomo,
+            binary: under_root(string("binary")?),
+            dir,
+            reload: command(other, &other_path, "reload")?,
+            stop: command(other, &other_path, "stop")?,
+            ..host.clone()
+        }));
+    }
+    Ok(host)
 }
 
 fn compile_webinfo(plugin: &RawPlugin) -> Result<(WebInfo, PathBuf), ConfigError> {

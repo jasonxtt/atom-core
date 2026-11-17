@@ -252,10 +252,10 @@ fn settings_are_checked() {
 #[test]
 fn intervals_are_seconds_minutes_or_hours() {
     for good in ["30s", "3m", "1h30m", "90s"] {
-        check_interval(good).unwrap();
+        duration_secs(good).unwrap();
     }
     for bad in ["", "3", "0s", "5ms", "m", "1d", "3 m"] {
-        assert!(check_interval(bad).is_err(), "{bad}");
+        assert!(duration_secs(bad).is_err(), "{bad}");
     }
 }
 

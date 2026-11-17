@@ -148,9 +148,26 @@ pub(crate) struct Final {
     pub(crate) selected: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum Backend {
+    #[default]
+    #[serde(rename = "sing-box", alias = "singbox")]
+    SingBox,
+    #[serde(rename = "mihomo")]
+    Mihomo,
+}
+
+impl Backend {
+    fn is_default(&self) -> bool {
+        *self == Self::SingBox
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Settings {
+    #[serde(default, skip_serializing_if = "Backend::is_default")]
+    pub(crate) backend: Backend,
     /// sing-box's FakeIP `inet4_range`.
     pub(crate) fakeip_range: String,
     /// The DNS sing-box resolves node names with; "" = the first plain
@@ -178,6 +195,7 @@ fn fakeip_ttl_max_default() -> u32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            backend: Backend::default(),
             fakeip_range: DEFAULT_FAKEIP_RANGE.to_owned(),
             resolver: String::new(),
             mixed_port: DEFAULT_MIXED_PORT,
@@ -297,7 +315,10 @@ pub(crate) fn check_outbound(outbound: &Map<String, Value>) -> Result<(), Refusa
     if !NODE_TYPES.contains(&kind) {
         return Err(invalid(format!("不支持的节点类型 `{kind}`")));
     }
-    if outbound.keys().any(|name| name != "type" && fold(name) == "type") {
+    if outbound
+        .keys()
+        .any(|name| name != "type" && fold(name) == "type")
+    {
         return Err(invalid("节点的 outbound 只能用小写 `type` 指定类型"));
     }
     for key in ["tag", "detour"] {
@@ -395,7 +416,7 @@ pub(crate) fn public_outbound(outbound: &Map<String, Value>) -> Map<String, Valu
 
 /// A sing-box duration of whole seconds, minutes or hours (`30s`, `3m`,
 /// `1h30m`), at least one second.
-fn check_interval(value: &str) -> Result<(), Refusal> {
+pub(crate) fn duration_secs(value: &str) -> Result<u64, Refusal> {
     let bad = || {
         invalid(format!(
             "interval `{value}` 无效：写成 30s、3m、1h 这样的形式"
@@ -425,7 +446,7 @@ fn check_interval(value: &str) -> Result<(), Refusal> {
     if total == 0 {
         return Err(bad());
     }
-    Ok(())
+    Ok(total)
 }
 
 /// `[udp|tcp]://IP[:port]` or a bare IP: the resolver must be an address
@@ -631,7 +652,9 @@ impl ProxyState {
                             group.id
                         )));
                     }
-                    if !group.selected.is_empty() && !self.members_of(group).contains(&group.selected) {
+                    if !group.selected.is_empty()
+                        && !self.members_of(group).contains(&group.selected)
+                    {
                         return Err(invalid(format!(
                             "{}: 选中的 `{}` 不是成员",
                             group.id, group.selected
@@ -651,7 +674,7 @@ impl ProxyState {
                     if !matches!(parsed.scheme(), "http" | "https") {
                         return Err(invalid(format!("{}: url 只支持 http 和 https", group.id)));
                     }
-                    check_interval(group.interval.as_deref().unwrap_or(DEFAULT_INTERVAL))
+                    duration_secs(group.interval.as_deref().unwrap_or(DEFAULT_INTERVAL))
                         .map_err(|refusal| invalid(format!("{}: {}", group.id, refusal.message)))?;
                 }
             }

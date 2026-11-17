@@ -47,6 +47,12 @@ plugins:
         binary: /opt/atom/bin/sing-box
         dir: sing-box
         reload: [systemctl, reload-or-restart, atom-sing-box.service]
+        stop: [systemctl, stop, atom-sing-box.service]
+        mihomo:
+          binary: /opt/atom/bin/mihomo
+          dir: mihomo
+          reload: [systemctl, reload-or-restart, atom-mihomo.service]
+          stop: [systemctl, stop, atom-mihomo.service]
         clash_api: "127.0.0.1:9090"
         dns_in: "127.0.0.1:6666"
         atomdns: "127.0.0.1:53"

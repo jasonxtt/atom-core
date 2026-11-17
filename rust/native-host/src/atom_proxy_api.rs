@@ -123,6 +123,7 @@ fn final_view(state: &ProxyState) -> Value {
 fn settings_view(rules: &AtomRules, state: &ProxyState) -> Value {
     json!({
         "version": state.version,
+        "backend": state.settings.backend,
         "fakeip_range": state.settings.fakeip_range,
         "resolver": state.settings.resolver,
         "resolver_effective": rules.resolver_for(state),
@@ -668,6 +669,7 @@ async fn put_settings(
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Put {
+        backend: Option<crate::atom_proxy::Backend>,
         fakeip_range: Option<String>,
         resolver: Option<String>,
         mixed_port: Option<u16>,
@@ -693,6 +695,9 @@ async fn put_settings(
     }
     let current = state(rules);
     let mut next = current.clone();
+    if let Some(backend) = request.backend {
+        next.settings.backend = backend;
+    }
     if let Some(range) = request.fakeip_range {
         next.settings.fakeip_range = range.trim().to_owned();
     }
@@ -715,14 +720,16 @@ async fn put_settings(
     if let Err(e) = rules.transact(None, Some(next.clone()), "settings").await {
         return fail(&e);
     }
-    // sing-box dropped every mapping and binding. A real address previously
-    // cached by AtomDNS might now fall inside the new range.
-    if next.settings.fakeip_range != current.settings.fakeip_range {
+    // FakeIP addresses and bindings belong to the previous pool. Clear AtomDNS
+    // state before it serves addresses from the new one.
+    if next.settings.fakeip_range != current.settings.fakeip_range
+        || next.settings.backend != current.settings.backend
+    {
         crate::atom_ledger::clear();
         if let Err(e) = flush_global_caches(config, cache).await {
             return error(
                 500,
-                format!("设置已应用，但清空缓存失败，旧网段的 FakeIP 应答可能还会被使用: {e}"),
+                format!("设置已应用，但清空缓存失败，客户端可能拿到旧的 FakeIP 应答: {e}"),
             );
         }
     }
@@ -772,6 +779,7 @@ async fn status(rules: &AtomRules) -> Reply {
         200,
         &json!({
             "atomdns": {"version": env!("CARGO_PKG_VERSION")},
+            "backend": current.settings.backend,
             "singbox": {
                 "running": singbox_version.is_some(),
                 "version": singbox_version,

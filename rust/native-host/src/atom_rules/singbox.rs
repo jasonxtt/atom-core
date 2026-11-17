@@ -20,7 +20,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{AtomRules, Refusal, State, ip_rules, now};
-use crate::atom_proxy::{self, FINAL, FakeIpPrefix, ProxyState};
+use crate::atom_proxy::{self, Backend, FINAL, FakeIpPrefix, ProxyState};
 use crate::atom_singbox::{self as sb, ApplyError, ApplyGuard, Host};
 
 const REMOVED_GROUPS: &str = "webinfo/atom_removed_groups";
@@ -44,6 +44,9 @@ impl Proxy {
         } else {
             atom_proxy::load(root, &host.reserved_ports(), inputs)?
         };
+        if host.for_backend(state.settings.backend).is_none() {
+            return Err("选中的代理内核没有配置运行路径".to_owned());
+        }
         Ok(Self {
             host,
             state: std::cell::RefCell::new(state),
@@ -96,11 +99,9 @@ fn unconfigured() -> Refusal {
 fn apply_refusal(error: ApplyError) -> Refusal {
     match error {
         ApplyError::Check(message) => {
-            Refusal::new(400, format!("sing-box check 不通过，没有应用: {message}"))
+            Refusal::new(400, format!("代理配置校验不通过，没有应用: {message}"))
         }
-        ApplyError::Runtime(message) => {
-            Refusal::new(502, format!("应用到 sing-box 失败: {message}"))
-        }
+        ApplyError::Runtime(message) => Refusal::new(502, format!("应用到代理内核失败: {message}")),
     }
 }
 
@@ -147,6 +148,7 @@ fn selections(state: &ProxyState) -> Selections {
 async fn run_apply(
     guard: Arc<ApplyGuard>,
     host: Host,
+    switching_from: Option<Host>,
     bytes: Vec<u8>,
     secret: String,
     chosen: (Selections, Selections),
@@ -154,7 +156,10 @@ async fn run_apply(
 ) -> Result<(), ApplyError> {
     tokio::task::spawn_blocking(move || {
         let _guard = guard;
-        let result = sb::apply_blocking(&host, &bytes, &secret, &chosen.0, &chosen.1);
+        let result = match switching_from {
+            Some(old) => sb::switch_blocking(&old, &host, &bytes, &secret, &chosen.0, &chosen.1),
+            None => sb::apply_blocking(&host, &bytes, &secret, &chosen.0, &chosen.1),
+        };
         record(
             &trigger,
             true,
@@ -206,7 +211,10 @@ impl AtomRules {
     }
 
     pub(crate) fn proxy_host(&self) -> Option<&Host> {
-        self.proxy.as_ref().map(|proxy| &proxy.host)
+        let proxy = self.proxy.as_ref()?;
+        proxy
+            .host
+            .for_backend(proxy.state.borrow().settings.backend)
     }
 
     /// Takes both exclusions (409 when either is held).
@@ -260,26 +268,28 @@ impl AtomRules {
             &self.resolver_for(state),
             secret,
         )
-        .map_err(|message| Refusal::new(500, format!("生成 sing-box 配置失败: {message}")))
+        .map_err(|message| {
+            let status = if host.backend == Backend::Mihomo { 400 } else { 500 };
+            Refusal::new(status, format!("生成代理配置失败: {message}"))
+        })
     }
 
     /// Whether the running file is what the current state generates.
     pub(crate) fn in_sync(&self) -> Option<bool> {
-        let proxy = self.proxy.as_ref()?;
-        let live = sb::read_live(&proxy.host)?;
+        let host = self.proxy_host()?;
+        let live = sb::read_live(host)?;
         let secret = sb::secret_of(&live)?;
-        let state = proxy.state.borrow().clone();
+        let state = self.proxy_state()?;
         let rules = self.state.borrow().clone();
         Some(
-            self.generate(&proxy.host, &state, &rules, &secret)
+            self.generate(host, &state, &rules, &secret)
                 .is_ok_and(|bytes| bytes == live),
         )
     }
 
     /// The secret of the running configuration.
     pub(crate) fn live_secret(&self) -> Option<String> {
-        let proxy = self.proxy.as_ref()?;
-        sb::read_live(&proxy.host)
+        sb::read_live(self.proxy_host()?)
             .as_deref()
             .and_then(sb::secret_of)
     }
@@ -361,7 +371,9 @@ impl AtomRules {
             return Ok(());
         };
         let current_range = owner.state.borrow().settings.fakeip_range.clone();
-        let range = proxy.map_or(current_range.as_str(), |next| next.settings.fakeip_range.as_str());
+        let range = proxy.map_or(current_range.as_str(), |next| {
+            next.settings.fakeip_range.as_str()
+        });
         let range_changed = range != current_range;
         let current = self.state.borrow();
         for rule in &rules.unwrap_or(&current).rules {
@@ -406,7 +418,14 @@ impl AtomRules {
         self.check_fakeip_overlap(rules.as_ref(), proxy.as_ref())?;
         self.compile(&next_rules, Some(&next_proxy))?;
         let in_memory = self.root.as_os_str().is_empty();
-        let host = owner.host.clone();
+        let current_proxy = owner.state.borrow().clone();
+        let host = owner
+            .host
+            .for_backend(next_proxy.settings.backend)
+            .ok_or_else(|| Refusal::new(400, "所选代理内核未配置"))?
+            .clone();
+        let switched = next_proxy.settings.backend != current_proxy.settings.backend;
+        let old_host = switched.then(|| self.proxy_host().expect("active host").clone());
         let live = sb::read_live(&host);
         let unchanged = match live.as_deref().and_then(sb::secret_of) {
             Some(secret) => {
@@ -418,8 +437,7 @@ impl AtomRules {
             }
             None => false,
         };
-        let applied = !in_memory && !unchanged;
-        let current_proxy = owner.state.borrow().clone();
+        let applied = !in_memory && (switched || !unchanged);
         let exclusive = if applied {
             let exclusive = self.exclusive()?;
             let secret = sb::new_secret();
@@ -427,6 +445,7 @@ impl AtomRules {
             let result = run_apply(
                 Arc::clone(&exclusive.guard),
                 host.clone(),
+                old_host.clone(),
                 bytes,
                 secret,
                 (selections(&next_proxy), selections(&current_proxy)),
@@ -450,7 +469,12 @@ impl AtomRules {
                         let old_selections = selections(&current_proxy);
                         tokio::task::spawn_blocking(move || {
                             let _guard = guard;
-                            sb::rollback(&host, old.as_deref(), &old_selections)
+                            match old_host {
+                                Some(old_host) => {
+                                    sb::switch_back(&old_host, &host, &old_selections)
+                                }
+                                None => sb::rollback(&host, old.as_deref(), &old_selections),
+                            }
                         })
                         .await
                         .unwrap_or_else(|error| format!("回滚任务异常结束: {error}"))
@@ -588,7 +612,7 @@ impl AtomRules {
                 continue;
             }
             let secret = self.live_secret().ok_or("sing-box 配置未就绪")?;
-            let host = owner.host.clone();
+            let host = self.proxy_host().ok_or("代理内核没有配置")?.clone();
             let path = entry.path();
             let group = id.clone();
             tokio::task::spawn_blocking(move || sb::rebind_removed_group(&host, &secret, &group))
@@ -623,7 +647,7 @@ impl AtomRules {
         next.select(id, member)?;
         next.version += 1;
         if !self.root.as_os_str().is_empty() {
-            let host = owner.host.clone();
+            let host = self.proxy_host().ok_or_else(unconfigured)?.clone();
             let live = sb::read_live(&host)
                 .ok_or_else(|| Refusal::new(409, "sing-box 还没有应用过配置"))?;
             let secret = sb::secret_of(&live)
@@ -723,7 +747,7 @@ impl AtomRules {
         let secret = self
             .live_secret()
             .ok_or_else(|| Refusal::new(409, "sing-box 还没有应用过配置"))?;
-        let host = owner.host.clone();
+        let host = self.proxy_host().ok_or_else(unconfigured)?.clone();
         let tag = id.to_owned();
         tokio::task::spawn_blocking(move || {
             if node {
@@ -750,11 +774,13 @@ impl AtomRules {
         let secret = sb::new_secret();
         let state = owner.state.borrow().clone();
         let rules = self.state.borrow().clone();
-        let bytes = self.generate(&owner.host, &state, &rules, &secret)?;
+        let host = self.proxy_host().ok_or_else(unconfigured)?.clone();
+        let bytes = self.generate(&host, &state, &rules, &secret)?;
         let chosen = (selections(&state), selections(&state));
         let result = run_apply(
             Arc::clone(&exclusive.guard),
-            owner.host.clone(),
+            host,
+            None,
             bytes,
             secret,
             chosen,
@@ -787,14 +813,46 @@ impl AtomRules {
             );
             return;
         };
-        if self.in_sync() == Some(true) {
-            record("startup", false, None);
+        let Some(host) = self.proxy_host().cloned() else {
             return;
+        };
+        // Reconcile services with the saved selection after a crash mid-switch.
+        if owner.host.mihomo.is_some() {
+            let other = match host.backend {
+                Backend::SingBox => Backend::Mihomo,
+                Backend::Mihomo => Backend::SingBox,
+            };
+            if let Some(other) = owner.host.for_backend(other).cloned() {
+                let result = tokio::task::spawn_blocking(move || sb::stop(&other)).await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        record("startup", false, Some(error));
+                        return;
+                    }
+                    Err(error) => {
+                        record("startup", false, Some(error.to_string()));
+                        return;
+                    }
+                }
+            }
+        }
+        if self.in_sync() == Some(true) {
+            if let Some(secret) = self.live_secret() {
+                let target = host.clone();
+                if tokio::task::spawn_blocking(move || sb::ready(&target, &secret))
+                    .await
+                    .unwrap_or(false)
+                {
+                    record("startup", false, None);
+                    return;
+                }
+            }
         }
         let secret = sb::new_secret();
         let state = owner.state.borrow().clone();
         let rules = self.state.borrow().clone();
-        let bytes = match self.generate(&owner.host, &state, &rules, &secret) {
+        let bytes = match self.generate(&host, &state, &rules, &secret) {
             Ok(bytes) => bytes,
             Err(refusal) => {
                 record("startup", false, Some(refusal.message.clone()));
@@ -804,7 +862,8 @@ impl AtomRules {
         let chosen = (selections(&state), selections(&state));
         let result = run_apply(
             Arc::clone(&exclusive.guard),
-            owner.host.clone(),
+            host,
+            None,
             bytes,
             secret,
             chosen,

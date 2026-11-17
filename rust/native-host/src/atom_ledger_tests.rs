@@ -252,6 +252,9 @@ impl FakeDnsIn {
 
 fn host(dns_in: SocketAddr) -> crate::atom_singbox::Host {
     crate::atom_singbox::Host {
+        backend: crate::atom_proxy::Backend::SingBox,
+        stop: vec![],
+        mihomo: None,
         binary: "/bin/true".into(),
         dir: "/nonexistent".into(),
         reload: vec!["true".into()],

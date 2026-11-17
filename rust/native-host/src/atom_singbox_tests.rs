@@ -97,13 +97,20 @@ impl FakeSingbox {
                         for outbound in config["outbounds"].as_array().into_iter().flatten() {
                             let tag = outbound["tag"].as_str().unwrap_or("").to_owned();
                             let entry = match outbound["outbounds"].as_array() {
-                                Some(members) => json!({"type": "Selector", "now": members.first()}),
+                                Some(members) => {
+                                    json!({"type": "Selector", "now": members.first()})
+                                }
                                 None => json!({"type": "Trojan", "history":
                                     [{"time": "2026-11-10T00:00:00Z", "delay": 88}]}),
                             };
                             proxies.insert(tag, entry);
                         }
                         ("200 OK", json!({ "proxies": proxies }).to_string())
+                    } else if path == "/configs" {
+                        let config: Value = yaml_serde::from_slice(&live).unwrap();
+                        ("200 OK", config.to_string())
+                    } else if path == "/atom/ready" || path == "/cache/fakeip/flush" {
+                        ("204 No Content", String::new())
                     } else if method == "GET" && path == "/connections" {
                         (
                             "200 OK",
@@ -153,6 +160,9 @@ impl FakeSingbox {
             });
         }
         let host = Host {
+            backend: crate::atom_proxy::Backend::SingBox,
+            stop: vec![],
+            mihomo: None,
             binary,
             dir: dir.join("sb"),
             reload: vec![reload.display().to_string()],
@@ -354,6 +364,9 @@ fn sample_state() -> ProxyState {
 
 fn generated(state: &ProxyState, ip_rules: &[IpRule]) -> Value {
     let fake_host = Host {
+        backend: crate::atom_proxy::Backend::SingBox,
+        stop: vec![],
+        mihomo: None,
         binary: "/bin/true".into(),
         dir: "/tmp/sb".into(),
         reload: vec!["true".into()],
@@ -576,4 +589,78 @@ fn the_configuration_file_is_owner_only() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn mihomo_switch_checks_before_stopping_and_restores_singbox_on_failure() {
+    use crate::atom_proxy::Backend;
+
+    let fake = FakeSingbox::start("mihomo-switch");
+    let running = fake.host.dir.join("running.json");
+    let stop = vec![
+        "rm".to_owned(),
+        "-f".to_owned(),
+        running.display().to_string(),
+    ];
+    let old = Host {
+        stop: stop.clone(),
+        ..fake.host.clone()
+    };
+    let mihomo = Host {
+        backend: Backend::Mihomo,
+        dir: fake.dir.join("mh"),
+        stop,
+        reload: vec![
+            "cp".to_owned(),
+            fake.dir.join("mh/config.yaml").display().to_string(),
+            running.display().to_string(),
+        ],
+        ..fake.host.clone()
+    };
+    let state = ProxyState::default();
+    let resolver = "udp://223.5.5.5";
+    let first = generate(&old, &state, &[], resolver, "old").unwrap();
+    apply_blocking(&old, &first, "old", &[], &[]).unwrap();
+
+    assert!(matches!(
+        switch_blocking(&old, &mihomo, b"BADCHECK", "new", &[], &[]),
+        Err(ApplyError::Check(_))
+    ));
+    assert_eq!(std::fs::read(&running).unwrap(), first);
+
+    let rule = IpRule {
+        cidrs: vec!["192.0.2.0/24".into(), "2001:db8::/32".into()],
+        ports: vec![53],
+        port_ranges: vec!["1000:1010".into()],
+        networks: vec!["udp".into()],
+        action: crate::atom_rules::Action::Direct,
+    };
+    let next = generate(&mihomo, &state, &[rule], resolver, "new").unwrap();
+    let value: Value = yaml_serde::from_slice(&next).unwrap();
+    assert_eq!(value["dns"]["atom-fake-ip-final"], "final");
+    assert_eq!(
+        value["rules"][0],
+        "AND,((OR,((IP-CIDR,192.0.2.0/24,no-resolve),(IP-CIDR6,2001:db8::/32,no-resolve))),(OR,((DST-PORT,53),(DST-PORT,1000-1010))),(NETWORK,udp)),DIRECT"
+    );
+    if let Some(path) = std::env::var_os("ATOM_TEST_MIHOMO") {
+        let real = Host {
+            binary: path.into(),
+            ..mihomo.clone()
+        };
+        check(&real, &next).unwrap();
+    }
+    switch_blocking(&old, &mihomo, &next, "new", &[], &[]).unwrap();
+    assert_eq!(std::fs::read(&running).unwrap(), next);
+    assert!(switch_back(&old, &mihomo, &[]).contains("已回滚"));
+    assert_eq!(std::fs::read(&running).unwrap(), first);
+
+    let failed = Host {
+        reload: vec!["false".to_owned()],
+        ..mihomo
+    };
+    assert!(matches!(
+        switch_blocking(&old, &failed, &next, "new", &[], &[]),
+        Err(ApplyError::Runtime(_))
+    ));
+    assert_eq!(std::fs::read(&running).unwrap(), first);
 }

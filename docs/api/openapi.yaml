@@ -1147,8 +1147,8 @@ paths:
       tags: [settings]
       summary: Change any of the settings
       description: |
-        A new FakeIP range makes sing-box drop every FakeIP mapping and binding;
-        the caches and the binding ledger are emptied. A new mixed port also
+        Switching proxy backends or changing the FakeIP range clears
+        the AtomDNS caches and binding ledger. A new mixed port also
         moves AtomDNS's `main_proxy` when it pointed at `127.0.0.1:<old port>`
         (that reloads AtomDNS's configuration). The TTL caps (1 to 86400
         seconds) do not touch sing-box.
@@ -1161,6 +1161,9 @@ paths:
               type: object
               additionalProperties: false
               properties:
+                backend:
+                  type: string
+                  enum: [sing-box, mihomo]
                 fakeip_range:
                   type: string
                 resolver:
@@ -3694,6 +3697,9 @@ components:
       properties:
         version:
           $ref: "#/components/schemas/Version"
+        backend:
+          type: string
+          enum: [sing-box, mihomo]
         fakeip_range:
           type: string
           description: IPv4 prefix, length 8 to 24 (default 28.0.0.0/8).
@@ -3849,6 +3855,9 @@ components:
           properties:
             version:
               type: string
+        backend:
+          type: string
+          enum: [sing-box, mihomo]
         singbox:
           type: object
           properties:
@@ -3857,7 +3866,7 @@ components:
             version:
               type: string
               nullable: true
-              description: The `version` of Clash API `/version` (`sing-box 1.14.4-atom`); null when sing-box does not answer.
+              description: The active proxy backend and its version are reported; version is null when it does not answer.
             in_sync:
               type: boolean
               description: The running file is the one the current state generates.
