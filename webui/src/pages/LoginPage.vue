@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import BrandLogo from '../components/BrandLogo.vue'
 import { ref } from 'vue'
 import { ApiError, describe } from '../api/client'
 import { loadAuth, login } from '../composables/auth'
@@ -27,7 +28,7 @@ async function submit() {
 <template>
   <div class="login">
     <form class="card grid" style="gap: 12px" @submit.prevent="submit">
-      <div class="brand"><i>a</i>atom</div>
+      <div class="brand"><BrandLogo /></div>
       <div class="field">
         <label for="login-user">用户名</label>
         <input id="login-user" v-model="username" class="inp" autocomplete="username" autofocus :disabled="busy" />

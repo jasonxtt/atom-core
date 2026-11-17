@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import BrandLogo from './components/BrandLogo.vue'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { navItems } from './nav'
@@ -46,7 +47,7 @@ usePoll(async () => {
   <LoginPage v-if="ready && needLogin" />
   <div v-else-if="ready" class="shell">
     <aside class="side" :class="{ open: drawer }">
-      <div class="brand"><i>a</i>atom</div>
+      <div class="brand"><BrandLogo /></div>
       <RouterLink v-for="item in navItems" :key="item.path" :to="item.path" class="nav" :class="{ on: active(item.path) }">
         <svg viewBox="0 0 24 24" v-html="item.icon"></svg>{{ item.label }}
       </RouterLink>
