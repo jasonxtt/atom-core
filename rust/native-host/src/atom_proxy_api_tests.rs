@@ -1486,3 +1486,45 @@ fn catalog_entries_become_managed_rulesets_while_rules_name_them() {
     assert_eq!(api.call("DELETE", &format!("/api/v1/atom/rules/{other}"), "").0, 200);
     assert!(rules.ruleset("meta:netflix").is_none(), "unpinned and unused: gone");
 }
+
+#[test]
+fn provider_definitions_remain_private_and_groups_degrade_on_singbox() {
+    let mut api = Api::new("providers");
+    let (status, provider) = api.call(
+        "POST",
+        "/api/v1/atom/providers",
+        r#"{"name":"机场","url":"https://example.test/sub?token=private-token","interval":600}"#,
+    );
+    assert_eq!(status, 201, "{provider}");
+    let id = provider["provider"]["id"].as_str().unwrap();
+    assert!(id.starts_with("p-"));
+    assert!(!provider.to_string().contains("private-token"));
+    let (status, _) = api.call(
+        "POST", "/api/v1/atom/providers",
+        &format!(r#"{{"name":"Loop","url":"https://example.test/sub","download_via":"{id}"}}"#),
+    );
+    assert_eq!(status, 400);
+    let path = format!("/api/v1/atom/providers/{id}");
+    let (status, changed) = api.call("PUT", &path, r#"{"name":"改名","interval":900}"#);
+    assert_eq!(status, 200, "{changed}");
+    assert!(crate::atom_proxy::load(&api.root, &[], None).unwrap().providers[0].settings.url.contains("private-token"));
+    assert_eq!(api.call("POST", &format!("{path}/refresh"), "{}").0, 409);
+    let (status, group) = api.call(
+        "POST",
+        "/api/v1/atom/groups",
+        &format!(r#"{{"name":"Failover","type":"fallback","providers":["{id}"]}}"#),
+    );
+    assert_eq!(status, 201, "{group}");
+    let group_id = group["group"]["id"].as_str().unwrap();
+    assert_eq!(group["group"]["effective_type"], "urltest");
+    assert_eq!(group["group"]["empty"], true);
+    assert_eq!(api.outbound(group_id)["type"], "urltest");
+    assert_eq!(api.outbound(group_id)["outbounds"], serde_json::json!(["block"]));
+    assert_eq!(api.call("DELETE", &path, "").0, 409);
+    api.restart();
+    let (_, settings) = api.call("GET", "/api/v1/atom/settings", "");
+    assert_eq!(settings["warnings"]["inactive_providers"][0], id);
+    assert_eq!(settings["warnings"]["downgraded_groups"][0], group_id);
+    assert_eq!(api.call("DELETE", &format!("/api/v1/atom/groups/{group_id}"), "").0, 200);
+    assert_eq!(api.call("DELETE", &path, "").0, 200);
+}

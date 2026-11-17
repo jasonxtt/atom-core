@@ -98,7 +98,11 @@ fn node_view(state: &ProxyState, node: &crate::atom_proxy::Node) -> Value {
 fn group_view(state: &ProxyState, group: &crate::atom_proxy::Group) -> Value {
     let mut value = serde_json::to_value(group).unwrap_or(Value::Null);
     if let Value::Object(map) = &mut value {
-        map.insert("empty".into(), json!(state.members_of(group).is_empty()));
+        map.insert("empty".into(), json!(state.group_empty(group)));
+        if state.settings.backend == crate::atom_proxy::Backend::SingBox && group.kind.mihomo_only()
+        {
+            map.insert("effective_type".into(), json!("urltest"));
+        }
         map.insert("matched".into(), json!(state.filtered_nodes(group)));
         map.insert(
             "builtin".into(),
@@ -120,9 +124,26 @@ fn final_view(state: &ProxyState) -> Value {
     })
 }
 
+fn backend_warnings(state: &ProxyState) -> Value {
+    let mut groups = Vec::new();
+    let mut providers = Vec::new();
+    if state.settings.backend == crate::atom_proxy::Backend::SingBox {
+        groups.extend(
+            state
+                .groups
+                .iter()
+                .filter(|group| group.kind.mihomo_only())
+                .map(|group| &group.id),
+        );
+        providers.extend(state.providers.iter().map(|provider| &provider.id));
+    }
+    json!({"empty_groups":state.empty_groups(), "downgraded_groups":groups, "inactive_providers":providers})
+}
+
 fn settings_view(rules: &AtomRules, state: &ProxyState) -> Value {
     json!({
         "version": state.version,
+        "warnings": backend_warnings(state),
         "backend": state.settings.backend,
         "fakeip_range": state.settings.fakeip_range,
         "resolver": state.settings.resolver,
@@ -501,11 +522,11 @@ async fn with_clash<T: Send + 'static>(
 /// failed). The Clash API's answer is read and reduced on the blocking pool.
 async fn runtime(rules: &AtomRules) -> Answer {
     let current = state(rules);
-    let group_ids: Vec<String> = current
+    let group_ids: Vec<(String, bool)> = current
         .groups
         .iter()
-        .map(|group| group.id.clone())
-        .chain([FINAL.to_owned()])
+        .map(|group| (group.id.clone(), !group.providers.is_empty()))
+        .chain([(FINAL.to_owned(), false)])
         .collect();
     let node_ids: Vec<String> = current.nodes.iter().map(|node| node.id.clone()).collect();
     let value = with_clash(rules, move |host, secret| {
@@ -513,9 +534,14 @@ async fn runtime(rules: &AtomRules) -> Answer {
         let proxies = value.get("proxies").and_then(Value::as_object);
         let entry = |id: &str| proxies.and_then(|proxies| proxies.get(id));
         let mut groups = Map::new();
-        for id in group_ids {
-            if let Some(now) = entry(&id).and_then(|p| p.get("now")).and_then(Value::as_str) {
-                groups.insert(id, json!({ "now": now }));
+        for (id, has_providers) in group_ids {
+            if let Some(group) = entry(&id) {
+                let now = group.get("now").and_then(Value::as_str);
+                if has_providers && host.backend == crate::atom_proxy::Backend::Mihomo {
+                    groups.insert(id, json!({"now":now, "members":group["all"]}));
+                } else if let Some(now) = now {
+                    groups.insert(id, json!({"now":now}));
+                }
             }
         }
         let mut nodes = Map::new();
@@ -570,9 +596,12 @@ pub(crate) async fn outbound_chain(rules: &AtomRules, start: &str) -> Result<Vec
             // Named by the UI ("兜底分组").
             (id.clone(), "final")
         } else if let Some(group) = current.group(&id) {
-            let kind = match group.kind {
-                crate::atom_proxy::GroupKind::Selector => "selector",
-                crate::atom_proxy::GroupKind::Urltest => "urltest",
+            let kind = if current.settings.backend == crate::atom_proxy::Backend::SingBox
+                && group.kind.mihomo_only()
+            {
+                "urltest"
+            } else {
+                group.kind.name()
             };
             (group.name.clone(), kind)
         } else if let Some(node) = current.nodes.iter().find(|node| node.id == id) {
@@ -580,7 +609,10 @@ pub(crate) async fn outbound_chain(rules: &AtomRules, start: &str) -> Result<Vec
         } else {
             (id.clone(), "other")
         };
-        let group = matches!(kind, "final" | "selector" | "urltest");
+        let group = matches!(
+            kind,
+            "final" | "selector" | "urltest" | "fallback" | "load-balance"
+        );
         chain.push(json!({ "id": id, "name": name, "kind": kind }));
         // A group's member is never itself (sing-box refuses loops); the
         // bound only guards a broken answer.
@@ -751,6 +783,152 @@ async fn put_settings(
     reply_json(200, &view)
 }
 
+fn provider_view(provider: &crate::atom_proxy::ProxyProvider) -> Value {
+    json!({
+        "id": provider.id,
+        "name": provider.settings.name,
+        "interval": provider.settings.interval,
+        "filter": provider.settings.filter,
+        "download_via": provider.settings.download_via,
+    })
+}
+
+async fn providers(
+    rules: &AtomRules,
+    method: &str,
+    segments: &[&str],
+    query: Option<&str>,
+    bytes: &[u8],
+) -> Answer {
+    use crate::atom_proxy::{Backend, ProviderInput, ProxyProvider};
+
+    let mut next = state(rules);
+    match (method, segments) {
+        ("GET", []) => {
+            let providers: Vec<_> = next.providers.iter().map(provider_view).collect();
+            return Ok(reply_json(
+                200,
+                &json!({"version":next.version, "active":next.settings.backend == Backend::Mihomo, "providers":providers}),
+            ));
+        }
+        ("POST", []) | ("PUT", [_]) => {
+            let (version, mut map) = object(bytes)?;
+            rules.check_proxy_version(version).map_err(|e| fail(&e))?;
+            let existing = if let [id] = segments {
+                Some(
+                    next.providers
+                        .iter()
+                        .position(|provider| provider.id == *id)
+                        .ok_or_else(|| error(404, "订阅不存在"))?,
+                )
+            } else {
+                None
+            };
+            // A replacement can keep the secret without reading it from the API.
+            if let Some(at) = existing {
+                if !map.contains_key("url") {
+                    map.insert("url".into(), json!(next.providers[at].settings.url));
+                }
+            }
+            let mut settings: ProviderInput = from_map(map)?;
+            settings.url = settings.url.trim().to_owned();
+            settings.filter = settings.filter.trim().to_owned();
+            let id = existing.map_or_else(
+                || {
+                    crate::atom_rules::new_id("p-", &|id| {
+                        next.providers.iter().any(|entry| entry.id == id)
+                    })
+                },
+                |at| next.providers[at].id.clone(),
+            );
+            let provider = ProxyProvider { id, settings };
+            if let Some(at) = existing {
+                next.providers[at] = provider.clone();
+            } else {
+                next.providers.push(provider.clone());
+            }
+            next.version += 1;
+            let version = next.version;
+            rules
+                .transact(None, Some(next), "providers")
+                .await
+                .map_err(|e| fail(&e))?;
+            return Ok(reply_json(
+                if existing.is_some() { 200 } else { 201 },
+                &json!({"version":version, "provider":provider_view(&provider)}),
+            ));
+        }
+        _ => {}
+    }
+    let id = match (method, segments) {
+        ("GET" | "DELETE", [id]) | ("GET", [id, "nodes"]) | ("POST", [id, "refresh"]) => *id,
+        _ => return Err(error(405, "method not allowed")),
+    };
+    let provider = next
+        .providers
+        .iter()
+        .find(|provider| provider.id == id)
+        .ok_or_else(|| error(404, "订阅不存在"))?;
+    match (method, segments) {
+        ("GET", [_]) => Ok(reply_json(
+            200,
+            &json!({"version":next.version, "provider":provider_view(provider)}),
+        )),
+        ("DELETE", [_]) => {
+            rules
+                .check_proxy_version(query_version(query)?)
+                .map_err(|e| fail(&e))?;
+            let groups: Vec<_> = next
+                .groups
+                .iter()
+                .filter(|group| group.providers.iter().any(|provider| provider == id))
+                .map(|group| group.id.clone())
+                .collect();
+            if !groups.is_empty() {
+                return Err(reply_json(
+                    409,
+                    &json!({"error":"订阅仍被节点组引用", "groups":groups}),
+                ));
+            }
+            next.providers.retain(|provider| provider.id != id);
+            next.version += 1;
+            let version = next.version;
+            rules
+                .transact(None, Some(next), "providers")
+                .await
+                .map_err(|e| fail(&e))?;
+            Ok(reply_json(200, &json!({"version":version, "deleted":id})))
+        }
+        ("GET", [_, "nodes"]) => {
+            if next.settings.backend != Backend::Mihomo {
+                return Ok(reply_json(
+                    200,
+                    &json!({"id":id, "active":false, "nodes":[]}),
+                ));
+            }
+            let id = id.to_owned();
+            let view = with_clash(rules, move |host, secret| {
+                let value = crate::atom_singbox::provider(host, secret, &id)?;
+                let prefix = format!("{id}/");
+                let nodes: Vec<_> = value["proxies"].as_array().into_iter().flatten().filter_map(|node| {
+                    let tag = node["name"].as_str()?;
+                    let name = tag.strip_prefix(&prefix)?;
+                    let last = node["history"].as_array().and_then(|history| history.last());
+                    Some(json!({"id":tag, "name":name, "type":node["type"], "alive":node["alive"],
+                        "delay":last.and_then(|sample| sample.get("delay"))}))
+                }).collect();
+                Ok(json!({"id":id, "active":true, "updated_at":value["updatedAt"], "nodes":nodes}))
+            }).await?;
+            Ok(reply_json(200, &view))
+        }
+        ("POST", [_, "refresh"]) => {
+            rules.refresh_provider(id).await.map_err(|e| fail(&e))?;
+            Ok(reply_json(200, &json!({"id":id})))
+        }
+        _ => Err(error(405, "method not allowed")),
+    }
+}
+
 // ---- status / apply -------------------------------------------------------
 
 async fn status(rules: &AtomRules) -> Reply {
@@ -788,7 +966,7 @@ async fn status(rules: &AtomRules) -> Reply {
             },
             "last_apply": crate::atom_rules::last_apply(),
             "bindings": crate::atom_ledger::view(&rules.bindings),
-            "warnings": {"empty_groups": current.empty_groups()},
+            "warnings": backend_warnings(&current),
         }),
     )
 }
@@ -807,8 +985,16 @@ pub(crate) async fn handle(
     let known = matches!(
         segments.first(),
         Some(
-            &("nodes" | "groups" | "final" | "settings" | "status" | "apply" | "runtime"
-                | "connections" | "system")
+            &("nodes"
+                | "providers"
+                | "groups"
+                | "final"
+                | "settings"
+                | "status"
+                | "apply"
+                | "runtime"
+                | "connections"
+                | "system")
         )
     );
     if !known {
@@ -833,6 +1019,11 @@ pub(crate) async fn handle(
         return error(404, "没有配置 sing-box（atom_rules 的 singbox 段）");
     }
     let current = || state(rules);
+    if let ["providers", rest @ ..] = segments {
+        return providers(rules, method, rest, query, body)
+            .await
+            .unwrap_or_else(|reply| reply);
+    }
     let answer: Answer = match (method, segments) {
         ("GET", ["nodes"]) => {
             let state = current();

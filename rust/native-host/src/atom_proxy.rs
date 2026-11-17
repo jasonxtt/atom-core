@@ -106,6 +106,57 @@ pub(crate) struct Node {
 pub(crate) enum GroupKind {
     Selector,
     Urltest,
+    Fallback,
+    #[serde(rename = "load-balance")]
+    LoadBalance,
+}
+
+impl GroupKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Selector => "selector",
+            Self::Urltest => "urltest",
+            Self::Fallback => "fallback",
+            Self::LoadBalance => "load-balance",
+        }
+    }
+
+    pub(crate) fn mihomo_only(self) -> bool {
+        matches!(self, Self::Fallback | Self::LoadBalance)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum BalanceStrategy {
+    #[default]
+    ConsistentHashing,
+    RoundRobin,
+    StickySessions,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProviderInput {
+    pub(crate) name: String,
+    pub(crate) url: String,
+    #[serde(default = "provider_interval")]
+    pub(crate) interval: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) filter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) download_via: Option<String>,
+}
+
+fn provider_interval() -> u32 {
+    3600
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProxyProvider {
+    pub(crate) id: String,
+    pub(crate) settings: ProviderInput,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +168,10 @@ pub(crate) struct Group {
     pub(crate) kind: GroupKind,
     /// Node and group IDs, in order.
     pub(crate) members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) strategy: Option<BalanceStrategy>,
     /// A regular expression over node names (case-insensitive): every
     /// matching node is a member too, and nodes added later join on their
     /// own. "" = none.
@@ -211,6 +266,8 @@ pub(crate) struct ProxyState {
     pub(crate) version: u64,
     pub(crate) nodes: Vec<Node>,
     pub(crate) groups: Vec<Group>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) providers: Vec<ProxyProvider>,
     #[serde(rename = "final")]
     pub(crate) final_group: Final,
     pub(crate) settings: Settings,
@@ -227,11 +284,14 @@ impl Default for ProxyState {
         Self {
             version: 0,
             nodes: Vec::new(),
+            providers: Vec::new(),
             groups: vec![Group {
                 id: DEFAULT_GROUP.to_owned(),
                 name: DEFAULT_GROUP_NAME.to_owned(),
                 kind: GroupKind::Selector,
                 members: Vec::new(),
+                providers: Vec::new(),
+                strategy: None,
                 filter: String::new(),
                 order: Vec::new(),
                 selected: String::new(),
@@ -258,6 +318,10 @@ pub(crate) struct GroupInput {
     pub(crate) kind: GroupKind,
     #[serde(default)]
     pub(crate) members: Vec<String>,
+    #[serde(default)]
+    pub(crate) providers: Vec<String>,
+    #[serde(default)]
+    pub(crate) strategy: Option<BalanceStrategy>,
     #[serde(default)]
     pub(crate) filter: String,
     #[serde(default)]
@@ -638,9 +702,60 @@ impl ProxyState {
         if !groups.contains(DEFAULT_GROUP) {
             return Err(invalid("内置组“默认代理”不能删除"));
         }
+        if self.providers.len() > 64 {
+            return Err(invalid("订阅数量最多为 64"));
+        }
+        let mut providers = BTreeSet::new();
+        for provider in &self.providers {
+            if !is_id(&provider.id, "p-") || !providers.insert(provider.id.as_str()) {
+                return Err(invalid("订阅 ID 无效或重复"));
+            }
+            check_name("订阅", &provider.settings.name)?;
+            let url = url::Url::parse(&provider.settings.url)
+                .ok()
+                .filter(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some());
+            if url.is_none() || provider.settings.url.len() > 8192 {
+                return Err(invalid(format!(
+                    "{}: 订阅 URL 必须是 HTTP 或 HTTPS",
+                    provider.id
+                )));
+            }
+            if !(60..=604800).contains(&provider.settings.interval) {
+                return Err(invalid(format!(
+                    "{}: 订阅刷新间隔须为 60–604800 秒",
+                    provider.id
+                )));
+            }
+            if provider.settings.download_via.as_deref().is_some_and(|id| !nodes.contains(id)) {
+                return Err(invalid(format!("{}: 订阅下载代理必须是已有的手动节点", provider.id)));
+            }
+            // These expressions use Mihomo's regexp2 syntax. Validate the
+            // syntax with its config check when applying the provider.
+            if provider.settings.filter.len() > MAX_FILTER_LEN {
+                return Err(invalid(format!("{}: 筛选正则最长 {MAX_FILTER_LEN} 字节", provider.id)));
+            }
+        }
         for group in &self.groups {
             check_name("节点组", &group.name)?;
             check_members(&group.id, &group.members, &nodes, &groups)?;
+            let mut used = BTreeSet::new();
+            for provider in &group.providers {
+                if !providers.contains(provider.as_str()) || !used.insert(provider) {
+                    return Err(invalid(format!(
+                        "{}: 订阅 {provider} 不存在或重复",
+                        group.id
+                    )));
+                }
+            }
+            if group.strategy.is_some() && group.kind != GroupKind::LoadBalance {
+                return Err(invalid(format!(
+                    "{}: strategy 只适用于 load-balance",
+                    group.id
+                )));
+            }
+            if group.kind.mihomo_only() && group.tolerance.is_some() {
+                return Err(invalid(format!("{}: tolerance 只适用于 urltest", group.id)));
+            }
             compile_filter(&group.filter)
                 .map_err(|message| invalid(format!("{}: {message}", group.id)))?;
             match group.kind {
@@ -654,6 +769,7 @@ impl ProxyState {
                     }
                     if !group.selected.is_empty()
                         && !self.members_of(group).contains(&group.selected)
+                        && !Self::provider_member(group, &group.selected)
                     {
                         return Err(invalid(format!(
                             "{}: 选中的 `{}` 不是成员",
@@ -661,12 +777,9 @@ impl ProxyState {
                         )));
                     }
                 }
-                GroupKind::Urltest => {
+                GroupKind::Urltest | GroupKind::Fallback | GroupKind::LoadBalance => {
                     if !group.selected.is_empty() {
-                        return Err(invalid(format!(
-                            "{}: urltest 自动选择，不能指定选中",
-                            group.id
-                        )));
+                        return Err(invalid(format!("{}: 自动组不能指定选中", group.id)));
                     }
                     let url = group.url.as_deref().unwrap_or(DEFAULT_URL);
                     let parsed = url::Url::parse(url)
@@ -750,13 +863,24 @@ impl ProxyState {
         let mut empty: Vec<String> = self
             .groups
             .iter()
-            .filter(|group| self.members_of(group).is_empty())
+            .filter(|group| self.group_empty(group))
             .map(|group| group.id.clone())
             .collect();
         if self.final_group.members.is_empty() {
             empty.push(FINAL.to_owned());
         }
         empty
+    }
+
+    pub(crate) fn group_empty(&self, group: &Group) -> bool {
+        self.members_of(group).is_empty()
+            && (self.settings.backend == Backend::SingBox || group.providers.is_empty())
+    }
+
+    pub(crate) fn provider_member(group: &Group, member: &str) -> bool {
+        member.split_once('/').is_some_and(|(id, name)| {
+            !name.is_empty() && group.providers.iter().any(|provider| provider == id)
+        })
     }
 
     /// The nodes whose names the group's filter matches, in node order.
@@ -864,7 +988,10 @@ impl ProxyState {
         // it falls back to the first member.
         for at in 0..self.groups.len() {
             let group = &self.groups[at];
-            if !group.selected.is_empty() && !self.members_of(group).contains(&group.selected) {
+            if !group.selected.is_empty()
+                && !self.members_of(group).contains(&group.selected)
+                && !Self::provider_member(group, &group.selected)
+            {
                 self.groups[at].selected.clear();
             }
         }
@@ -873,6 +1000,9 @@ impl ProxyState {
 
     /// Removes a node; groups and Final drop it from their members.
     pub(crate) fn remove_node(&mut self, id: &str) -> Result<(), Refusal> {
+        if self.providers.iter().any(|provider| provider.settings.download_via.as_deref() == Some(id)) {
+            return Err(Refusal::new(409, format!("节点 `{id}` 仍用于下载订阅")));
+        }
         let before = self.nodes.len();
         self.nodes.retain(|node| node.id != id);
         if self.nodes.len() == before {
@@ -884,20 +1014,23 @@ impl ProxyState {
 
     fn group_from(id: String, input: GroupInput) -> Group {
         let urltest = input.kind == GroupKind::Urltest;
+        let automatic = input.kind != GroupKind::Selector;
         Group {
             id,
             name: input.name,
             kind: input.kind,
             members: input.members,
+            providers: input.providers,
+            strategy: input.strategy,
             filter: input.filter.trim().to_owned(),
             order: input.order,
             selected: input.selected,
-            url: if urltest {
+            url: if automatic {
                 Some(input.url.unwrap_or_else(|| DEFAULT_URL.to_owned()))
             } else {
                 input.url
             },
-            interval: if urltest {
+            interval: if automatic {
                 Some(
                     input
                         .interval
@@ -964,10 +1097,12 @@ impl ProxyState {
             .find(|group| group.id == id)
             .ok_or_else(|| Refusal::new(404, format!("节点组 `{id}` 不存在")))?;
         if group.kind != GroupKind::Selector {
-            return Err(invalid(format!("{id} 是 urltest，自动选择，不能手动切换")));
+            return Err(invalid(format!("{id} 是 {}，自动选择，不能手动切换", group.kind.name())));
         }
         let group = group.clone();
-        if !self.members_of(&group).iter().any(|m| m == member) {
+        if !self.members_of(&group).iter().any(|m| m == member)
+            && !(self.settings.backend == Backend::Mihomo && Self::provider_member(&group, member))
+        {
             return Err(invalid(format!("`{member}` 不是 {id} 的成员")));
         }
         if let Some(group) = self.groups.iter_mut().find(|group| group.id == id) {
@@ -983,7 +1118,10 @@ impl ProxyState {
         }
         let group = self.group(id)?;
         (group.kind == GroupKind::Selector).then(|| {
-            if group.selected.is_empty() {
+            if group.selected.is_empty()
+                || (self.settings.backend == Backend::SingBox
+                    && Self::provider_member(group, &group.selected))
+            {
                 self.members_of(group).first().cloned().unwrap_or_default()
             } else {
                 group.selected.clone()

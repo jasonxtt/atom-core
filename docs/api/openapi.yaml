@@ -820,6 +820,114 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /providers:
+    get:
+      summary: Saved mihomo subscriptions
+      operationId: listProxyProviders
+      responses:
+        "200":
+          description: Subscription definitions without URLs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: {$ref: "#/components/schemas/Version"}
+                  active: {type: boolean}
+                  providers:
+                    type: array
+                    items: {$ref: "#/components/schemas/ProxyProvider"}
+    post:
+      summary: Create a mihomo subscription
+      operationId: createProxyProvider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ProxyProviderInput"
+                - type: object
+                  required: [url]
+      responses:
+        "201": {$ref: "#/components/responses/ProxyProviderChange"}
+        default: {$ref: "#/components/responses/Error"}
+  /providers/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    get:
+      summary: Read a subscription definition
+      operationId: getProxyProvider
+      responses:
+        "200": {$ref: "#/components/responses/ProxyProviderChange"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      summary: Replace a subscription definition
+      operationId: updateProxyProvider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProxyProviderInput"}
+      responses:
+        "200": {$ref: "#/components/responses/ProxyProviderChange"}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      summary: Delete an unreferenced subscription
+      operationId: deleteProxyProvider
+      responses:
+        "200":
+          description: Subscription removed.
+        "409":
+          description: The subscription is still referenced or the request version is stale.
+        default: {$ref: "#/components/responses/Error"}
+  /providers/{id}/nodes:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    get:
+      summary: List nodes from the active mihomo subscription
+      operationId: listProxyProviderNodes
+      responses:
+        "200":
+          description: Subscription runtime view.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: string}
+                  active: {type: boolean}
+                  updated_at: {type: string, nullable: true}
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+                        type: {type: string, nullable: true}
+                        alive: {type: boolean, nullable: true}
+                        delay: {type: integer, nullable: true}
+        default: {$ref: "#/components/responses/Error"}
+  /providers/{id}/refresh:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    post:
+      summary: Ask mihomo to refresh a subscription
+      operationId: refreshProxyProvider
+      responses:
+        "200":
+          description: Subscription refreshed.
+        default: {$ref: "#/components/responses/Error"}
   /groups:
     get:
       tags: [groups]
@@ -2613,6 +2721,15 @@ components:
         type: integer
         minimum: 0
   responses:
+    ProxyProviderChange:
+      description: Public subscription definition and proxy-state version.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              version: {$ref: "#/components/schemas/Version"}
+              provider: {$ref: "#/components/schemas/ProxyProvider"}
     MaintenanceAccepted:
       description: Task started. Poll the maintenance overview for progress.
       content:
@@ -3375,7 +3492,7 @@ components:
                     type: string
                   kind:
                     type: string
-                    enum: [final, selector, urltest, node, other]
+                    enum: [final, selector, urltest, fallback, load-balance, node, other]
             chain_error:
               type: string
             rule:
@@ -3587,6 +3704,32 @@ components:
           description: Milliseconds, 100 to 30000 (default 5000).
         version:
           $ref: "#/components/schemas/Version"
+    ProxyProvider:
+      type: object
+      required: [id, name, interval, filter]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        interval: {type: integer}
+        filter: {type: string}
+        download_via: {type: string, nullable: true}
+    ProxyProviderInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: {type: string}
+        url:
+          type: string
+          writeOnly: true
+          description: HTTP(S) subscription URL. Omit it on PUT to retain the saved URL.
+        interval: {type: integer, minimum: 60, maximum: 604800, default: 3600}
+        filter: {type: string}
+        download_via:
+          type: string
+          nullable: true
+          description: An existing manually imported node ID. The default is a direct download.
+        version: {$ref: "#/components/schemas/Version"}
     GroupInput:
       type: object
       required: [name, type]
@@ -3595,12 +3738,20 @@ components:
           type: string
         type:
           type: string
-          enum: [selector, urltest]
+          enum: [selector, urltest, fallback, load-balance]
         members:
           type: array
           description: Node and group IDs, in order.
           items:
             type: string
+        providers:
+          type: array
+          items: {type: string}
+          description: IDs of Mihomo subscriptions used by the group.
+        strategy:
+          type: string
+          enum: [consistent-hashing, round-robin, sticky-sessions]
+          description: Load-balance only.
         filter:
           type: string
           description: |
@@ -3615,13 +3766,13 @@ components:
             type: string
         selected:
           type: string
-          description: selector only; "" is the first member.
+          description: Selector only. Use a static ID or a runtime provider node ID; "" is the first member.
         url:
           type: string
-          description: urltest only (default https://www.gstatic.com/generate_204).
+          description: Automatic groups (default https://www.gstatic.com/generate_204).
         interval:
           type: string
-          description: urltest only, like 30s, 3m, 1h30m (default 3m).
+          description: Automatic groups, like 30s, 3m, 1h30m (default 3m).
         tolerance:
           type: integer
           description: urltest only, milliseconds (default 50).
@@ -3636,12 +3787,20 @@ components:
           type: string
         type:
           type: string
-          enum: [selector, urltest]
+          enum: [selector, urltest, fallback, load-balance]
         members:
           type: array
           items:
             type: string
           description: The manually chosen members (not the filtered nodes).
+        providers:
+          type: array
+          items: {type: string}
+          description: IDs of Mihomo subscriptions used by the group.
+        strategy:
+          type: string
+          enum: [consistent-hashing, round-robin, sticky-sessions]
+          description: Load-balance only.
         filter:
           type: string
         order:
@@ -3661,6 +3820,10 @@ components:
           type: string
         tolerance:
           type: integer
+        effective_type:
+          type: string
+          enum: [urltest]
+          description: Type used by sing-box when the saved type is Mihomo-only.
         empty:
           type: boolean
           description: No members (all its traffic is refused).
@@ -3697,6 +3860,18 @@ components:
       properties:
         version:
           $ref: "#/components/schemas/Version"
+        warnings:
+          type: object
+          properties:
+            empty_groups:
+              type: array
+              items: {type: string}
+            downgraded_groups:
+              type: array
+              items: {type: string}
+            inactive_providers:
+              type: array
+              items: {type: string}
         backend:
           type: string
           enum: [sing-box, mihomo]
@@ -3839,7 +4014,7 @@ components:
           type: integer
         trigger:
           type: string
-          enum: [nodes, groups, final, settings, rules, rulesets, apply, startup]
+          enum: [nodes, groups, providers, final, settings, rules, rulesets, apply, startup]
         ok:
           type: boolean
         changed:
@@ -3921,6 +4096,12 @@ components:
         warnings:
           type: object
           properties:
+            downgraded_groups:
+              type: array
+              items: {type: string}
+            inactive_providers:
+              type: array
+              items: {type: string}
             empty_groups:
               type: array
               items:

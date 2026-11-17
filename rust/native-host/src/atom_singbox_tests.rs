@@ -351,6 +351,8 @@ fn sample_state() -> ProxyState {
         name: "自动".into(),
         kind: GroupKind::Urltest,
         members: Vec::new(),
+        providers: vec![],
+        strategy: None,
         filter: String::new(),
         order: Vec::new(),
         selected: String::new(),
@@ -663,4 +665,55 @@ fn mihomo_switch_checks_before_stopping_and_restores_singbox_on_failure() {
         Err(ApplyError::Runtime(_))
     ));
     assert_eq!(std::fs::read(&running).unwrap(), first);
+}
+
+#[test]
+fn mihomo_generates_native_subscriptions_and_automatic_groups() {
+    use crate::atom_proxy::{Backend, GroupInput, ProviderInput, ProxyProvider};
+
+    let fake = FakeSingbox::start("mihomo-providers");
+    let mut host = fake.host.clone();
+    host.backend = Backend::Mihomo;
+    host.binary = std::env::var_os("ATOM_TEST_MIHOMO").map_or(host.binary, Into::into);
+    let mut state = ProxyState::default();
+    let provider = "p-01234567";
+    state.settings.backend = Backend::Mihomo;
+    state.providers.push(ProxyProvider {
+        id: provider.to_owned(),
+        settings: ProviderInput {
+            name: "sub".to_owned(),
+            url: "https://example.test/sub".to_owned(),
+            interval: 900,
+            filter: "HK|JP".to_owned(),
+            download_via: None,
+        },
+    });
+    let group = |name: &str, kind: &str, strategy: &str| {
+        serde_json::from_value::<GroupInput>(json!({
+            "name":name, "type":kind, "providers":[provider], "strategy":strategy
+        })).unwrap()
+    };
+    let fallback = state.add_group(serde_json::from_value(json!({
+        "name":"fallback", "type":"fallback", "providers":[provider]
+    })).unwrap());
+    let load_balance = state.add_group(group("balance", "load-balance", "round-robin"));
+    state.validate(&[]).unwrap();
+    let bytes = generate(&host, &state, &[], "223.5.5.5", "secret").unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let config = &value["proxy-providers"][provider];
+    assert_eq!(config["proxy"], "DIRECT");
+    assert_eq!(config["override"]["additional-prefix"], format!("{provider}/"));
+    assert_eq!(config["filter"], "HK|JP");
+    assert_eq!(config["interval"], 900);
+    assert!(!config["path"].as_str().unwrap().contains("example.test"));
+    let groups = value["proxy-groups"].as_array().unwrap();
+    let by_id = |id: &str| groups.iter().find(|group| group["name"] == id).unwrap();
+    assert_eq!(by_id(&fallback.id)["type"], "fallback");
+    assert_eq!(by_id(&fallback.id)["empty-fallback"], "REJECT");
+    assert!(by_id(&fallback.id).get("proxies").is_none());
+    assert_eq!(by_id(&load_balance.id)["strategy"], "round-robin");
+    assert_eq!(by_id(&load_balance.id)["use"][0], provider);
+    if std::env::var_os("ATOM_TEST_MIHOMO").is_some() {
+        check(&host, &bytes).unwrap();
+    }
 }

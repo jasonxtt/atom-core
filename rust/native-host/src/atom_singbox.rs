@@ -155,11 +155,13 @@ pub(crate) fn generate(
         match group.kind {
             GroupKind::Selector => {
                 outbound.insert("type".into(), json!("selector"));
-                if !group.selected.is_empty() {
+                if !group.selected.is_empty()
+                    && !ProxyState::provider_member(group, &group.selected)
+                {
                     outbound.insert("default".into(), json!(group.selected));
                 }
             }
-            GroupKind::Urltest => {
+            GroupKind::Urltest | GroupKind::Fallback | GroupKind::LoadBalance => {
                 outbound.insert("type".into(), json!("urltest"));
                 outbound.insert(
                     "url".into(),
@@ -439,6 +441,16 @@ pub(crate) fn check(host: &Host, bytes: &[u8]) -> Result<(), String> {
     let next = host.next_path();
     write_private(&next, bytes)
         .map_err(|error| format!("写入 {} 失败: {error}", next.display()))?;
+    if host.backend == Backend::Mihomo
+        && serde_json::from_slice::<Value>(bytes)
+            .is_ok_and(|config| config.get("proxy-providers").is_some())
+    {
+        let result = prepare_provider_cache(host);
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&next);
+            return Err(format!("保护订阅缓存目录失败: {error}"));
+        }
+    }
     let args = match host.backend {
         Backend::SingBox => ["check", "-D", "-c"],
         Backend::Mihomo => ["-t", "-d", "-f"],
@@ -456,6 +468,26 @@ pub(crate) fn check(host: &Host, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&next);
     }
     result
+}
+
+fn prepare_provider_cache(host: &Host) -> std::io::Result<()> {
+    let path = host.dir.join("providers");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if let Err(error) = std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+            if !std::fs::symlink_metadata(&path)?.is_dir() {
+                return Err(std::io::Error::other("订阅缓存路径不是普通目录"));
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(path)
 }
 
 /// Replaces the live file (the checked candidate is renamed over it, or the
@@ -493,6 +525,7 @@ pub(crate) fn switch_blocking(
         .map_err(|e| e.to_string())
         .and_then(|()| reload(next))
         .and_then(|()| confirm(next, secret))
+        .and_then(|()| confirm_new_providers(next, secret, None))
         .and_then(|()| flush_fakeip(next, secret))
         .and_then(|()| sync_selections(next, secret, chosen))
     {
@@ -535,7 +568,17 @@ fn reload(host: &Host) -> Result<(), String> {
 /// Waits until the Clash API answers `/proxies` with `secret` and lists
 /// Final.
 fn confirm(host: &Host, secret: &str) -> Result<(), String> {
-    let deadline = Instant::now() + CONFIRM_TIMEOUT;
+    let timeout = if !cfg!(test)
+        && host.backend == Backend::Mihomo
+        && read_live(host)
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|config| config.get("proxy-providers").is_some())
+    {
+        Duration::from_secs(45)
+    } else {
+        CONFIRM_TIMEOUT
+    };
+    let deadline = Instant::now() + timeout;
     let mut last;
     loop {
         match clash(host.clash_api, secret, "GET", "/proxies", None) {
@@ -555,11 +598,45 @@ fn confirm(host: &Host, secret: &str) -> Result<(), String> {
         if Instant::now() >= deadline {
             return Err(format!(
                 "{} 秒内没有确认新配置生效: {last}",
-                CONFIRM_TIMEOUT.as_secs()
+                timeout.as_secs()
             ));
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn confirm_new_providers(host: &Host, secret: &str, old: Option<&[u8]>) -> Result<(), String> {
+    if host.backend != Backend::Mihomo {
+        return Ok(());
+    }
+    let next: Value = serde_json::from_slice(&read_live(host).ok_or("找不到 mihomo 配置")?)
+        .map_err(|error| error.to_string())?;
+    let Some(providers) = next["proxy-providers"].as_object() else {
+        return Ok(());
+    };
+    let previous: Value = old
+        .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        .unwrap_or_default();
+    let changed: Vec<_> = providers
+        .iter()
+        .filter(|(id, config)| previous["proxy-providers"].get(*id) != Some(*config))
+        .map(|(id, _)| id)
+        .collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let values = clash_json(host, secret, "/providers/proxies")?;
+    for id in changed {
+        if !values["providers"][id]["proxies"]
+            .as_array()
+            .is_some_and(|nodes| !nodes.is_empty())
+        {
+            return Err(format!(
+                "订阅 {id} 没有可用节点，请检查下载地址、源格式或过滤条件"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn confirm_mihomo(host: &Host, secret: &str) -> Result<(), String> {
@@ -607,6 +684,15 @@ pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Re
 /// have kept a choice from `cache.db` instead of `default`).
 fn sync_selections(host: &Host, secret: &str, chosen: &[(String, String)]) -> Result<(), String> {
     for (tag, member) in chosen {
+        if host.backend == Backend::Mihomo && member.starts_with("p-") && member.contains('/') {
+            let group = clash_json(host, secret, &format!("/proxies/{}", query_encode(tag)))?;
+            if !group["all"]
+                .as_array()
+                .is_some_and(|members| members.iter().any(|value| value == member))
+            {
+                continue; // The subscription can remove or rename a node independently.
+            }
+        }
         select(host, secret, tag, member)
             .map_err(|error| format!("同步 {tag} 的选择失败: {error}"))?;
     }
@@ -649,6 +735,7 @@ fn apply_checked(
         .map_err(|error| ApplyError::Runtime(format!("替换 {} 失败: {error}", live.display())))?;
     let failure = match reload(host)
         .and_then(|()| confirm(host, secret))
+        .and_then(|()| confirm_new_providers(host, secret, old.as_deref()))
         .and_then(|()| {
             let old_range = old.as_deref().and_then(mihomo_range);
             if host.backend == Backend::Mihomo
@@ -731,9 +818,20 @@ pub(crate) fn clash(
     path: &str,
     body: Option<&[u8]>,
 ) -> Result<(u16, Vec<u8>), String> {
+    clash_timeout(address, secret, method, path, body, HTTP_TIMEOUT * 4)
+}
+
+fn clash_timeout(
+    address: SocketAddr,
+    secret: &str,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<(u16, Vec<u8>), String> {
     let mut stream = TcpStream::connect_timeout(&address, HTTP_TIMEOUT)
         .map_err(|error| format!("连接 Clash API {address} 失败: {error}"))?;
-    stream.set_read_timeout(Some(HTTP_TIMEOUT * 4)).ok();
+    stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(HTTP_TIMEOUT)).ok();
     let body = body.unwrap_or(b"");
     let mut request = format!(
@@ -923,6 +1021,40 @@ pub(crate) fn rebind_removed_group(host: &Host, secret: &str, id: &str) -> Resul
         ));
     }
     Ok(())
+}
+
+fn clash_json(host: &Host, secret: &str, path: &str) -> Result<Value, String> {
+    let (status, body) = clash(host.clash_api, secret, "GET", path, None)?;
+    if status != 200 {
+        return Err(format!("Clash API 返回 {status}"));
+    }
+    serde_json::from_slice(&body).map_err(|_| "Clash API 应答无效".to_owned())
+}
+
+pub(crate) fn provider(host: &Host, secret: &str, id: &str) -> Result<Value, String> {
+    clash_json(
+        host,
+        secret,
+        &format!("/providers/proxies/{}", query_encode(id)),
+    )
+}
+
+pub(crate) fn refresh_provider(host: &Host, secret: &str, id: &str) -> Result<(), String> {
+    let path = format!("/providers/proxies/{}", query_encode(id));
+    let (status, _) = clash_timeout(
+        host.clash_api,
+        secret,
+        "PUT",
+        &path,
+        None,
+        Duration::from_secs(30),
+    )?;
+    if status == 204 {
+        Ok(())
+    } else {
+        // Mihomo's error may include the full subscription URL.
+        Err(format!("刷新订阅 {id} 失败（{status}）"))
+    }
 }
 
 pub(crate) fn read_live(host: &Host) -> Option<Vec<u8>> {

@@ -15,6 +15,8 @@ fn group(name: &str, kind: GroupKind, members: &[&str]) -> GroupInput {
         name: name.to_owned(),
         kind,
         members: members.iter().map(|m| (*m).to_owned()).collect(),
+        providers: vec![],
+        strategy: None,
         filter: String::new(),
         order: Vec::new(),
         selected: String::new(),

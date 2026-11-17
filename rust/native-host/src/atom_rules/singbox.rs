@@ -131,10 +131,11 @@ fn selections(state: &ProxyState) -> Selections {
     let mut chosen: Vec<(String, String)> = state
         .groups
         .iter()
-        .filter(|group| {
-            group.kind == atom_proxy::GroupKind::Selector && !state.members_of(group).is_empty()
+        .filter(|group| group.kind == atom_proxy::GroupKind::Selector && !state.group_empty(group))
+        .filter_map(|group| {
+            let selected = state.selection(&group.id)?;
+            (!selected.is_empty()).then(|| (group.id.clone(), selected))
         })
-        .filter_map(|group| Some((group.id.clone(), state.selection(&group.id)?)))
         .collect();
     if !state.final_group.members.is_empty() {
         chosen.push((FINAL.to_owned(), state.final_group.selected.clone()));
@@ -269,7 +270,11 @@ impl AtomRules {
             secret,
         )
         .map_err(|message| {
-            let status = if host.backend == Backend::Mihomo { 400 } else { 500 };
+            let status = if host.backend == Backend::Mihomo {
+                400
+            } else {
+                500
+            };
             Refusal::new(status, format!("生成代理配置失败: {message}"))
         })
     }
@@ -722,6 +727,26 @@ impl AtomRules {
         let version = next.version;
         *owner.state.borrow_mut() = next;
         Ok(version)
+    }
+
+    pub(crate) async fn refresh_provider(&self, id: &str) -> Result<(), Refusal> {
+        let host = self.proxy_host().ok_or_else(unconfigured)?.clone();
+        if host.backend != Backend::Mihomo {
+            return Err(Refusal::new(409, "订阅刷新需要启用 mihomo"));
+        }
+        let exclusive = self.exclusive()?;
+        let id = id.to_owned();
+        let guard = Arc::clone(&exclusive.guard);
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let secret = sb::read_live(&host)
+                .as_deref()
+                .and_then(sb::secret_of)
+                .ok_or_else(|| Refusal::new(409, "mihomo 配置未就绪"))?;
+            sb::refresh_provider(&host, &secret, &id).map_err(|error| Refusal::new(502, error))
+        })
+        .await
+        .map_err(|_| Refusal::new(502, "订阅刷新任务异常结束"))?
     }
 
     /// Tests one node, or every member of a group or Final, through the

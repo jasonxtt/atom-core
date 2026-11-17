@@ -22,22 +22,36 @@ pub(crate) fn generate(
         .collect::<Result<Vec<_>, _>>()?;
     let mut groups = Vec::new();
     for group in &state.groups {
-        let members = ordered_members(state.members_of(group), &group.selected);
-        let value = match group.kind {
-            GroupKind::Selector => json!({"name":group.id, "type":"select", "proxies":members}),
-            GroupKind::Urltest => {
-                let duration = group
-                    .interval
-                    .as_deref()
-                    .unwrap_or(atom_proxy::DEFAULT_INTERVAL);
-                json!({
-                    "name": group.id, "type":"url-test", "proxies":members,
-                    "url":group.url.as_deref().unwrap_or(atom_proxy::DEFAULT_URL),
-                    "interval":atom_proxy::duration_secs(duration).map_err(|error| error.message)?,
-                    "tolerance":group.tolerance.unwrap_or(atom_proxy::DEFAULT_TOLERANCE),
-                })
-            }
+        let mut members = state.members_of(group);
+        if group.providers.is_empty() || !members.is_empty() {
+            members = ordered_members(members, &group.selected);
+        }
+        let kind = match group.kind {
+            GroupKind::Selector => "select",
+            GroupKind::Urltest => "url-test",
+            _ => group.kind.name(),
         };
+        let mut value = json!({"name":group.id, "type":kind, "empty-fallback":"REJECT"});
+        if !members.is_empty() {
+            value["proxies"] = json!(members);
+        }
+        if !group.providers.is_empty() {
+            value["use"] = json!(group.providers);
+        }
+        if group.kind != GroupKind::Selector {
+            let duration = group
+                .interval
+                .as_deref()
+                .unwrap_or(atom_proxy::DEFAULT_INTERVAL);
+            value["url"] = json!(group.url.as_deref().unwrap_or(atom_proxy::DEFAULT_URL));
+            value["interval"] =
+                json!(atom_proxy::duration_secs(duration).map_err(|error| error.message)?);
+        }
+        if group.kind == GroupKind::Urltest {
+            value["tolerance"] = json!(group.tolerance.unwrap_or(atom_proxy::DEFAULT_TOLERANCE));
+        } else if group.kind == GroupKind::LoadBalance {
+            value["strategy"] = json!(group.strategy.unwrap_or_default());
+        }
         groups.push(value);
     }
     groups.push(json!({
@@ -47,7 +61,23 @@ pub(crate) fn generate(
     let mut rules: Vec<String> = ip_rules.iter().map(ip_rule).collect();
     rules.push("AND,((IN-NAME,DEFAULT-MIXED),(DOMAIN-REGEX,.)),DIRECT".to_owned());
     rules.push(format!("MATCH,{FINAL}"));
-    let config = json!({
+    let providers = state.providers.iter().map(|provider| {
+        let input = &provider.settings;
+        let digest = ring::digest::digest(&ring::digest::SHA256, input.url.as_bytes());
+        let hash = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let mut entry = json!({
+            "type":"http", "url":input.url, "interval":input.interval, "proxy":input.download_via.as_deref().unwrap_or("DIRECT"),
+            "path":format!("providers/{}-{hash}.yaml", provider.id),
+            "override":{"additional-prefix":format!("{}/", provider.id)},
+            "health-check":{"enable":true, "url":atom_proxy::DEFAULT_URL, "interval":300, "lazy":true},
+            "size-limit": 16 * 1024 * 1024,
+        });
+        if !input.filter.is_empty() {
+            entry["filter"] = json!(input.filter);
+        }
+        (provider.id.clone(), entry)
+    }).collect::<Map<String, Value>>();
+    let mut config = json!({
         "mode":"rule", "log-level":"info", "allow-lan":true, "bind-address":"0.0.0.0",
         "mixed-port":state.settings.mixed_port,
         "redir-port":host.redirect_port,
@@ -72,6 +102,9 @@ pub(crate) fn generate(
         },
         "proxies":proxies, "proxy-groups":groups, "rules":rules,
     });
+    if !providers.is_empty() {
+        config["proxy-providers"] = Value::Object(providers);
+    }
     // JSON is valid YAML and lets the installer's nft hook read the same
     // generated file with its standard-library JSON decoder.
     let mut bytes = serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?;
