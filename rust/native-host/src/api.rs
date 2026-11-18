@@ -269,7 +269,6 @@ pub struct ApiServer {
     external_ui: Arc<crate::external_ui::Registry>,
     /// atom fork: the panel login (`panel_auth`).
     auth: Rc<crate::panel_auth::PanelAuth>,
-    panel_http: Rc<PanelHttp>,
     static_slots: Arc<Semaphore>,
     accept_fault_after: Cell<Option<usize>>,
 }
@@ -300,17 +299,9 @@ impl ApiServer {
         );
         let auth = crate::panel_auth::PanelAuth::load(state_root.as_deref())
             .map_err(|error| ApiServerError::Bind(io::Error::other(error)))?;
-        let panel_http = Rc::new(PanelHttp {
-            hostname: std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|name| name.trim().trim_end_matches('.').to_ascii_lowercase())
-                .filter(|name| !name.is_empty()),
-            public_origin: config.api.as_ref().and_then(|api| api.public_origin.clone()),
-        });
         Ok(Self {
             external_ui,
             auth: Rc::new(auth),
-            panel_http,
             control: None,
             listener,
             fixed: Some((config, cache)),
@@ -387,7 +378,6 @@ impl ApiServer {
                             let static_slots = self.static_slots.clone();
                             let external_ui = self.external_ui.clone();
                             let auth = Rc::clone(&self.auth);
-                            let panel_http = Rc::clone(&self.panel_http);
                             let connection_shutdown = shutdown.child_token();
                             tasks.spawn_local(async move {
                                 let _ = process_connection(
@@ -403,7 +393,6 @@ impl ApiServer {
                                     static_slots,
                                     external_ui,
                                     auth,
-                                    panel_http,
                                     connection_shutdown,
                                 )
                                 .await;
@@ -466,80 +455,36 @@ struct Request {
 
 #[derive(Default)]
 struct PanelHeaders {
-    host: Option<String>,
-    origin: Option<String>,
     content_type: Option<String>,
     atom_request: Option<String>,
 }
 
-struct PanelHttp {
-    hostname: Option<String>,
-    public_origin: Option<url::Url>,
-}
-
-impl PanelHttp {
-    fn origin_for_host(&self, host: &str) -> Option<String> {
-        if host.is_empty()
-            || host.contains(['/', '\\', '@', '?', '#', '%', ','])
-            || host.chars().any(char::is_whitespace)
-        {
-            return None;
+/// Guards against cross-site request forgery: a browser form cannot send JSON
+/// or a custom header without a CORS preflight. DNS rebinding is not covered
+/// when the panel login is off.
+fn panel_refusal(request: &Request) -> Option<Response> {
+    let path = request.target.split('?').next().unwrap_or_default();
+    let json = request
+        .http
+        .content_type
+        .as_deref()
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("application/json"));
+    let explicit = request.http.atom_request.as_deref() == Some("1");
+    if matches!(request.method.as_str(), "GET" | "HEAD") {
+        // Legacy plugin actions use GET. Embedded images and links cannot send this header.
+        if !explicit && matches!(route(path), Route::Plugin { action: "save" | "flush", .. }) {
+            return Some(Response::error(403, "缺少 X-Atom-Request 请求头"));
         }
-        if let Some(public) = &self.public_origin {
-            let candidate = url::Url::parse(&format!("{}://{host}", public.scheme())).ok()?;
-            if candidate.origin() == public.origin() {
-                return Some(public.origin().ascii_serialization());
-            }
-        }
-        let direct = url::Url::parse(&format!("http://{host}")).ok()?;
-        let trusted = match direct.host()? {
-            url::Host::Ipv4(_) | url::Host::Ipv6(_) => true,
-            url::Host::Domain(domain) => {
-                let domain = domain.trim_end_matches('.');
-                domain == "localhost"
-                    || self.hostname.as_deref().is_some_and(|name| {
-                        domain == name
-                            || domain.strip_suffix(".local") == Some(name)
-                            || domain.strip_suffix(".lan") == Some(name)
-                    })
-            }
-        };
-        trusted.then(|| direct.origin().ascii_serialization())
+        return None;
     }
-
-    fn refusal(&self, request: &Request) -> Option<Response> {
-        let origin = request
-            .http
-            .host
-            .as_deref()
-            .and_then(|host| self.origin_for_host(host));
-        let supplied = request.http.origin.as_deref();
-        if origin.is_none() || supplied.is_some_and(|given| Some(given) != origin.as_deref()) {
-            return Some(Response::error(403, "请求地址或来源不受信任"));
-        }
-        let path = request.target.split('?').next().unwrap_or_default();
-        let json = request
-            .http
-            .content_type
-            .as_deref()
-            .and_then(|value| value.split(';').next())
-            .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("application/json"));
-        let explicit = request.http.atom_request.as_deref() == Some("1");
-        if matches!(request.method.as_str(), "GET" | "HEAD") {
-            // Legacy plugin actions use GET. Embedded images and links cannot send this header.
-            if !explicit && matches!(route(path), Route::Plugin { action: "save" | "flush", .. }) {
-                return Some(Response::error(403, "缺少 X-Atom-Request 请求头"));
-            }
-            return None;
-        }
-        if !request.body.is_empty() && path.starts_with(crate::atom_rules_api::PREFIX) && !json {
-            return Some(Response::error(415, "请求正文必须是 application/json"));
-        }
-        if supplied.is_none() && !json && !explicit {
-            return Some(Response::error(403, "缺少请求来源或 X-Atom-Request 请求头"));
-        }
-        None
+    if !request.body.is_empty() && path.starts_with(crate::atom_rules_api::PREFIX) && !json {
+        return Some(Response::error(415, "请求正文必须是 application/json"));
     }
+    if !json && !explicit {
+        return Some(Response::error(403, "缺少 X-Atom-Request 请求头"));
+    }
+    None
 }
 
 struct Response {
@@ -661,7 +606,6 @@ async fn process_connection(
     static_slots: Arc<Semaphore>,
     external_ui: Arc<crate::external_ui::Registry>,
     auth: Rc<crate::panel_auth::PanelAuth>,
-    panel_http: Rc<PanelHttp>,
     shutdown: TransportCancellation,
 ) -> io::Result<()> {
     let request = tokio::select! {
@@ -683,7 +627,7 @@ async fn process_connection(
             }
         },
     };
-    if let Some(response) = panel_http.refusal(&request) {
+    if let Some(response) = panel_refusal(&request) {
         let (_reader, mut writer) = stream.into_split();
         return write_response(&mut writer, &atom_envelope(response)).await;
     }
@@ -1089,8 +1033,6 @@ async fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
                         .map_err(|_| io::Error::other("invalid content length"))?;
                 } else {
                     let header = match key.trim().to_ascii_lowercase().as_str() {
-                        "host" => &mut http.host,
-                        "origin" => &mut http.origin,
                         "content-type" => &mut http.content_type,
                         "x-atom-request" => &mut http.atom_request,
                         _ => continue,
@@ -3129,11 +3071,7 @@ mod tests {
     };
 
     #[test]
-    fn panel_http_rejects_cross_origin_writes_and_rebound_hosts() {
-        let policy = super::PanelHttp {
-            hostname: Some("gateway".into()),
-            public_origin: Some(url::Url::parse("https://panel.example").unwrap()),
-        };
+    fn panel_http_accepts_any_host_and_rejects_form_style_writes() {
         let mut request = Request {
             method: "POST".into(),
             target: "/api/v1/atom/rules".into(),
@@ -3141,31 +3079,25 @@ mod tests {
             cookie: None,
             authorization: None,
             http: super::PanelHeaders {
-                host: Some("192.168.1.10:8080".into()),
                 content_type: Some("application/json; charset=utf-8".into()),
                 ..Default::default()
             },
         };
-        let status = |req: &Request| policy.refusal(req).map_or(200, |response| response.status);
-        assert_eq!(status(&request), 200); // direct CLI access in passwordless mode
-        request.http.origin = Some("http://192.168.1.10:8080".into());
-        assert_eq!(status(&request), 200);
-        request.http.origin = Some("https://192.168.1.10:8080".into());
-        assert_eq!(status(&request), 403);
-        request.http.origin = Some("null".into());
-        assert_eq!(status(&request), 403);
-        request.http.host = Some("rebound.example".into());
-        request.http.origin = Some("http://rebound.example".into());
-        assert_eq!(status(&request), 403);
-        request.http.host = Some("panel.example".into());
-        request.http.origin = Some("https://panel.example".into());
+        let status = |req: &Request| super::panel_refusal(req).map_or(200, |response| response.status);
+        // the Host header does not matter, so a custom domain behind a reverse proxy works
         assert_eq!(status(&request), 200);
         request.http.content_type = Some("text/plain".into());
         assert_eq!(status(&request), 415);
-        request.http.origin = None;
+        request.http.content_type = Some("application/x-www-form-urlencoded".into());
+        assert_eq!(status(&request), 415);
+        request.target = "/api/v1/atom/auth/logout".into();
+        request.body.clear();
+        assert_eq!(status(&request), 403);
+        request.http.atom_request = Some("1".into());
+        assert_eq!(status(&request), 200);
+        request.http.atom_request = None;
         request.method = "GET".into();
         request.target = "/plugins/cache/flush".into();
-        request.body.clear();
         assert_eq!(status(&request), 403);
         request.http.atom_request = Some("1".into());
         assert_eq!(status(&request), 200);
@@ -3347,12 +3279,11 @@ mod tests {
             assert_ne!(status(address, get("/api/v1/atom/rules", &bearer)).await.0, 401);
             assert_eq!(status(address, get("/api/v1/atom/maintenance", "")).await.0, 401);
             assert_eq!(status(address, get("/api/v1/atom/maintenance", &bearer)).await.0, 503);
-            let maintenance_check = |origin: &str, header: &str| format!(
-                "POST /api/v1/atom/maintenance/check HTTP/1.1\r\nHost: localhost\r\nOrigin: {origin}\r\n{bearer}{header}Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+            let maintenance_check = |header: &str| format!(
+                "POST /api/v1/atom/maintenance/check HTTP/1.1\r\nHost: localhost\r\n{bearer}{header}Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
             );
-            assert_eq!(status(address, maintenance_check("http://localhost", "")).await.0, 403);
-            assert_eq!(status(address, maintenance_check("http://elsewhere", "X-Atom-Request: 1\r\n")).await.0, 403);
-            assert_eq!(status(address, maintenance_check("http://localhost", "X-Atom-Request: 1\r\n")).await.0, 503);
+            assert_eq!(status(address, maintenance_check("")).await.0, 403);
+            assert_eq!(status(address, maintenance_check("X-Atom-Request: 1\r\n")).await.0, 503);
             let body = r#"{"username":"u","password":"p"}"#;
             let (code, text) = status(
                 address,

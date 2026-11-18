@@ -559,7 +559,6 @@ pub struct ListenerConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApiConfig {
     pub http: SocketAddr,
-    pub public_origin: Option<url::Url>,
 }
 
 /// One compiled `domain_set` plus its management eligibility. Query-only
@@ -1707,29 +1706,14 @@ fn sequence_can_return(
     true
 }
 
-/// Compiles the management listener and its optional browser-facing origin.
+/// Compiles the management listener.
 fn compile_api(value: &RawValue) -> Result<ApiConfig, ConfigError> {
     let path = "$.api";
     let map = expect_map(value, path, "api must be a mapping")?;
-    map.reject_unknown(&["http", "public_origin"], path)?;
+    map.reject_unknown(&["http"], path)?;
     let http = expect_string(map.required("http", path)?, "$.api.http")?;
     let http = parse_socket_addr(&http, "$.api.http")?;
-    let public_origin = map
-        .get("public_origin")
-        .map(|value| {
-            let path = "$.api.public_origin";
-            let raw = expect_string(value, path)?;
-            let origin = url::Url::parse(&raw).ok().filter(|origin| {
-                matches!(origin.scheme(), "http" | "https")
-                    && raw.trim_end_matches('/') == origin.origin().ascii_serialization()
-            });
-            origin.ok_or_else(|| ConfigError::new(path, "expected an HTTP(S) origin without a path"))
-        })
-        .transpose()?;
-    Ok(ApiConfig {
-        http,
-        public_origin,
-    })
+    Ok(ApiConfig { http })
 }
 
 /// Loads one plugins-only included file and appends its definitions in file
