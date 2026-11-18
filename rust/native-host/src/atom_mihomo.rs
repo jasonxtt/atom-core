@@ -174,21 +174,19 @@ pub(crate) fn generate(
 
 /// Atom's group filter (case-insensitive, over the node name) as a mihomo
 /// group `filter` (regexp2, case-sensitive, over the full name
-/// `p-xxxxxxxx/<name>`): `(?i)`, a start anchor moved behind the
-/// subscription prefix, and the backtick (mihomo's separator of several
-/// filters) written as `\x60`.
+/// `p-xxxxxxxx/<name>`): `(?i)`, a match that must start behind the
+/// subscription prefix, a start anchor (`^`, `\A`) written as "right behind
+/// the prefix", and the backtick (mihomo's separator of several filters)
+/// written as `\x60`.
 pub(crate) fn mihomo_filter(filter: &str) -> String {
-    const PREFIX: &str = "p-[0-9a-f]{8}/";
-    let mut out = String::from("(?i)");
-    let mut chars = filter.chars().peekable();
+    const BEHIND: &str = "(?<=^p-[0-9a-f]{8}/)";
+    let mut out = String::from("(?i)(?<=^p-[0-9a-f]{8}/.*)(?:");
+    let mut chars = filter.chars();
     let mut class = false;
     while let Some(c) = chars.next() {
         match c {
             '\\' => match chars.next() {
-                Some('A') if !class => {
-                    out.push_str("\\A");
-                    out.push_str(PREFIX);
-                }
+                Some('A') if !class => out.push_str(BEHIND),
                 Some(next) => {
                     out.push('\\');
                     out.push(next);
@@ -203,14 +201,12 @@ pub(crate) fn mihomo_filter(filter: &str) -> String {
                 class = false;
                 out.push(c);
             }
-            '^' if !class => {
-                out.push('^');
-                out.push_str(PREFIX);
-            }
+            '^' if !class => out.push_str(BEHIND),
             '`' => out.push_str("\\x60"),
             _ => out.push(c),
         }
     }
+    out.push(')');
     out
 }
 
@@ -476,7 +472,12 @@ fn convert_hysteria(
             None => return Err(format!("hysteria 节点需要 {text} 或 {mbps}")),
         }
     }
-    copy(options, out, &[("auth", "auth")]);
+    // sing-box takes `auth_str` over `auth`; mihomo the other way round.
+    if out.contains_key("auth-str") {
+        options.remove("auth");
+    } else {
+        copy(options, out, &[("auth", "auth")]);
+    }
     if let Some(ports) = options.remove("server_ports") {
         let ports: Vec<String> = take_strings(ports, "server_ports")?
             .into_iter()
@@ -497,13 +498,12 @@ fn convert_ssh(
     if options.contains_key("private_key_path") {
         return Err("mihomo 的 ssh 不读取 private_key_path，请把私钥内容写进 private_key".to_owned());
     }
+    // sing-box joins a list of lines into one key; defaults: root, port 22.
     if let Some(keys) = options.remove("private_key") {
-        let mut keys = take_strings(keys, "private_key")?;
-        if keys.len() != 1 {
-            return Err("mihomo 的 ssh 只支持一个私钥".to_owned());
-        }
-        out.insert("private-key".into(), json!(keys.remove(0)));
+        out.insert("private-key".into(), json!(take_strings(keys, "private_key")?.join("\n")));
     }
+    out.entry("username").or_insert_with(|| json!("root"));
+    out.entry("port").or_insert_with(|| json!(22));
     if let Some(value) = options.remove("private_key_passphrase") {
         out.insert("private-key-passphrase".into(), value);
     }
@@ -528,6 +528,10 @@ fn convert_snell(
     copy(options, out, &[("version", "version"), ("reuse", "reuse"), ("mode", "mode")]);
     let mut obfs = Map::new();
     copy(options, &mut obfs, &[("obfs_mode", "mode"), ("obfs_host", "host")]);
+    // "none" is mihomo's empty mode.
+    if obfs.get("mode").and_then(Value::as_str) == Some("none") {
+        obfs.remove("mode");
+    }
     if !obfs.is_empty() {
         out.insert("obfs-opts".into(), Value::Object(obfs));
     }
@@ -577,8 +581,9 @@ fn convert_wireguard(node: &Node, mut options: Map<String, Value>) -> Result<Val
                 ("reserved", "reserved"),
             ],
         );
-        if let Some(interval) = peer.remove("persistent_keepalive_interval") {
-            keepalive.get_or_insert(interval);
+        let interval = peer.remove("persistent_keepalive_interval").unwrap_or(json!(0));
+        if keepalive.get_or_insert_with(|| interval.clone()) != &interval {
+            return Err("mihomo 的 wireguard 所有 peer 共用一个 persistent-keepalive".to_owned());
         }
         no_extra(&peer)?;
         peers.push(Value::Object(view));
@@ -587,7 +592,7 @@ fn convert_wireguard(node: &Node, mut options: Map<String, Value>) -> Result<Val
         return Err("wireguard 节点需要 peers".to_owned());
     }
     out.insert("peers".into(), Value::Array(peers));
-    if let Some(interval) = keepalive {
+    if let Some(interval) = keepalive.filter(|interval| *interval != json!(0)) {
         out.insert("persistent-keepalive".into(), interval);
     }
     no_extra(&options)?;

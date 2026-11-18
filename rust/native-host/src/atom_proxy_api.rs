@@ -105,10 +105,11 @@ fn node_view(
 
 fn group_view(active: &ProxyState, group: &crate::atom_proxy::Group) -> Value {
     let mut value = serde_json::to_value(group).unwrap_or(Value::Null);
+    // `active`: what the kernel runs (without the nodes it cannot).
+    let running = active.group(&group.id).unwrap_or(group);
     if let Value::Object(map) = &mut value {
-        // `active`: what the kernel runs (without the nodes it cannot).
-        map.insert("empty".into(), json!(active.group_empty(group)));
-        map.insert("matched".into(), json!(active.filtered_nodes(group)));
+        map.insert("empty".into(), json!(active.group_empty(running)));
+        map.insert("matched".into(), json!(active.filtered_nodes(running)));
         map.insert(
             "builtin".into(),
             json!(group.id == crate::atom_proxy::DEFAULT_GROUP),
@@ -122,11 +123,13 @@ fn group_view(active: &ProxyState, group: &crate::atom_proxy::Group) -> Value {
 }
 
 fn final_view(state: &ProxyState) -> Value {
+    // What is saved; `empty`: nothing the kernel can run is left.
+    let active = state.effective();
     json!({
         "version": state.version,
         "members": state.final_group.members,
         "selected": state.final_group.selected,
-        "empty": state.final_group.members.is_empty(),
+        "empty": active.final_group.members.is_empty(),
     })
 }
 
@@ -1088,6 +1091,13 @@ async fn providers(
                 ));
             }
             next.providers.retain(|provider| provider.id != id);
+            // A selection on a node of this subscription (an `all_providers` group).
+            let prefix = format!("{id}/");
+            for group in &mut next.groups {
+                if group.selected.starts_with(&prefix) {
+                    group.selected.clear();
+                }
+            }
             next.version += 1;
             let version = next.version;
             rules

@@ -1279,12 +1279,23 @@ pub(crate) fn load(
             Err(_) => {}
         }
     }
-    let state = match read {
+    let mut state = match read {
         Ok(bytes) => serde_json::from_slice::<ProxyState>(&bytes)
             .map_err(|error| format!("{}: {error}", path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProxyState::default(),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
+    // Builds before the explicit switch ran fallback and load-balance groups
+    // as urltest under sing-box: they become urltest for good here.
+    if state.settings.backend == Backend::SingBox {
+        for group in &mut state.groups {
+            if group.kind.mihomo_only() {
+                group.kind = GroupKind::Urltest;
+                group.strategy = None;
+                group.tolerance = Some(DEFAULT_TOLERANCE);
+            }
+        }
+    }
     state
         .validate(reserved)
         .map_err(|refusal| format!("{}: {}", path.display(), refusal.message))?;

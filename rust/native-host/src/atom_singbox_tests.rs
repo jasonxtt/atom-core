@@ -920,10 +920,13 @@ fn mihomo_explains_the_nodes_it_cannot_run() {
 #[test]
 fn mihomo_group_filter_follows_the_subscription_prefix_and_case() {
     use crate::atom_mihomo::mihomo_filter;
-    assert_eq!(mihomo_filter("HK|JP"), "(?i)HK|JP");
-    assert_eq!(mihomo_filter("^HK|^日本$"), "(?i)^p-[0-9a-f]{8}/HK|^p-[0-9a-f]{8}/日本$");
-    assert_eq!(mihomo_filter("[^a]x\\^"), "(?i)[^a]x\\^");
-    assert_eq!(mihomo_filter("a`b"), "(?i)a\\x60b");
+    const HEAD: &str = "(?i)(?<=^p-[0-9a-f]{8}/.*)(?:";
+    const BEHIND: &str = "(?<=^p-[0-9a-f]{8}/)";
+    assert_eq!(mihomo_filter("HK|JP"), format!("{HEAD}HK|JP)"));
+    assert_eq!(mihomo_filter("^HK|^日本$"), format!("{HEAD}{BEHIND}HK|{BEHIND}日本$)"));
+    assert_eq!(mihomo_filter("\\Ax"), format!("{HEAD}{BEHIND}x)"));
+    assert_eq!(mihomo_filter("[^a]x\\^"), format!("{HEAD}[^a]x\\^)"));
+    assert_eq!(mihomo_filter("a`b"), format!("{HEAD}a\\x60b)"));
 }
 
 #[test]
@@ -999,7 +1002,10 @@ fn mihomo_groups_take_all_providers_filter_and_skip_inactive_nodes() {
     assert_eq!(default["proxies"][0], "n-00000001", "the selection that left falls back to the first");
     assert_eq!(by_id(&all.id)["include-all-providers"], true);
     assert!(by_id(&all.id).get("use").is_none());
-    assert_eq!(by_id(&all.id)["filter"], "(?i)^p-[0-9a-f]{8}/HK");
+    assert_eq!(
+        by_id(&all.id)["filter"],
+        "(?i)(?<=^p-[0-9a-f]{8}/.*)(?:(?<=^p-[0-9a-f]{8}/)HK)"
+    );
     // The manual node matched by the filter is a plain member, the naive one is not.
     assert_eq!(by_id(&all.id)["proxies"], json!(["n-00000001"]));
     assert_eq!(by_id(&single.id)["use"], json!(["p-01234567"]));
@@ -1043,4 +1049,33 @@ fn real_singbox_accepts_wireguard_endpoint_snell_ssh_and_hysteria() {
     state.validate(&[]).unwrap();
     let bytes = generate(&host, &state, &[], "223.5.5.5", "secret").unwrap();
     check(&host, &bytes).unwrap();
+}
+
+#[test]
+fn mihomo_conversion_keeps_the_singbox_meaning_of_defaults_and_conflicts() {
+    // ssh: root and port 22 by default; a key in lines is one key.
+    let ssh = convert(json!({
+        "type":"ssh", "server":"s.test",
+        "private_key":["-----BEGIN OPENSSH PRIVATE KEY-----", "abc", "-----END OPENSSH PRIVATE KEY-----"]
+    }))
+    .unwrap();
+    assert_eq!((ssh["username"].as_str(), ssh["port"].as_u64()), (Some("root"), Some(22)));
+    assert_eq!(ssh["private-key"].as_str().unwrap().lines().count(), 3);
+    // snell: obfs "none" is mihomo's empty mode.
+    let snell = convert(json!({"type":"snell", "server":"n", "server_port":1, "psk":"k", "version":4, "obfs_mode":"none"})).unwrap();
+    assert!(snell.get("obfs-opts").is_none());
+    // hysteria: auth_str wins in sing-box, auth in mihomo: only the winner is written.
+    let hy = convert(json!({
+        "type":"hysteria", "server":"h", "server_port":1, "up_mbps":1, "down_mbps":1,
+        "auth":"d3Jvbmc=", "auth_str":"correct", "tls":{"enabled":true}
+    }))
+    .unwrap();
+    assert_eq!(hy["auth-str"], "correct");
+    assert!(hy.get("auth").is_none());
+    // wireguard: one keepalive for all peers in mihomo.
+    let mut wg = wireguard_node();
+    let mut second = wg["peers"][0].clone();
+    second["persistent_keepalive_interval"] = json!(0);
+    wg["peers"].as_array_mut().unwrap().push(second);
+    assert!(convert(wg).unwrap_err().contains("persistent-keepalive"));
 }

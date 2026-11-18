@@ -969,7 +969,8 @@ pub(crate) fn node_delay(
         query_encode(tag),
         query_encode(url)
     );
-    match clash(host.clash_api, secret, "GET", &path, None)? {
+    let wait = Duration::from_millis(u64::from(timeout_ms)) + HTTP_TIMEOUT;
+    match clash_timeout(host.clash_api, secret, "GET", &path, None, wait)? {
         (200, body) => serde_json::from_slice(&body).map_err(|error| error.to_string()),
         (status, body) => Err(format!(
             "测速失败（{status}）: {}",
@@ -1088,7 +1089,8 @@ pub(crate) fn provider_node_delay(
         query_encode(tag),
         query_encode(url)
     );
-    match clash(host.clash_api, secret, "GET", &path, None)? {
+    let wait = Duration::from_millis(u64::from(timeout_ms)) + HTTP_TIMEOUT;
+    match clash_timeout(host.clash_api, secret, "GET", &path, None, wait)? {
         (200, body) => serde_json::from_slice(&body).map_err(|error| error.to_string()),
         (status, body) => Err(format!(
             "测速失败（{status}）: {}",

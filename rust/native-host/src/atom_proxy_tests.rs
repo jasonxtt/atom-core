@@ -570,3 +570,18 @@ fn nodes_mihomo_cannot_run_leave_the_effective_state() {
     assert_eq!(state.groups[0].members, vec![node.id.clone()]);
     assert!(state.select(DEFAULT_GROUP, &node.id).is_err());
 }
+
+#[test]
+fn loading_turns_leftover_mihomo_groups_into_urltest_under_singbox() {
+    let root = std::env::temp_dir().join(format!("atom-load-migrate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("webinfo")).unwrap();
+    let mut state = ProxyState::default();
+    state.settings.backend = Backend::Mihomo;
+    let failover = state.add_group(group("故障转移", GroupKind::Fallback, &[]));
+    state.settings.backend = Backend::SingBox;
+    save(&root, &state).unwrap();
+    let loaded = load(&root, &[], None).unwrap();
+    assert_eq!(loaded.group(&failover.id).unwrap().kind, GroupKind::Urltest);
+    let _ = std::fs::remove_dir_all(&root);
+}
