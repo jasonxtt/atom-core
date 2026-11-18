@@ -442,7 +442,10 @@ fn convert_transport(
         }
         Some("http") => {
             // sing-box sends PUT unless told otherwise, Mihomo GET.
-            let method = transport.remove("method").unwrap_or(json!("PUT"));
+            let method = match transport.remove("method") {
+                Some(Value::String(method)) if !method.is_empty() => json!(method),
+                _ => json!("PUT"),
+            };
             opts.insert("method".into(), method);
             if let Some(path) = transport.remove("path") {
                 opts.insert("path".into(), json!([path]));

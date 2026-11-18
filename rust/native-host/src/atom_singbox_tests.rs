@@ -750,6 +750,10 @@ fn mihomo_http_transport_follows_tls() {
     bare["transport"] = json!({"type":"http", "path":"/x"});
     let bare = crate::atom_mihomo::convert_proxy(&mihomo_node(bare)).unwrap();
     assert_eq!(bare["http-opts"]["method"], "PUT", "sing-box's default method");
+    let mut empty = outbound(false);
+    empty["transport"] = json!({"type":"http", "method":""});
+    let empty = crate::atom_mihomo::convert_proxy(&mihomo_node(empty)).unwrap();
+    assert_eq!(empty["http-opts"]["method"], "PUT");
     let secure = crate::atom_mihomo::convert_proxy(&mihomo_node(outbound(true)));
     // headers and method have no h2 counterpart: still refused rather than dropped
     assert!(secure.is_err());
