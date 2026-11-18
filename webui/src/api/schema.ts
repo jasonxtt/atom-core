@@ -2094,6 +2094,12 @@ export interface components {
                 running?: boolean;
                 /** @description The active proxy backend and its version are reported; version is null when it does not answer. */
                 version?: string | null;
+                /**
+                 * @description When the running proxy kernel process started (unix seconds; boot time plus the
+                 *     process start time from /proc, so it works under systemd and OpenRC). Null when
+                 *     the kernel does not answer or the time cannot be told.
+                 */
+                started_at?: number | null;
                 /** @description The running file is the one the current state generates. */
                 in_sync?: boolean;
                 host?: {
@@ -3578,8 +3584,16 @@ export interface operations {
                             type?: string;
                             reason?: string;
                         }[];
-                        /** @description Subscriptions downloaded through an inactive node; the switch to mihomo fails until that changes. */
-                        blocked_providers?: Record<string, never>[];
+                        /**
+                         * @description Subscriptions downloaded through an inactive node; the switch to mihomo changes
+                         *     them to a direct download (`download_via` cleared) in the same transaction, no extra confirmation.
+                         */
+                        blocked_providers?: {
+                            id?: string;
+                            name?: string;
+                            download_via?: string | null;
+                            download_via_name?: string | null;
+                        }[];
                         /** @description Fallback and load-balance groups (to sing-box); each needs a `group_actions` entry. */
                         groups_to_handle?: {
                             id?: string;
