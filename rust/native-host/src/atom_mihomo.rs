@@ -408,7 +408,12 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
         convert_tls(object(tls, "tls")?, &mut out, ty)?;
     }
     if let Some(transport) = options.remove("transport") {
-        convert_transport(object(transport, "transport")?, &mut out, tls_enabled)?;
+        let transport = object(transport, "transport")?;
+        // sing-box reads an empty transport (or an empty type) as plain TCP.
+        let plain = transport.iter().all(|(key, value)| key == "type" && value == "");
+        if !plain {
+            convert_transport(transport, &mut out, tls_enabled)?;
+        }
     }
     if let Some(multiplex) = options.remove("multiplex").filter(|value| !value.is_null()) {
         convert_multiplex(object(multiplex, "multiplex")?, &mut out)?;

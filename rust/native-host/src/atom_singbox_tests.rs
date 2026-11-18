@@ -1107,3 +1107,14 @@ fn mihomo_turns_multiplex_and_brutal_into_smux() {
     assert_eq!(out["smux"], json!({"enabled":true, "protocol":"h2mux", "max-connections":1, "min-streams":4,
         "padding":true, "brutal-opts":{"enabled":true, "up":"50 Mbps", "down":"1000 Mbps"}}));
 }
+
+#[test]
+fn mihomo_reads_an_empty_transport_as_plain_tcp() {
+    for transport in [json!({}), json!({"type":""})] {
+        let node = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u", "transport":transport});
+        let out = crate::atom_mihomo::convert_proxy(&mihomo_node(node)).unwrap();
+        assert!(out.get("network").is_none(), "{out}");
+    }
+    let unknown = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u", "transport":{"type":"quic"}});
+    assert!(crate::atom_mihomo::convert_proxy(&mihomo_node(unknown)).is_err());
+}
