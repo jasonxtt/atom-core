@@ -83,8 +83,16 @@ fn state(rules: &AtomRules) -> ProxyState {
     rules.proxy_state().unwrap_or_default()
 }
 
-fn node_view(state: &ProxyState, node: &crate::atom_proxy::Node) -> Value {
+/// A node for the API. `inactive`: the nodes the active kernel cannot run
+/// ([`ProxyState::inactive_nodes`]); `inactive_reason` is null for the rest.
+fn node_view(
+    state: &ProxyState,
+    inactive: &std::collections::BTreeMap<String, String>,
+    node: &crate::atom_proxy::Node,
+) -> Value {
     json!({
+        "active": !inactive.contains_key(&node.id),
+        "inactive_reason": inactive.get(&node.id),
         "id": node.id,
         "name": node.name,
         "type": node.outbound.get("type"),
@@ -95,20 +103,18 @@ fn node_view(state: &ProxyState, node: &crate::atom_proxy::Node) -> Value {
     })
 }
 
-fn group_view(state: &ProxyState, group: &crate::atom_proxy::Group) -> Value {
+fn group_view(active: &ProxyState, group: &crate::atom_proxy::Group) -> Value {
     let mut value = serde_json::to_value(group).unwrap_or(Value::Null);
     if let Value::Object(map) = &mut value {
-        map.insert("empty".into(), json!(state.group_empty(group)));
-        if state.settings.backend == crate::atom_proxy::Backend::SingBox && group.kind.mihomo_only()
-        {
-            map.insert("effective_type".into(), json!("urltest"));
-        }
-        map.insert("matched".into(), json!(state.filtered_nodes(group)));
+        // `active`: what the kernel runs (without the nodes it cannot).
+        map.insert("empty".into(), json!(active.group_empty(group)));
+        map.insert("matched".into(), json!(active.filtered_nodes(group)));
         map.insert(
             "builtin".into(),
             json!(group.id == crate::atom_proxy::DEFAULT_GROUP),
         );
-        if let Some(now) = state.selection(&group.id) {
+        map.insert("all_providers".into(), json!(group.all_providers));
+        if let Some(now) = active.selection(&group.id) {
             map.insert("now".into(), json!(now));
         }
     }
@@ -125,19 +131,94 @@ fn final_view(state: &ProxyState) -> Value {
 }
 
 fn backend_warnings(state: &ProxyState) -> Value {
-    let mut groups = Vec::new();
-    let mut providers = Vec::new();
-    if state.settings.backend == crate::atom_proxy::Backend::SingBox {
-        groups.extend(
+    use crate::atom_proxy::Backend;
+    let active = state.effective();
+    // sing-box keeps the subscriptions but does not run them.
+    let providers: Vec<&String> = if state.settings.backend == Backend::SingBox {
+        state.providers.iter().map(|provider| &provider.id).collect()
+    } else {
+        Vec::new()
+    };
+    let nodes: Vec<Value> = state
+        .inactive_nodes()
+        .into_iter()
+        .filter_map(|(id, reason)| {
+            let node = state.node(&id)?;
+            Some(json!({"id":id, "name":node.name, "reason":reason}))
+        })
+        .collect();
+    json!({"empty_groups":active.empty_groups(), "inactive_providers":providers, "inactive_nodes":nodes})
+}
+
+fn inactive_list(state: &ProxyState, inactive: &std::collections::BTreeMap<String, String>) -> Vec<Value> {
+    state
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let reason = inactive.get(&node.id)?;
+            Some(json!({"id":node.id, "name":node.name, "type":node.outbound.get("type"), "reason":reason}))
+        })
+        .collect()
+}
+
+fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+    query?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// `GET settings/backend-check?target=mihomo|sing-box`: what switching to
+/// `target` would change, for the confirmation window.
+fn backend_check(rules: &AtomRules, query: Option<&str>) -> Answer {
+    use crate::atom_proxy::Backend;
+    let target = match query_value(query, "target") {
+        Some("mihomo") => Backend::Mihomo,
+        Some("sing-box" | "singbox") => Backend::SingBox,
+        _ => return Err(error(400, "target 要 mihomo 或 sing-box")),
+    };
+    let state = state(rules);
+    let inactive = state.inactive_nodes_for(target);
+    let blocked: Vec<Value> = state
+        .providers
+        .iter()
+        .filter(|provider| {
+            provider
+                .settings
+                .download_via
+                .as_deref()
+                .is_some_and(|via| inactive.contains_key(via))
+        })
+        .map(|provider| json!({"id":provider.id, "name":provider.settings.name, "download_via":provider.settings.download_via}))
+        .collect();
+    let brief = |group: &crate::atom_proxy::Group| json!({"id":group.id, "name":group.name, "type":group.kind.name()});
+    let (to_handle, provider_only): (Vec<Value>, Vec<Value>) = if target == Backend::SingBox {
+        (
+            state.groups.iter().filter(|group| group.kind.mihomo_only()).map(brief).collect(),
             state
                 .groups
                 .iter()
-                .filter(|group| group.kind.mihomo_only())
-                .map(|group| &group.id),
-        );
-        providers.extend(state.providers.iter().map(|provider| &provider.id));
-    }
-    json!({"empty_groups":state.empty_groups(), "downgraded_groups":groups, "inactive_providers":providers})
+                .filter(|group| {
+                    (!group.providers.is_empty() || group.all_providers)
+                        && state.members_of(group).is_empty()
+                })
+                .map(brief)
+                .collect(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    Ok(reply_json(
+        200,
+        &json!({
+            "target": target,
+            "current": state.settings.backend,
+            "provider_count": state.providers.len(),
+            "inactive_nodes": inactive_list(&state, &inactive),
+            "blocked_providers": blocked,
+            "groups_to_handle": to_handle,
+            "provider_only_groups": provider_only,
+        }),
+    ))
 }
 
 fn settings_view(rules: &AtomRules, state: &ProxyState) -> Value {
@@ -181,7 +262,8 @@ async fn import_nodes(rules: &AtomRules, bytes: &[u8]) -> Answer {
         .transact(None, Some(next.clone()), "nodes")
         .await
         .map_err(|e| fail(&e))?;
-    let nodes: Vec<Value> = added.iter().map(|node| node_view(&next, node)).collect();
+    let inactive = next.inactive_nodes();
+    let nodes: Vec<Value> = added.iter().map(|node| node_view(&next, &inactive, node)).collect();
     Ok(reply_json(
         201,
         &json!({ "version": version, "nodes": nodes }),
@@ -244,7 +326,7 @@ async fn update_node(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
         .map_err(|e| fail(&e))?;
     Ok(reply_json(
         200,
-        &json!({ "version": version, "node": node_view(&next, &node) }),
+        &json!({ "version": version, "node": node_view(&next, &next.inactive_nodes(), &node) }),
     ))
 }
 
@@ -282,7 +364,7 @@ async fn create_group(rules: &AtomRules, bytes: &[u8]) -> Answer {
         .map_err(|e| fail(&e))?;
     Ok(reply_json(
         201,
-        &json!({ "version": version, "group": group_view(&next, &group) }),
+        &json!({ "version": version, "group": group_view(&next.effective(), &group) }),
     ))
 }
 
@@ -300,7 +382,7 @@ async fn update_group(rules: &AtomRules, id: &str, bytes: &[u8]) -> Answer {
         .map_err(|e| fail(&e))?;
     Ok(reply_json(
         200,
-        &json!({ "version": version, "group": group_view(&next, &group) }),
+        &json!({ "version": version, "group": group_view(&next.effective(), &group) }),
     ))
 }
 
@@ -441,10 +523,11 @@ async fn put_final(rules: &AtomRules, bytes: &[u8]) -> Answer {
 /// `GET groups`: the groups in display order, and that order with Final.
 fn groups_view(state: &ProxyState) -> Value {
     let order = state.display_order();
+    let active = state.effective();
     let groups: Vec<Value> = order
         .iter()
         .filter_map(|id| state.group(id))
-        .map(|group| group_view(state, group))
+        .map(|group| group_view(&active, group))
         .collect();
     json!({ "version": state.version, "order": order, "groups": groups })
 }
@@ -525,7 +608,7 @@ async fn runtime(rules: &AtomRules) -> Answer {
     let group_ids: Vec<(String, bool)> = current
         .groups
         .iter()
-        .map(|group| (group.id.clone(), !group.providers.is_empty()))
+        .map(|group| (group.id.clone(), current.uses_providers(group)))
         .chain([(FINAL.to_owned(), false)])
         .collect();
     let node_ids: Vec<String> = current.nodes.iter().map(|node| node.id.clone()).collect();
@@ -596,14 +679,7 @@ pub(crate) async fn outbound_chain(rules: &AtomRules, start: &str) -> Result<Vec
             // Named by the UI ("兜底分组").
             (id.clone(), "final")
         } else if let Some(group) = current.group(&id) {
-            let kind = if current.settings.backend == crate::atom_proxy::Backend::SingBox
-                && group.kind.mihomo_only()
-            {
-                "urltest"
-            } else {
-                group.kind.name()
-            };
-            (group.name.clone(), kind)
+            (group.name.clone(), group.kind.name())
         } else if let Some(node) = current.nodes.iter().find(|node| node.id == id) {
             (node.name.clone(), "node")
         } else {
@@ -702,6 +778,11 @@ async fn put_settings(
     #[serde(deny_unknown_fields)]
     struct Put {
         backend: Option<crate::atom_proxy::Backend>,
+        /// Switching to sing-box: group ID → `urltest` or `delete`, for every
+        /// fallback and load-balance group.
+        group_actions: Option<std::collections::BTreeMap<String, String>>,
+        /// Switching to mihomo: the nodes it cannot run stay but are inactive.
+        confirm_inactive_nodes: Option<bool>,
         fakeip_range: Option<String>,
         resolver: Option<String>,
         mixed_port: Option<u16>,
@@ -727,8 +808,60 @@ async fn put_settings(
     }
     let current = state(rules);
     let mut next = current.clone();
+    let mut deleted: Vec<String> = Vec::new();
+    let mut moved_rules = None;
+    let switching = request.backend.is_some_and(|backend| backend != current.settings.backend);
+    if request.group_actions.is_some()
+        && !(switching && request.backend == Some(crate::atom_proxy::Backend::SingBox))
+    {
+        return error(400, "group_actions 只在切换到 sing-box 时使用");
+    }
     if let Some(backend) = request.backend {
         next.settings.backend = backend;
+    }
+    if switching {
+        match next.settings.backend {
+            crate::atom_proxy::Backend::SingBox => {
+                let actions = request.group_actions.unwrap_or_default();
+                match next.apply_group_actions(&actions) {
+                    Ok(ids) => deleted = ids,
+                    Err(crate::atom_proxy::ActionError::Invalid(message)) => {
+                        return error(400, message);
+                    }
+                    Err(crate::atom_proxy::ActionError::Missing(missing)) => {
+                        let groups: Vec<Value> = missing
+                            .iter()
+                            .map(|(id, name, kind)| json!({"id":id, "name":name, "type":kind}))
+                            .collect();
+                        return reply_json(
+                            409,
+                            &json!({
+                                "error": "切换到 sing-box 前要处理 fallback 和 load-balance 组：转换为 urltest 或删除（group_actions）",
+                                "groups": groups,
+                            }),
+                        );
+                    }
+                }
+                if !deleted.is_empty() {
+                    match rules.prepare_deletions(&mut next, &deleted, true) {
+                        Ok(rules) => moved_rules = rules,
+                        Err(e) => return fail(&e),
+                    }
+                }
+            }
+            crate::atom_proxy::Backend::Mihomo => {
+                let inactive = next.inactive_nodes();
+                if !inactive.is_empty() && request.confirm_inactive_nodes != Some(true) {
+                    return reply_json(
+                        409,
+                        &json!({
+                            "error": "有节点 mihomo 无法运行：保留在 Atom 中但不生效。确认后切换（confirm_inactive_nodes）",
+                            "nodes": inactive_list(&next, &inactive),
+                        }),
+                    );
+                }
+            }
+        }
     }
     if let Some(range) = request.fakeip_range {
         next.settings.fakeip_range = range.trim().to_owned();
@@ -749,8 +882,11 @@ async fn put_settings(
         return reply_json(200, &settings_view(rules, &current));
     }
     next.version += 1;
-    if let Err(e) = rules.transact(None, Some(next.clone()), "settings").await {
+    if let Err(e) = rules.transact(moved_rules, Some(next.clone()), "settings").await {
         return fail(&e);
+    }
+    if !deleted.is_empty() {
+        rules.bindings.schedule("groups");
     }
     // FakeIP addresses and bindings belong to the previous pool. Clear AtomDNS
     // state before it serves addresses from the new one.
@@ -804,6 +940,67 @@ async fn providers(
 
     let mut next = state(rules);
     match (method, segments) {
+        // The node pool: every subscription's nodes in one answer.
+        ("GET", ["nodes"]) => {
+            if next.settings.backend != Backend::Mihomo {
+                return Ok(reply_json(200, &json!({"active":false, "nodes":[]})));
+            }
+            let names: Vec<(String, String)> = next
+                .providers
+                .iter()
+                .map(|provider| (provider.id.clone(), provider.settings.name.clone()))
+                .collect();
+            let view = with_clash(rules, move |host, secret| {
+                let value = crate::atom_singbox::providers(host, secret)?;
+                let mut nodes = Vec::new();
+                for (id, name) in names {
+                    let prefix = format!("{id}/");
+                    let provider = &value["providers"][id.as_str()];
+                    for node in provider["proxies"].as_array().into_iter().flatten() {
+                        let Some(tag) = node["name"].as_str() else { continue };
+                        let Some(short) = tag.strip_prefix(&prefix) else { continue };
+                        let last = node["history"].as_array().and_then(|history| history.last());
+                        nodes.push(json!({
+                            "id": tag, "name": short, "type": node["type"], "alive": node["alive"],
+                            "delay": last.and_then(|sample| sample.get("delay")),
+                            "provider_id": id, "provider_name": name,
+                        }));
+                    }
+                }
+                Ok(json!({"active":true, "nodes":nodes}))
+            })
+            .await?;
+            return Ok(reply_json(200, &view));
+        }
+        // Tests one subscription node: `{id: "p-xxxxxxxx/name", url?, timeout?}`.
+        ("POST", ["nodes", "delay"]) => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Delay {
+                id: String,
+                url: Option<String>,
+                timeout: Option<u32>,
+            }
+            if next.settings.backend != Backend::Mihomo {
+                return Err(error(409, "订阅节点测速需要启用 mihomo"));
+            }
+            let (_, map) = object(bytes)?;
+            let request: Delay = from_map(map)?;
+            let provider = request
+                .id
+                .split_once('/')
+                .map(|(provider, _)| provider.to_owned())
+                .filter(|provider| next.providers.iter().any(|entry| entry.id == *provider))
+                .ok_or_else(|| error(404, format!("订阅节点 `{}` 不存在", request.id)))?;
+            let timeout = request.timeout.unwrap_or(5000).clamp(100, 30_000);
+            let url = request.url.unwrap_or_else(|| crate::atom_proxy::DEFAULT_URL.to_owned());
+            let id = request.id.clone();
+            let result = with_clash(rules, move |host, secret| {
+                crate::atom_singbox::provider_node_delay(host, secret, &provider, &id, &url, timeout)
+            })
+            .await?;
+            return Ok(reply_json(200, &json!({"id":request.id, "delay":result.get("delay")})));
+        }
         ("GET", []) => {
             let providers: Vec<_> = next.providers.iter().map(provider_view).collect();
             return Ok(reply_json(
@@ -1027,10 +1224,11 @@ pub(crate) async fn handle(
     let answer: Answer = match (method, segments) {
         ("GET", ["nodes"]) => {
             let state = current();
+            let inactive = state.inactive_nodes();
             let nodes: Vec<Value> = state
                 .nodes
                 .iter()
-                .map(|node| node_view(&state, node))
+                .map(|node| node_view(&state, &inactive, node))
                 .collect();
             Ok(reply_json(
                 200,
@@ -1041,7 +1239,10 @@ pub(crate) async fn handle(
         ("GET", ["nodes", id]) => {
             let state = current();
             match state.node(id) {
-                Some(node) => Ok(reply_json(200, &node_view(&state, node))),
+                Some(node) => Ok(reply_json(
+                    200,
+                    &node_view(&state, &state.inactive_nodes(), node),
+                )),
                 None => Err(error(404, format!("节点 `{id}` 不存在"))),
             }
         }
@@ -1054,7 +1255,10 @@ pub(crate) async fn handle(
         ("GET", ["groups", id]) => {
             let state = current();
             match state.group(id) {
-                Some(group) => Ok(reply_json(200, &group_view(&state, group))),
+                Some(group) => Ok(reply_json(
+                    200,
+                    &group_view(&state.effective(), group),
+                )),
                 None => Err(error(404, format!("节点组 `{id}` 不存在"))),
             }
         }
@@ -1075,6 +1279,7 @@ pub(crate) async fn handle(
         ("DELETE", ["connections", id]) => connections(rules, method, Some(id)).await,
         ("GET", ["final"]) => Ok(reply_json(200, &final_view(&current()))),
         ("PUT", ["final"]) => put_final(rules, body).await,
+        ("GET", ["settings", "backend-check"]) => backend_check(rules, query),
         ("GET", ["settings"]) => Ok(reply_json(200, &settings_view(rules, &current()))),
         ("PUT", ["settings"]) => return put_settings(control, config, cache, rules, body).await,
         ("GET", ["status"]) => return status(rules).await,

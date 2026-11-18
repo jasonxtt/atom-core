@@ -140,10 +140,17 @@ pub(crate) fn generate(
     }
     let (resolver_kind, resolver_ip, resolver_port) = crate::atom_proxy::parse_resolver(resolver)?;
     let mut outbounds = Vec::new();
+    // sing-box 1.13 moved WireGuard from the outbounds to the endpoints; a
+    // group still refers to it by its tag.
+    let mut endpoints = Vec::new();
     for node in &state.nodes {
         let mut outbound = node.outbound.clone();
         outbound.insert("tag".into(), json!(node.id));
-        outbounds.push(Value::Object(outbound));
+        if outbound.get("type").and_then(Value::as_str) == Some("wireguard") {
+            endpoints.push(Value::Object(outbound));
+        } else {
+            outbounds.push(Value::Object(outbound));
+        }
     }
     for group in &state.groups {
         let mut outbound = Map::new();
@@ -156,12 +163,20 @@ pub(crate) fn generate(
             GroupKind::Selector => {
                 outbound.insert("type".into(), json!("selector"));
                 if !group.selected.is_empty()
-                    && !ProxyState::provider_member(group, &group.selected)
+                    && !state.provider_member(group, &group.selected)
                 {
                     outbound.insert("default".into(), json!(group.selected));
                 }
             }
-            GroupKind::Urltest | GroupKind::Fallback | GroupKind::LoadBalance => {
+            GroupKind::Fallback | GroupKind::LoadBalance => {
+                // `ProxyState::validate` refuses these under sing-box.
+                return Err(format!(
+                    "sing-box 不支持 {} 组 {}",
+                    group.kind.name(),
+                    group.id
+                ));
+            }
+            GroupKind::Urltest => {
                 outbound.insert("type".into(), json!("urltest"));
                 outbound.insert(
                     "url".into(),
@@ -270,7 +285,7 @@ pub(crate) fn generate(
         "outbound": DIRECT
     }));
 
-    let config = json!({
+    let mut config = json!({
         "log": {"level": "info", "timestamp": true},
         "dns": {
             "servers": [
@@ -299,6 +314,9 @@ pub(crate) fn generate(
             "clash_api": {"external_controller": host.clash_api.to_string(), "secret": secret}
         }
     });
+    if !endpoints.is_empty() {
+        config["endpoints"] = Value::Array(endpoints);
+    }
     let mut bytes = serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
     Ok(bytes)
@@ -1047,6 +1065,36 @@ pub(crate) fn provider(host: &Host, secret: &str, id: &str) -> Result<Value, Str
         secret,
         &format!("/providers/proxies/{}", query_encode(id)),
     )
+}
+
+/// Every subscription (`GET /providers/proxies`): `{"providers": {id: {...}}}`.
+pub(crate) fn providers(host: &Host, secret: &str) -> Result<Value, String> {
+    clash_json(host, secret, "/providers/proxies")
+}
+
+/// Tests one subscription node (mihomo's provider health check of a single
+/// proxy): `{"delay": ms}`. `tag` is the node's full name `p-xxxxxxxx/name`.
+pub(crate) fn provider_node_delay(
+    host: &Host,
+    secret: &str,
+    provider: &str,
+    tag: &str,
+    url: &str,
+    timeout_ms: u32,
+) -> Result<Value, String> {
+    let path = format!(
+        "/providers/proxies/{}/{}/healthcheck?url={}&timeout={timeout_ms}",
+        query_encode(provider),
+        query_encode(tag),
+        query_encode(url)
+    );
+    match clash(host.clash_api, secret, "GET", &path, None)? {
+        (200, body) => serde_json::from_slice(&body).map_err(|error| error.to_string()),
+        (status, body) => Err(format!(
+            "测速失败（{status}）: {}",
+            String::from_utf8_lossy(&body).trim()
+        )),
+    }
 }
 
 pub(crate) fn refresh_provider(host: &Host, secret: &str, id: &str) -> Result<(), String> {

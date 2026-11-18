@@ -352,6 +352,7 @@ fn sample_state() -> ProxyState {
         kind: GroupKind::Urltest,
         members: Vec::new(),
         providers: vec![],
+        all_providers: false,
         strategy: None,
         filter: String::new(),
         order: Vec::new(),
@@ -807,4 +808,239 @@ fn mihomo_prunes_only_stale_subscription_caches() {
     crate::atom_mihomo::prune_provider_caches(&dir, b"not json");
     assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 3);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn convert(outbound: Value) -> Result<Value, String> {
+    crate::atom_mihomo::convert_proxy(&mihomo_node(outbound))
+}
+
+fn wireguard_node() -> Value {
+    json!({
+        "type":"wireguard", "address":["10.0.0.2/32", "fd00::2/128"], "private_key":"cHJpdmF0ZS1rZXktMzItYnl0ZXMtbG9uZy1hYmM9",
+        "mtu":1280,
+        "peers":[{"address":"wg.example", "port":51820, "public_key":"cHVibGljLWtleS0zMi1ieXRlcy1sb25nLWFiYzEyMz0=",
+            "allowed_ips":["0.0.0.0/0"], "persistent_keepalive_interval":25, "reserved":[1,2,3]}]
+    })
+}
+
+#[test]
+fn wireguard_is_an_endpoint_in_singbox_and_a_proxy_in_mihomo() {
+    let mut state = ProxyState::default();
+    state.nodes.push(Node {
+        id: "n-00000001".into(),
+        name: "wg".into(),
+        outbound: wireguard_node().as_object().unwrap().clone(),
+    });
+    state.groups[0].members = vec!["n-00000001".into()];
+    state.validate(&[]).unwrap();
+    let config = generated(&state, &[]);
+    assert_eq!(config["endpoints"][0]["type"], "wireguard");
+    assert_eq!(config["endpoints"][0]["tag"], "n-00000001");
+    assert!(
+        config["outbounds"].as_array().unwrap().iter().all(|o| o["tag"] != "n-00000001"),
+        "not an outbound"
+    );
+    let group = config["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == "g-default").unwrap();
+    assert_eq!(group["outbounds"], json!(["n-00000001"]));
+    // Nodes without WireGuard leave no `endpoints` key (the file of an upgrade stays the same).
+    assert!(generated(&sample_state(), &[]).get("endpoints").is_none());
+
+    let proxy = convert(wireguard_node()).unwrap();
+    assert_eq!(proxy["ip"], "10.0.0.2/32");
+    assert_eq!(proxy["ipv6"], "fd00::2/128");
+    assert_eq!(proxy["peers"][0]["server"], "wg.example");
+    assert_eq!(proxy["peers"][0]["public-key"], "cHVibGljLWtleS0zMi1ieXRlcy1sb25nLWFiYzEyMz0=");
+    assert_eq!(proxy["peers"][0]["reserved"], json!([1, 2, 3]));
+    assert_eq!(proxy["persistent-keepalive"], 25);
+    assert_eq!(proxy["mtu"], 1280);
+    let mut system = wireguard_node();
+    system["system"] = json!(true);
+    assert!(convert(system).unwrap_err().contains("system"));
+}
+
+#[test]
+fn mihomo_converts_hysteria_ssh_and_snell() {
+    let hysteria = convert(json!({
+        "type":"hysteria", "server":"h.test", "server_port":443, "up_mbps":50, "down":"200 Mbps",
+        "auth_str":"secret", "obfs":"o", "server_ports":["20000:30000"], "hop_interval":"30s",
+        "tls":{"enabled":true, "server_name":"h.test", "insecure":true, "alpn":["hysteria"]}
+    }))
+    .unwrap();
+    assert_eq!(hysteria["type"], "hysteria");
+    assert_eq!(hysteria["up"], "50 Mbps");
+    assert_eq!(hysteria["down"], "200 Mbps");
+    assert_eq!(hysteria["auth-str"], "secret");
+    assert_eq!(hysteria["obfs"], "o");
+    assert_eq!(hysteria["ports"], "20000-30000");
+    assert_eq!(hysteria["hop-interval"], 30);
+    assert_eq!(hysteria["sni"], "h.test");
+    assert_eq!(hysteria["skip-cert-verify"], true);
+    assert!(convert(json!({"type":"hysteria", "server":"h", "server_port":1, "tls":{"enabled":true}})).is_err());
+
+    let ssh = convert(json!({
+        "type":"ssh", "server":"s.test", "server_port":22, "user":"root", "password":"p",
+        "private_key":["-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"],
+        "host_key":["ssh-ed25519 AAAA"]
+    }))
+    .unwrap();
+    assert_eq!(ssh["username"], "root");
+    assert!(ssh["private-key"].as_str().unwrap().contains("PRIVATE KEY"));
+    assert_eq!(ssh["host-key"], json!(["ssh-ed25519 AAAA"]));
+    for extra in [json!({"private_key_path":"/k"}), json!({"client_version":"x"})] {
+        let mut node = json!({"type":"ssh", "server":"s.test", "server_port":22, "user":"root"});
+        node.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        assert!(convert(node).is_err());
+    }
+
+    let snell = convert(json!({
+        "type":"snell", "server":"n.test", "server_port":443, "psk":"k", "version":4, "reuse":true,
+        "obfs_mode":"tls", "obfs_host":"bing.com"
+    }))
+    .unwrap();
+    assert_eq!(snell["psk"], "k");
+    assert_eq!(snell["version"], 4);
+    assert_eq!(snell["obfs-opts"], json!({"mode":"tls", "host":"bing.com"}));
+    assert_eq!(snell["udp"], true);
+    let v6 = convert(json!({"type":"snell", "server":"n.test", "server_port":443, "psk":"k", "version":6, "mode":"unshaped"})).unwrap();
+    assert_eq!(v6["mode"], "unshaped");
+    assert!(convert(json!({"type":"snell", "server":"n", "server_port":1, "psk":"k", "version":6, "userkey":"u"})).is_err());
+}
+
+#[test]
+fn mihomo_explains_the_nodes_it_cannot_run() {
+    assert_eq!(convert(json!({"type":"naive", "server":"n", "server_port":443})).unwrap_err(), "mihomo 没有 naive 协议");
+    assert!(convert(json!({"type":"shadowtls", "server":"n", "server_port":443})).unwrap_err().contains("插件"));
+    let multiplex = convert(json!({
+        "type":"vmess", "server":"v", "server_port":443, "uuid":"u", "multiplex":{"enabled":true}
+    }))
+    .unwrap_err();
+    assert!(multiplex.contains("multiplex"), "{multiplex}");
+}
+
+#[test]
+fn mihomo_group_filter_follows_the_subscription_prefix_and_case() {
+    use crate::atom_mihomo::mihomo_filter;
+    assert_eq!(mihomo_filter("HK|JP"), "(?i)HK|JP");
+    assert_eq!(mihomo_filter("^HK|^日本$"), "(?i)^p-[0-9a-f]{8}/HK|^p-[0-9a-f]{8}/日本$");
+    assert_eq!(mihomo_filter("[^a]x\\^"), "(?i)[^a]x\\^");
+    assert_eq!(mihomo_filter("a`b"), "(?i)a\\x60b");
+}
+
+#[test]
+fn mihomo_groups_take_all_providers_filter_and_skip_inactive_nodes() {
+    use crate::atom_proxy::{Backend, ProviderInput, ProxyProvider};
+
+    let fake = FakeSingbox::start("mihomo-all-providers");
+    let mut host = fake.host.clone();
+    host.backend = Backend::Mihomo;
+    host.binary = std::env::var_os("ATOM_TEST_MIHOMO").map_or(host.binary, Into::into);
+    let mut state = ProxyState::default();
+    state.settings.backend = Backend::Mihomo;
+    state.providers.push(ProxyProvider {
+        id: "p-01234567".to_owned(),
+        settings: ProviderInput {
+            name: "sub".to_owned(),
+            url: "https://example.test/sub".to_owned(),
+            interval: 900,
+            filter: String::new(),
+            download_via: None,
+        },
+    });
+    state.nodes.push(Node {
+        id: "n-00000001".into(),
+        name: "HK trojan".into(),
+        outbound: json!({"type":"trojan", "server":"t.test", "server_port":443, "password":"p", "tls":{"enabled":true}})
+            .as_object().unwrap().clone(),
+    });
+    state.nodes.push(Node {
+        id: "n-00000002".into(),
+        name: "HK naive".into(),
+        outbound: json!({"type":"naive", "server":"n.test", "server_port":443, "username":"u", "password":"p"})
+            .as_object().unwrap().clone(),
+    });
+    state.nodes.push(Node {
+        id: "n-00000003".into(),
+        name: "wg".into(),
+        outbound: wireguard_node().as_object().unwrap().clone(),
+    });
+    state.nodes.push(Node {
+        id: "n-00000004".into(),
+        name: "snell".into(),
+        outbound: json!({"type":"snell", "server":"s.test", "server_port":443, "psk":"k", "version":4}).as_object().unwrap().clone(),
+    });
+    state.nodes.push(Node {
+        id: "n-00000005".into(),
+        name: "hy1".into(),
+        outbound: json!({"type":"hysteria", "server":"h.test", "server_port":443, "up_mbps":10, "down_mbps":10, "auth_str":"a",
+            "tls":{"enabled":true, "server_name":"h.test"}}).as_object().unwrap().clone(),
+    });
+    state.nodes.push(Node {
+        id: "n-00000006".into(),
+        name: "ssh".into(),
+        outbound: json!({"type":"ssh", "server":"s.test", "server_port":22, "user":"root", "password":"p"}).as_object().unwrap().clone(),
+    });
+    state.groups[0].members = state.nodes.iter().map(|node| node.id.clone()).collect();
+    state.groups[0].selected = "n-00000002".to_owned();
+    let all = state.add_group(serde_json::from_value(json!({
+        "name":"all", "type":"urltest", "all_providers":true, "filter":"^HK"
+    })).unwrap());
+    let single = state.add_group(serde_json::from_value(json!({
+        "name":"one", "type":"selector", "providers":["p-01234567"]
+    })).unwrap());
+    state.validate(&[]).unwrap();
+    let bytes = generate(&host, &state, &[], "223.5.5.5", "secret").unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let proxies: Vec<&str> = value["proxies"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(proxies, ["n-00000001", "n-00000003", "n-00000004", "n-00000005", "n-00000006"], "naive is skipped");
+    let groups = value["proxy-groups"].as_array().unwrap();
+    let by_id = |id: &str| groups.iter().find(|group| group["name"] == id).unwrap();
+    let default = by_id("g-default");
+    assert!(!default["proxies"].as_array().unwrap().iter().any(|m| m == "n-00000002"));
+    assert_eq!(default["proxies"][0], "n-00000001", "the selection that left falls back to the first");
+    assert_eq!(by_id(&all.id)["include-all-providers"], true);
+    assert!(by_id(&all.id).get("use").is_none());
+    assert_eq!(by_id(&all.id)["filter"], "(?i)^p-[0-9a-f]{8}/HK");
+    // The manual node matched by the filter is a plain member, the naive one is not.
+    assert_eq!(by_id(&all.id)["proxies"], json!(["n-00000001"]));
+    assert_eq!(by_id(&single.id)["use"], json!(["p-01234567"]));
+    assert!(by_id(&single.id).get("filter").is_none(), "no filter: none written");
+    if std::env::var_os("ATOM_TEST_MIHOMO").is_some() {
+        check(&host, &bytes).unwrap();
+    }
+
+    // A subscription downloaded through a node mihomo cannot run has no way to download.
+    state.providers[0].settings.download_via = Some("n-00000002".to_owned());
+    assert!(generate(&host, &state, &[], "223.5.5.5", "secret").unwrap_err().contains("下载节点"));
+}
+
+#[test]
+fn real_singbox_accepts_wireguard_endpoint_snell_ssh_and_hysteria() {
+    let Some(binary) = std::env::var_os("ATOM_TEST_SINGBOX") else {
+        return;
+    };
+    let fake = FakeSingbox::start("real-singbox-nodes");
+    let mut host = fake.host.clone();
+    host.binary = binary.into();
+    let mut state = ProxyState::default();
+    for (index, outbound) in [
+        wireguard_node(),
+        json!({"type":"snell", "server":"s.test", "server_port":443, "psk":"k", "version":4, "obfs_mode":"tls", "obfs_host":"bing.com"}),
+        json!({"type":"snell", "server":"s.test", "server_port":443, "psk":"k", "version":6, "mode":"unshaped"}),
+        json!({"type":"hysteria", "server":"h.test", "server_port":443, "up_mbps":10, "down_mbps":10, "auth_str":"a",
+            "tls":{"enabled":true, "server_name":"h.test"}}),
+        json!({"type":"ssh", "server":"s.test", "server_port":22, "user":"root", "password":"p"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        state.nodes.push(Node {
+            id: format!("n-0000000{index}"),
+            name: format!("node{index}"),
+            outbound: outbound.as_object().unwrap().clone(),
+        });
+    }
+    state.groups[0].members = state.nodes.iter().map(|node| node.id.clone()).collect();
+    state.validate(&[]).unwrap();
+    let bytes = generate(&host, &state, &[], "223.5.5.5", "secret").unwrap();
+    check(&host, &bytes).unwrap();
 }

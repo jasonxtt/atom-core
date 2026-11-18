@@ -1488,7 +1488,7 @@ fn catalog_entries_become_managed_rulesets_while_rules_name_them() {
 }
 
 #[test]
-fn provider_definitions_remain_private_and_groups_degrade_on_singbox() {
+fn provider_definitions_remain_private_and_singbox_refuses_mihomo_groups() {
     let mut api = Api::new("providers");
     let (status, provider) = api.call(
         "POST",
@@ -1509,14 +1509,22 @@ fn provider_definitions_remain_private_and_groups_degrade_on_singbox() {
     assert_eq!(status, 200, "{changed}");
     assert!(crate::atom_proxy::load(&api.root, &[], None).unwrap().providers[0].settings.url.contains("private-token"));
     assert_eq!(api.call("POST", &format!("{path}/refresh"), "{}").0, 409);
+    // sing-box has no fallback or load-balance group: refused, not degraded.
+    for kind in ["fallback", "load-balance"] {
+        let (status, refused) = api.call(
+            "POST",
+            "/api/v1/atom/groups",
+            &format!(r#"{{"name":"Failover","type":"{kind}","providers":["{id}"]}}"#),
+        );
+        assert_eq!(status, 400, "{refused}");
+    }
     let (status, group) = api.call(
         "POST",
         "/api/v1/atom/groups",
-        &format!(r#"{{"name":"Failover","type":"fallback","providers":["{id}"]}}"#),
+        &format!(r#"{{"name":"Auto","type":"urltest","providers":["{id}"],"all_providers":false}}"#),
     );
     assert_eq!(status, 201, "{group}");
     let group_id = group["group"]["id"].as_str().unwrap();
-    assert_eq!(group["group"]["effective_type"], "urltest");
     assert_eq!(group["group"]["empty"], true);
     assert_eq!(api.outbound(group_id)["type"], "urltest");
     assert_eq!(api.outbound(group_id)["outbounds"], serde_json::json!(["block"]));
@@ -1524,7 +1532,42 @@ fn provider_definitions_remain_private_and_groups_degrade_on_singbox() {
     api.restart();
     let (_, settings) = api.call("GET", "/api/v1/atom/settings", "");
     assert_eq!(settings["warnings"]["inactive_providers"][0], id);
-    assert_eq!(settings["warnings"]["downgraded_groups"][0], group_id);
     assert_eq!(api.call("DELETE", &format!("/api/v1/atom/groups/{group_id}"), "").0, 200);
     assert_eq!(api.call("DELETE", &path, "").0, 200);
+}
+
+#[test]
+fn backend_check_lists_nodes_mihomo_cannot_run_and_the_switch_needs_confirmation() {
+    let api = Api::new("backend-check");
+    let (status, _) = api.call(
+        "POST",
+        "/api/v1/atom/nodes",
+        r#"{"format":"json","content":[{"type":"naive","tag":"N","server":"n.example","server_port":443,"username":"u","password":"p"},{"type":"trojan","tag":"T","server":"t.example","server_port":443,"password":"p","tls":{"enabled":true}}]}"#,
+    );
+    assert_eq!(status, 201);
+    let (_, nodes) = api.call("GET", "/api/v1/atom/nodes", "");
+    assert_eq!(nodes["nodes"][0]["active"], true);
+    let (status, check) = api.call("GET", "/api/v1/atom/settings/backend-check?target=mihomo", "");
+    assert_eq!(status, 200, "{check}");
+    assert_eq!(check["inactive_nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(check["inactive_nodes"][0]["name"], "N");
+    assert!(check["inactive_nodes"][0]["reason"].as_str().unwrap().contains("naive"));
+    assert_eq!(check["provider_count"], 0);
+    let (_, check) = api.call("GET", "/api/v1/atom/settings/backend-check?target=sing-box", "");
+    assert_eq!(check["inactive_nodes"], serde_json::json!([]));
+    assert_eq!(api.call("GET", "/api/v1/atom/settings/backend-check?target=x", "").0, 400);
+
+    // Without the confirmation nothing changes and the nodes come back.
+    let (status, refused) = api.call("PUT", "/api/v1/atom/settings", r#"{"backend":"mihomo"}"#);
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["nodes"][0]["name"], "N");
+    // group_actions belong to the switch to sing-box.
+    let (status, _) = api.call(
+        "PUT",
+        "/api/v1/atom/settings",
+        r#"{"backend":"mihomo","group_actions":{}}"#,
+    );
+    assert_eq!(status, 400);
+    let (_, settings) = api.call("GET", "/api/v1/atom/settings", "");
+    assert_eq!(settings["backend"], "sing-box");
 }

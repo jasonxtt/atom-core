@@ -128,6 +128,8 @@ type Selections = Vec<(String, String)>;
 /// members, and Final. A selector prefers the choice remembered in
 /// `cache.db` over its `default`, so a reload alone may keep an older one.
 fn selections(state: &ProxyState) -> Selections {
+    // Nodes the kernel cannot run are not in its configuration.
+    let state = &state.effective();
     let mut chosen: Vec<(String, String)> = state
         .groups
         .iter()
@@ -555,16 +557,37 @@ impl AtomRules {
     pub(crate) async fn delete_group(&self, id: &str, confirm: bool) -> Result<u64, Refusal> {
         let owner = self.proxy.as_ref().ok_or_else(unconfigured)?;
         let mut next = owner.state.borrow().clone();
-        next.remove_group(id)?;
+        let rules = self.prepare_deletions(&mut next, &[id.to_owned()], confirm)?;
         next.version += 1;
+        let version = next.version;
+        self.transact(rules, Some(next), "groups").await?;
+        Ok(version)
+    }
+
+    /// Removes `ids` from `next` like [`Self::delete_group`] does and
+    /// returns the rules that move to Final (`None`: no rule names them).
+    /// Rules that proxy to them block the removal (409 with their IDs)
+    /// unless `confirm`. The FakeIP bindings of the groups are marked for
+    /// migration; the caller applies the change and then schedules the
+    /// bindings (`bindings.schedule("groups")`).
+    pub(crate) fn prepare_deletions(
+        &self,
+        next: &mut ProxyState,
+        ids: &[String],
+        confirm: bool,
+    ) -> Result<Option<State>, Refusal> {
+        for id in ids {
+            next.remove_group(id)?;
+        }
+        let named = |action: &super::Action| {
+            matches!(action, super::Action::Proxy { group_id } if ids.contains(group_id))
+        };
         let users: Vec<String> = self
             .state
             .borrow()
             .rules
             .iter()
-            .filter(
-                |rule| matches!(&rule.action, super::Action::Proxy { group_id } if group_id == id),
-            )
+            .filter(|rule| named(&rule.action))
             .map(|rule| rule.id.clone())
             .collect();
         let rules = if users.is_empty() {
@@ -575,14 +598,15 @@ impl AtomRules {
                 ..Refusal::new(
                     409,
                     format!(
-                        "节点组 `{id}` 还被规则引用；确认删除（confirm=true）后这些规则改用 Final"
+                        "节点组 `{}` 还被规则引用；确认删除（confirm=true）后这些规则改用 Final",
+                        ids.join("`、`")
                     ),
                 )
             });
         } else {
             let mut rules = self.state.borrow().clone();
             for rule in &mut rules.rules {
-                if matches!(&rule.action, super::Action::Proxy { group_id } if group_id == id) {
+                if named(&rule.action) {
                     rule.action = super::Action::Proxy {
                         group_id: FINAL.to_owned(),
                     };
@@ -591,17 +615,17 @@ impl AtomRules {
             rules.version += 1;
             Some(rules)
         };
-        let version = next.version;
         if !self.root.as_os_str().is_empty() {
             // Persist the intent before applying. A failed or interrupted
             // deletion still has the old group in the committed proxy state.
-            let marker = self.root.join(REMOVED_GROUPS).join(id);
-            crate::runtime_snapshot::write_durably_private(&marker, b"").map_err(|error| {
-                Refusal::new(500, format!("记录待迁移的 FakeIP 绑定失败: {error}"))
-            })?;
+            for id in ids {
+                let marker = self.root.join(REMOVED_GROUPS).join(id);
+                crate::runtime_snapshot::write_durably_private(&marker, b"").map_err(|error| {
+                    Refusal::new(500, format!("记录待迁移的 FakeIP 绑定失败: {error}"))
+                })?;
+            }
         }
-        self.transact(rules, Some(next), "groups").await?;
-        Ok(version)
+        Ok(rules)
     }
 
     pub(crate) async fn rebind_removed_groups(&self) -> Result<(), String> {
@@ -766,6 +790,9 @@ impl AtomRules {
             let node = state.node(id).is_some();
             if !node && id != FINAL && state.group(id).is_none() {
                 return Err(Refusal::new(404, format!("节点或节点组 `{id}` 不存在")));
+            }
+            if let Some(reason) = state.inactive_nodes().get(id) {
+                return Err(Refusal::new(409, format!("节点 `{id}` 在当前内核下不生效：{reason}")));
             }
             let url = url
                 .or_else(|| state.group(id).and_then(|group| group.url.clone()))

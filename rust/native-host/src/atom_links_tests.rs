@@ -360,3 +360,62 @@ fn lenient_json_keeps_strings_and_rejects_broken_text() {
     assert!(lenient_json(r#"{"type": "vless""#).is_err());
     assert!(lenient_json("").is_err());
 }
+
+#[test]
+fn clash_yaml_imports_snell_ssh_hysteria_and_wireguard() {
+    let yaml = r#"
+proxies:
+  - {name: sn, type: snell, server: s.example, port: 443, psk: k, version: 4, obfs-opts: {mode: tls, host: bing.com}}
+  - {name: sn6, type: snell, server: s.example, port: 443, psk: k, version: 6, mode: unshaped, reuse: true}
+  - name: sh
+    type: ssh
+    server: h.example
+    port: 22
+    username: root
+    password: p
+    host-key: ["ssh-ed25519 AAAA"]
+  - {name: hy, type: hysteria, server: y.example, port: 443, ports: "20000-30000", up: 50 Mbps, down: 100 Mbps, auth-str: s, obfs: o, sni: y.example, skip-cert-verify: true, hop-interval: 30}
+  - name: wg
+    type: wireguard
+    ip: 10.0.0.2
+    ipv6: fd00::2
+    private-key: PRIV
+    mtu: 1280
+    server: w.example
+    port: 51820
+    public-key: PUB
+    allowed-ips: ["0.0.0.0/0"]
+    reserved: [1, 2, 3]
+    persistent-keepalive: 25
+"#;
+    let nodes = from_clash_yaml(yaml).unwrap();
+    assert_eq!(nodes.len(), 5);
+    let by = |name: &str| Value::Object(nodes.iter().find(|n| n.0 == name).unwrap().1.clone());
+    let sn = by("sn");
+    assert_eq!(sn["type"], "snell");
+    assert_eq!(sn["version"], 4);
+    assert_eq!(sn["obfs_mode"], "tls");
+    assert_eq!(sn["obfs_host"], "bing.com");
+    assert_eq!(by("sn6")["mode"], "unshaped");
+    assert_eq!(by("sn6")["reuse"], true);
+    let sh = by("sh");
+    assert_eq!((sh["type"].as_str(), sh["user"].as_str()), (Some("ssh"), Some("root")));
+    assert_eq!(sh["host_key"], json!(["ssh-ed25519 AAAA"]));
+    let hy = by("hy");
+    assert_eq!(hy["server_ports"], json!(["20000:30000"]));
+    assert_eq!(hy["up"], "50 Mbps");
+    assert_eq!(hy["hop_interval"], "30s");
+    assert_eq!(hy["tls"]["server_name"], "y.example");
+    assert_eq!(hy["tls"]["insecure"], true);
+    let wg = by("wg");
+    assert_eq!(wg["address"], json!(["10.0.0.2/32", "fd00::2/128"]));
+    assert_eq!(wg["peers"][0]["address"], "w.example");
+    assert_eq!(wg["peers"][0]["port"], 51820);
+    assert_eq!(wg["peers"][0]["reserved"], json!([1, 2, 3]));
+    assert_eq!(wg["peers"][0]["persistent_keepalive_interval"], 25);
+    for node in &nodes {
+        crate::atom_proxy::check_outbound(&node.1).unwrap();
+    }
+    assert!(from_clash_yaml("- {name: s, type: snell, server: s, port: 1, psk: k, version: 3}").is_err());
+    assert!(from_clash_yaml("- {name: s, type: ssh, server: s, port: 22, username: r, private-key: /root/key}").is_err());
+}

@@ -16,6 +16,7 @@ fn group(name: &str, kind: GroupKind, members: &[&str]) -> GroupInput {
         kind,
         members: members.iter().map(|m| (*m).to_owned()).collect(),
         providers: vec![],
+        all_providers: false,
         strategy: None,
         filter: String::new(),
         order: Vec::new(),
@@ -453,4 +454,119 @@ fn the_stored_order_arranges_manual_and_filtered_members() {
         state.members_of(&group),
         vec![nodes[1].id.clone(), nodes[2].id.clone(), nodes[0].id.clone()]
     );
+}
+
+fn naive_node() -> Node {
+    Node {
+        id: "n-00000009".to_owned(),
+        name: "N".to_owned(),
+        outbound: serde_json::json!({"type":"naive","server":"n.example","server_port":443})
+            .as_object()
+            .unwrap()
+            .clone(),
+    }
+}
+
+#[test]
+fn group_actions_must_cover_every_mihomo_group() {
+    let mut state = ProxyState::default();
+    state.settings.backend = Backend::Mihomo;
+    let failover = state.add_group(group("故障转移", GroupKind::Fallback, &[]));
+    let balance = state.add_group(group("均衡", GroupKind::LoadBalance, &[]));
+    let before = state.clone();
+    let actions = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(id, action)| ((*id).to_owned(), (*action).to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    // A missing group: nothing changes and the group is named.
+    let missing = state
+        .apply_group_actions(&actions(&[(&failover.id, "urltest")]))
+        .unwrap_err();
+    assert_eq!(
+        missing,
+        ActionError::Missing(vec![(balance.id.clone(), "均衡".to_owned(), "load-balance")])
+    );
+    assert_eq!(state, before);
+    // A wrong action, and a group that needs none.
+    for bad in [
+        actions(&[(&failover.id, "urltest"), (&balance.id, "keep")]),
+        actions(&[(&failover.id, "urltest"), (&balance.id, "urltest"), ("g-default", "delete")]),
+    ] {
+        assert!(matches!(
+            state.apply_group_actions(&bad),
+            Err(ActionError::Invalid(_))
+        ));
+        assert_eq!(state, before);
+    }
+    let deleted = state
+        .apply_group_actions(&actions(&[(&failover.id, "urltest"), (&balance.id, "delete")]))
+        .unwrap();
+    assert_eq!(deleted, vec![balance.id.clone()]);
+    let converted = state.group(&failover.id).unwrap();
+    assert_eq!(converted.kind, GroupKind::Urltest);
+    assert_eq!(converted.tolerance, Some(DEFAULT_TOLERANCE));
+    state.remove_group(&balance.id).unwrap();
+    state.settings.backend = Backend::SingBox;
+    state.validate(&[]).unwrap();
+}
+
+#[test]
+fn singbox_refuses_fallback_and_load_balance_groups() {
+    let mut state = ProxyState::default();
+    state.add_group(group("故障转移", GroupKind::Fallback, &[]));
+    assert!(message(state.validate(&[])).contains("sing-box 不支持 fallback"));
+    state.settings.backend = Backend::Mihomo;
+    state.validate(&[]).unwrap();
+}
+
+#[test]
+fn all_providers_excludes_a_provider_list() {
+    let mut state = ProxyState::default();
+    state.settings.backend = Backend::Mihomo;
+    state.providers.push(ProxyProvider {
+        id: "p-00000001".to_owned(),
+        settings: ProviderInput {
+            name: "s".to_owned(),
+            url: "https://example.test/s".to_owned(),
+            interval: 3600,
+            filter: String::new(),
+            download_via: None,
+        },
+    });
+    let mut input = group("全部", GroupKind::Selector, &[]);
+    input.all_providers = true;
+    let added = state.add_group(input);
+    state.validate(&[]).unwrap();
+    let all = state.group(&added.id).unwrap().clone();
+    assert!(state.uses_providers(&all));
+    assert!(!state.group_empty(&all));
+    assert!(state.provider_member(&all, "p-00000001/香港"));
+    assert!(!state.provider_member(&all, "p-00000002/香港"));
+    state.groups.last_mut().unwrap().providers = vec!["p-00000001".to_owned()];
+    assert!(message(state.validate(&[])).contains("all_providers"));
+}
+
+#[test]
+fn nodes_mihomo_cannot_run_leave_the_effective_state() {
+    let mut state = ProxyState::default();
+    let node = naive_node();
+    state.nodes.push(node.clone());
+    state.groups[0].members = vec![node.id.clone()];
+    state.groups[0].selected = node.id.clone();
+    state.final_group.members.push(node.id.clone());
+    assert!(state.inactive_nodes().is_empty(), "sing-box runs it");
+    state.settings.backend = Backend::Mihomo;
+    state.validate(&[]).unwrap();
+    assert!(state.inactive_nodes()["n-00000009"].contains("naive"));
+    let effective = state.effective();
+    assert!(effective.nodes.is_empty());
+    assert!(effective.groups[0].members.is_empty());
+    assert!(effective.groups[0].selected.is_empty());
+    assert_eq!(effective.final_group.members, vec![DEFAULT_GROUP.to_owned()]);
+    assert!(effective.group_empty(&effective.groups[0]));
+    // The saved state keeps the node for the way back.
+    assert_eq!(state.groups[0].members, vec![node.id.clone()]);
+    assert!(state.select(DEFAULT_GROUP, &node.id).is_err());
 }

@@ -55,6 +55,19 @@ pub(crate) fn generate(
 ) -> Result<Vec<u8>, String> {
     let (transport, ip, port) = atom_proxy::parse_resolver(resolver)?;
     let resolver = format!("{transport}://{}", std::net::SocketAddr::new(ip, port));
+    // Nodes mihomo cannot run stay in Atom's state but are not configured;
+    // the groups and Final lose them as members.
+    let state = &state.effective();
+    for provider in &state.providers {
+        if let Some(via) = provider.settings.download_via.as_deref() {
+            if state.node(via).is_none() {
+                return Err(format!(
+                    "订阅 {} 的下载节点在 mihomo 下不生效，请改用其他节点或直连",
+                    provider.settings.name
+                ));
+            }
+        }
+    }
     let proxies = state
         .nodes
         .iter()
@@ -63,7 +76,8 @@ pub(crate) fn generate(
     let mut groups = Vec::new();
     for group in &state.groups {
         let mut members = state.members_of(group);
-        if group.providers.is_empty() || !members.is_empty() {
+        let uses_providers = state.uses_providers(group);
+        if !uses_providers || !members.is_empty() {
             members = ordered_members(members, &group.selected);
         }
         let kind = match group.kind {
@@ -75,8 +89,14 @@ pub(crate) fn generate(
         if !members.is_empty() {
             value["proxies"] = json!(members);
         }
-        if !group.providers.is_empty() {
+        if group.all_providers && uses_providers {
+            value["include-all-providers"] = json!(true);
+        } else if !group.providers.is_empty() {
             value["use"] = json!(group.providers);
+        }
+        if uses_providers && !group.filter.is_empty() {
+            // mihomo applies a group's filter to the subscription nodes only.
+            value["filter"] = json!(mihomo_filter(&group.filter));
         }
         if group.kind != GroupKind::Selector {
             let duration = group
@@ -150,6 +170,48 @@ pub(crate) fn generate(
     let mut bytes = serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+/// Atom's group filter (case-insensitive, over the node name) as a mihomo
+/// group `filter` (regexp2, case-sensitive, over the full name
+/// `p-xxxxxxxx/<name>`): `(?i)`, a start anchor moved behind the
+/// subscription prefix, and the backtick (mihomo's separator of several
+/// filters) written as `\x60`.
+pub(crate) fn mihomo_filter(filter: &str) -> String {
+    const PREFIX: &str = "p-[0-9a-f]{8}/";
+    let mut out = String::from("(?i)");
+    let mut chars = filter.chars().peekable();
+    let mut class = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('A') if !class => {
+                    out.push_str("\\A");
+                    out.push_str(PREFIX);
+                }
+                Some(next) => {
+                    out.push('\\');
+                    out.push(next);
+                }
+                None => out.push_str("\\\\"),
+            },
+            '[' if !class => {
+                class = true;
+                out.push(c);
+            }
+            ']' if class => {
+                class = false;
+                out.push(c);
+            }
+            '^' if !class => {
+                out.push('^');
+                out.push_str(PREFIX);
+            }
+            '`' => out.push_str("\\x60"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn ordered_members(mut members: Vec<String>, selected: &str) -> Vec<String> {
@@ -243,8 +305,18 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
     let ty = match kind.as_str() {
         Some("shadowsocks") => "ss",
         Some("socks") if options.remove("version").is_none_or(|v| v == "5") => "socks5",
-        Some(ty @ ("vless" | "vmess" | "trojan" | "hysteria2" | "tuic" | "anytls" | "http")) => ty,
-        _ => return Err("mihomo 未支持转换此节点协议".to_owned()),
+        Some(
+            ty @ ("vless" | "vmess" | "trojan" | "hysteria2" | "tuic" | "anytls" | "http"
+            | "hysteria" | "ssh" | "snell"),
+        ) => ty,
+        Some("wireguard") => return convert_wireguard(node, options),
+        Some("naive") => return Err("mihomo 没有 naive 协议".to_owned()),
+        Some("shadowtls") => {
+            return Err("mihomo 的 shadowtls 只能作为其他协议的插件，不能做独立节点".to_owned());
+        }
+        Some("socks") => return Err("mihomo 只支持 SOCKS5".to_owned()),
+        Some(other) => return Err(format!("mihomo 未支持转换 {other} 节点")),
+        None => return Err("节点缺少 type".to_owned()),
     };
     let mut out = Map::from_iter([
         ("name".to_owned(), json!(node.id)),
@@ -258,6 +330,9 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
             ("server_port", "port"),
             ("password", "password"),
             ("username", "username"),
+            ("user", "username"),
+            ("psk", "psk"),
+            ("auth_str", "auth-str"),
             ("uuid", "uuid"),
             ("flow", "flow"),
             ("security", "cipher"),
@@ -268,8 +343,14 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
             ("udp_relay_mode", "udp-relay-mode"),
         ],
     );
-    if matches!(ty, "ss" | "socks5" | "vless" | "vmess" | "trojan" | "anytls") {
+    if matches!(ty, "ss" | "socks5" | "vless" | "vmess" | "trojan" | "anytls" | "snell") {
         out.insert("udp".into(), json!(true));
+    }
+    match ty {
+        "hysteria" => convert_hysteria(&mut options, &mut out)?,
+        "ssh" => convert_ssh(&mut options, &mut out)?,
+        "snell" => convert_snell(&mut options, &mut out)?,
+        _ => {}
     }
     if ty == "hysteria2" {
         for (source, target) in [("up_mbps", "up"), ("down_mbps", "down")] {
@@ -317,13 +398,11 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
         }
     }
     if let Some(obfs) = options.remove("obfs") {
-        let mut obfs = object(obfs, "obfs")?;
-        copy(
-            &mut obfs,
-            &mut out,
-            &[("type", "obfs"), ("password", "obfs-password")],
-        );
-        no_extra(&obfs)?;
+        if ty == "hysteria" {
+            out.insert("obfs".into(), obfs);
+        } else {
+            convert_obfs(obfs, &mut out)?;
+        }
     }
     let tls_enabled = options
         .get("tls")
@@ -339,6 +418,182 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
     Ok(Value::Object(out))
 }
 
+fn convert_obfs(obfs: Value, out: &mut Map<String, Value>) -> Result<(), String> {
+    let mut obfs = object(obfs, "obfs")?;
+    copy(
+        &mut obfs,
+        out,
+        &[("type", "obfs"), ("password", "obfs-password")],
+    );
+    no_extra(&obfs)
+}
+
+fn take_strings(value: Value, what: &str) -> Result<Vec<String>, String> {
+    match value {
+        Value::String(text) => Ok(vec![text]),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("{what} 必须是字符串"))
+            })
+            .collect(),
+        _ => Err(format!("{what} 必须是字符串或字符串数组")),
+    }
+}
+
+/// A sing-box duration such as `10s` or `1m` as whole seconds.
+fn seconds(value: &Value, what: &str) -> Result<u64, String> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .ok_or_else(|| format!("{what} 必须是整数秒")),
+        Value::String(text) => atom_proxy::duration_secs(text)
+            .map_err(|_| format!("{what} `{text}` 无效：写成 30s、3m 这样的形式")),
+        _ => Err(format!("{what} 必须是时长")),
+    }
+}
+
+/// hysteria (v1): the rate fields are `up`/`down` text ("100 Mbps") or
+/// `up_mbps`/`down_mbps`; `auth` is base64 in both kernels.
+fn convert_hysteria(
+    options: &mut Map<String, Value>,
+    out: &mut Map<String, Value>,
+) -> Result<(), String> {
+    for (text, mbps, target) in [("up", "up_mbps", "up"), ("down", "down_mbps", "down")] {
+        let value = options.remove(text).or_else(|| {
+            options
+                .remove(mbps)
+                .and_then(|value| value.as_u64().map(|mbps| json!(format!("{mbps} Mbps"))))
+        });
+        // The other spelling may be present as well; the text one wins.
+        options.remove(mbps);
+        match value {
+            Some(value) => {
+                out.insert(target.into(), value);
+            }
+            None => return Err(format!("hysteria 节点需要 {text} 或 {mbps}")),
+        }
+    }
+    copy(options, out, &[("auth", "auth")]);
+    if let Some(ports) = options.remove("server_ports") {
+        let ports: Vec<String> = take_strings(ports, "server_ports")?
+            .into_iter()
+            .map(|range| range.replace(':', "-"))
+            .collect();
+        out.insert("ports".into(), json!(ports.join(",")));
+    }
+    if let Some(interval) = options.remove("hop_interval") {
+        out.insert("hop-interval".into(), json!(seconds(&interval, "hop_interval")?));
+    }
+    Ok(())
+}
+
+fn convert_ssh(
+    options: &mut Map<String, Value>,
+    out: &mut Map<String, Value>,
+) -> Result<(), String> {
+    if options.contains_key("private_key_path") {
+        return Err("mihomo 的 ssh 不读取 private_key_path，请把私钥内容写进 private_key".to_owned());
+    }
+    if let Some(keys) = options.remove("private_key") {
+        let mut keys = take_strings(keys, "private_key")?;
+        if keys.len() != 1 {
+            return Err("mihomo 的 ssh 只支持一个私钥".to_owned());
+        }
+        out.insert("private-key".into(), json!(keys.remove(0)));
+    }
+    if let Some(value) = options.remove("private_key_passphrase") {
+        out.insert("private-key-passphrase".into(), value);
+    }
+    for (source, target) in [("host_key", "host-key"), ("host_key_algorithms", "host-key-algorithms")] {
+        if let Some(value) = options.remove(source) {
+            out.insert(target.into(), json!(take_strings(value, source)?));
+        }
+    }
+    Ok(())
+}
+
+fn convert_snell(
+    options: &mut Map<String, Value>,
+    out: &mut Map<String, Value>,
+) -> Result<(), String> {
+    if options.contains_key("userkey") {
+        return Err("mihomo 的 snell 不支持 userkey".to_owned());
+    }
+    if options.contains_key("network") {
+        return Err("mihomo 的 snell 不支持限定 network".to_owned());
+    }
+    copy(options, out, &[("version", "version"), ("reuse", "reuse"), ("mode", "mode")]);
+    let mut obfs = Map::new();
+    copy(options, &mut obfs, &[("obfs_mode", "mode"), ("obfs_host", "host")]);
+    if !obfs.is_empty() {
+        out.insert("obfs-opts".into(), Value::Object(obfs));
+    }
+    Ok(())
+}
+
+/// WireGuard is an endpoint in sing-box (`address`, `peers`); mihomo takes
+/// it as a proxy with `ip`/`ipv6` and `peers`.
+fn convert_wireguard(node: &Node, mut options: Map<String, Value>) -> Result<Value, String> {
+    let mut out = Map::from_iter([
+        ("name".to_owned(), json!(node.id)),
+        ("type".to_owned(), json!("wireguard")),
+        ("udp".to_owned(), json!(true)),
+    ]);
+    copy(
+        &mut options,
+        &mut out,
+        &[("private_key", "private-key"), ("mtu", "mtu"), ("workers", "workers")],
+    );
+    let Some(address) = options.remove("address") else {
+        return Err("wireguard 节点需要 address".to_owned());
+    };
+    for prefix in take_strings(address, "address")? {
+        let target = if prefix.contains(':') { "ipv6" } else { "ip" };
+        if out.insert(target.into(), json!(prefix)).is_some() {
+            return Err("mihomo 的 wireguard 每种 IP 版本只能有一个 address".to_owned());
+        }
+    }
+    let mut peers = Vec::new();
+    let mut keepalive = None;
+    for peer in match options.remove("peers") {
+        Some(Value::Array(peers)) => peers,
+        Some(_) => return Err("peers 必须是数组".to_owned()),
+        None => Vec::new(),
+    } {
+        let mut peer = object(peer, "peers")?;
+        let mut view = Map::new();
+        copy(
+            &mut peer,
+            &mut view,
+            &[
+                ("address", "server"),
+                ("port", "port"),
+                ("public_key", "public-key"),
+                ("pre_shared_key", "pre-shared-key"),
+                ("allowed_ips", "allowed-ips"),
+                ("reserved", "reserved"),
+            ],
+        );
+        if let Some(interval) = peer.remove("persistent_keepalive_interval") {
+            keepalive.get_or_insert(interval);
+        }
+        no_extra(&peer)?;
+        peers.push(Value::Object(view));
+    }
+    if peers.is_empty() {
+        return Err("wireguard 节点需要 peers".to_owned());
+    }
+    out.insert("peers".into(), Value::Array(peers));
+    if let Some(interval) = keepalive {
+        out.insert("persistent-keepalive".into(), interval);
+    }
+    no_extra(&options)?;
+    Ok(Value::Object(out))
+}
+
 fn convert_tls(
     mut tls: Map<String, Value>,
     out: &mut Map<String, Value>,
@@ -346,7 +601,7 @@ fn convert_tls(
 ) -> Result<(), String> {
     let enabled = tls.remove("enabled").is_some_and(|value| value == true);
     if !enabled {
-        if matches!(ty, "trojan" | "hysteria2" | "tuic" | "anytls") {
+        if matches!(ty, "trojan" | "hysteria" | "hysteria2" | "tuic" | "anytls") {
             return Err("此协议在 mihomo 中必须启用 TLS".into());
         }
         return Ok(());
@@ -356,7 +611,7 @@ fn convert_tls(
     }
     let sni = match ty {
         "vmess" | "vless" => "servername",
-        "http" | "trojan" | "hysteria2" | "tuic" | "anytls" => "sni",
+        "http" | "trojan" | "hysteria" | "hysteria2" | "tuic" | "anytls" => "sni",
         _ => return Err("mihomo 未支持转换此节点的 TLS 选项".into()),
     };
     copy(

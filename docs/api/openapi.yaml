@@ -660,8 +660,10 @@ paths:
       summary: Import nodes
       description: |
         `format`: `link` (share links, one per line: vless, vmess, trojan, ss,
-        hysteria2/hy2, tuic, anytls, socks), `yaml` (Clash/mihomo `proxies`) or
-        `json` (sing-box outbounds; `content` may then be a JSON value). All or
+        hysteria2/hy2, tuic, anytls, socks), `yaml` (Clash/mihomo `proxies`, also
+        snell, ssh, hysteria and wireguard) or
+        `json` (sing-box outbounds; `content` may then be a JSON value; a `wireguard` item
+        is the options of an endpoint). All or
         nothing: one item that does not convert refuses the whole import (400,
         "第 N 项"), and the resulting configuration must pass `sing-box check`.
       operationId: importNodes
@@ -883,6 +885,62 @@ paths:
           description: Subscription removed.
         "409":
           description: The subscription is still referenced or the request version is stale.
+        default: {$ref: "#/components/responses/Error"}
+  /providers/nodes:
+    get:
+      summary: The nodes of every subscription (the node pool)
+      description: Each node with its subscription; empty with `active` false under sing-box.
+      operationId: listAllProxyProviderNodes
+      responses:
+        "200":
+          description: Runtime view of all subscription nodes.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  active: {type: boolean}
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string, description: "`p-xxxxxxxx/name`"}
+                        name: {type: string}
+                        type: {type: string, nullable: true}
+                        alive: {type: boolean, nullable: true}
+                        delay: {type: integer, nullable: true}
+                        provider_id: {type: string}
+                        provider_name: {type: string}
+        default: {$ref: "#/components/responses/Error"}
+  /providers/nodes/delay:
+    post:
+      summary: Test one subscription node
+      operationId: delayProxyProviderNode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [id]
+              properties:
+                id: {type: string, description: "The node's `p-xxxxxxxx/name`."}
+                url: {type: string}
+                timeout: {type: integer, description: "Milliseconds, 100 to 30000 (default 5000)."}
+      responses:
+        "200":
+          description: The delay.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: string}
+                  delay: {type: integer, nullable: true}
+        "409":
+          description: mihomo is not the selected kernel.
         default: {$ref: "#/components/responses/Error"}
   /providers/{id}/nodes:
     parameters:
@@ -1260,6 +1318,14 @@ paths:
         moves AtomDNS's `main_proxy` when it pointed at `127.0.0.1:<old port>`
         (that reloads AtomDNS's configuration). The TTL caps (1 to 86400
         seconds) do not touch sing-box.
+
+        Switching `backend` is explicit. Ask `GET /settings/backend-check` first.
+        To sing-box: every fallback and load-balance group needs an entry in
+        `group_actions` (`urltest` changes its type for good; `delete` deletes it like
+        `DELETE /groups/{id}?confirm=true`: the rules that proxy to it move to Final); a missing
+        one gives 409 with `groups`. Subscriptions are kept but do not run. To mihomo: when
+        nodes cannot be converted, the request needs `confirm_inactive_nodes: true`, else 409 with
+        `nodes`; those nodes stay saved but are inactive until sing-box is selected again.
       operationId: putSettings
       requestBody:
         required: true
@@ -1272,6 +1338,17 @@ paths:
                 backend:
                   type: string
                   enum: [sing-box, mihomo]
+                group_actions:
+                  type: object
+                  description: |
+                    Switching to sing-box only: group ID → `urltest` or `delete`, for every fallback
+                    and load-balance group (400 for any other group or action, or when not switching to sing-box).
+                  additionalProperties:
+                    type: string
+                    enum: [urltest, delete]
+                confirm_inactive_nodes:
+                  type: boolean
+                  description: Switching to mihomo only, accepting that the nodes it cannot run stay inactive.
                 fakeip_range:
                   type: string
                 resolver:
@@ -1299,12 +1376,85 @@ paths:
         "400":
           $ref: "#/components/responses/Error"
         "409":
-          $ref: "#/components/responses/Conflict"
+          description: |
+            Stale version, or a switch that needs a decision. `groups` (to sing-box): the fallback
+            and load-balance groups without a `group_actions` entry, `{id, name, type}`. `nodes` (to
+            mihomo): the nodes it cannot run, `{id, name, type, reason}`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: {type: string}
+                  groups:
+                    type: array
+                    items: {type: object}
+                  nodes:
+                    type: array
+                    items: {type: object}
         "500":
           $ref: "#/components/responses/Error"
         "502":
           $ref: "#/components/responses/Error"
         "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /settings/backend-check:
+    get:
+      tags: [settings]
+      summary: What switching to a kernel would change
+      description: Reads only; the data of the switch's confirmation window.
+      operationId: checkBackendSwitch
+      parameters:
+        - in: query
+          name: target
+          required: true
+          schema:
+            type: string
+            enum: [sing-box, mihomo]
+      responses:
+        "200":
+          description: The effects of the switch.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target: {type: string}
+                  current: {type: string}
+                  provider_count:
+                    type: integer
+                    description: Subscriptions; they stay saved but do not run under sing-box.
+                  inactive_nodes:
+                    type: array
+                    description: Nodes the target cannot run (always empty for sing-box).
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+                        type: {type: string}
+                        reason: {type: string}
+                  blocked_providers:
+                    type: array
+                    description: Subscriptions downloaded through an inactive node; the switch to mihomo fails until that changes.
+                    items: {type: object}
+                  groups_to_handle:
+                    type: array
+                    description: Fallback and load-balance groups (to sing-box); each needs a `group_actions` entry.
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+                        type: {type: string}
+                  provider_only_groups:
+                    type: array
+                    description: Groups whose members all come from subscriptions (under sing-box they have none).
+                    items: {type: object}
+        "400":
           $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
@@ -3679,7 +3829,18 @@ components:
           type: integer
         outbound:
           type: object
-          description: The sing-box outbound without any credential.
+          description: |
+            The sing-box outbound without any credential. A `wireguard` node is the options of a
+            sing-box endpoint (`address`, `private_key`, `peers`).
+        active:
+          type: boolean
+          description: |
+            False when the selected kernel cannot run the node (mihomo only). It stays saved, is left
+            out of the mihomo configuration and of the groups' members there, and runs again under sing-box.
+        inactive_reason:
+          type: string
+          nullable: true
+          description: Why the node is inactive, in words for the user.
         groups:
           type: array
           description: The groups that contain it.
@@ -3739,6 +3900,7 @@ components:
         type:
           type: string
           enum: [selector, urltest, fallback, load-balance]
+          description: fallback and load-balance only with mihomo (400 under sing-box).
         members:
           type: array
           description: Node and group IDs, in order.
@@ -3747,7 +3909,12 @@ components:
         providers:
           type: array
           items: {type: string}
-          description: IDs of Mihomo subscriptions used by the group.
+          description: IDs of the subscriptions the group takes members from (mihomo `use`).
+        all_providers:
+          type: boolean
+          description: |
+            "All subscriptions" as the source of members: every subscription, the ones added later
+            included (mihomo `include-all-providers`). Exclusive with `providers` (400 when both are given).
         strategy:
           type: string
           enum: [consistent-hashing, round-robin, sticky-sessions]
@@ -3756,7 +3923,10 @@ components:
           type: string
           description: |
             A regular expression over node names, case-insensitive (a plain keyword is one). Every
-            matching node is a member too, and nodes added later join on their own. "" is none.
+            matching node is a member too, and nodes added later join on their own. With mihomo it
+            filters the group's subscription nodes as well, by their names without the subscription
+            prefix (the start anchor `^` stays at the start of the name); the rest of the syntax is
+            read by mihomo's regexp2 there. "" is none.
         order:
           type: array
           description: |
@@ -3796,7 +3966,10 @@ components:
         providers:
           type: array
           items: {type: string}
-          description: IDs of Mihomo subscriptions used by the group.
+          description: IDs of the subscriptions the group takes members from.
+        all_providers:
+          type: boolean
+          description: The group takes members from every subscription (`providers` is then empty).
         strategy:
           type: string
           enum: [consistent-hashing, round-robin, sticky-sessions]
@@ -3809,7 +3982,7 @@ components:
             type: string
         matched:
           type: array
-          description: The node IDs the filter matches now (members too, and not removable one by one).
+          description: The node IDs the filter matches now (members too, and not removable one by one). Nodes the kernel cannot run are left out.
           items:
             type: string
         selected:
@@ -3820,13 +3993,9 @@ components:
           type: string
         tolerance:
           type: integer
-        effective_type:
-          type: string
-          enum: [urltest]
-          description: Type used by sing-box when the saved type is Mihomo-only.
         empty:
           type: boolean
-          description: No members (all its traffic is refused).
+          description: No members the kernel can run (all its traffic is refused).
         builtin:
           type: boolean
         now:
@@ -3866,12 +4035,19 @@ components:
             empty_groups:
               type: array
               items: {type: string}
-            downgraded_groups:
-              type: array
-              items: {type: string}
             inactive_providers:
               type: array
+              description: Subscriptions kept but not running (sing-box).
               items: {type: string}
+            inactive_nodes:
+              type: array
+              description: Nodes the selected kernel cannot run (mihomo).
+              items:
+                type: object
+                properties:
+                  id: {type: string}
+                  name: {type: string}
+                  reason: {type: string}
         backend:
           type: string
           enum: [sing-box, mihomo]
@@ -4096,12 +4272,19 @@ components:
         warnings:
           type: object
           properties:
-            downgraded_groups:
-              type: array
-              items: {type: string}
             inactive_providers:
               type: array
+              description: Subscriptions kept but not running (sing-box).
               items: {type: string}
+            inactive_nodes:
+              type: array
+              description: Nodes the selected kernel cannot run (mihomo).
+              items:
+                type: object
+                properties:
+                  id: {type: string}
+                  name: {type: string}
+                  reason: {type: string}
             empty_groups:
               type: array
               items:

@@ -720,8 +720,93 @@ fn clash_transport(proxy: &Map<String, Value>) -> Result<Option<Value>, String> 
     }
 }
 
+/// A Clash `wireguard` proxy as a sing-box WireGuard endpoint.
+fn clash_wireguard(proxy: &Map<String, Value>) -> Result<Map<String, Value>, String> {
+    let with_prefix = |key: &str, bits: u8| {
+        let value = text(proxy, key);
+        (!value.is_empty()).then(|| {
+            if value.contains('/') {
+                value
+            } else {
+                format!("{value}/{bits}")
+            }
+        })
+    };
+    let address: Vec<String> = [with_prefix("ip", 32), with_prefix("ipv6", 128)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if address.is_empty() {
+        return Err("wireguard 缺少 ip".into());
+    }
+    let private_key = raw(proxy, "private-key");
+    if private_key.is_empty() {
+        return Err("缺少 private-key".into());
+    }
+    let peer = |source: &Map<String, Value>| -> Result<Value, String> {
+        let port: u16 = text(source, "port")
+            .parse()
+            .map_err(|_| "wireguard 的端口无效".to_owned())?;
+        let mut peer = Map::new();
+        peer.insert("address".into(), json!(text(source, "server")));
+        peer.insert("port".into(), json!(port));
+        peer.insert("public_key".into(), json!(text(source, "public-key")));
+        let shared = raw(source, "pre-shared-key");
+        if !shared.is_empty() {
+            peer.insert("pre_shared_key".into(), json!(shared));
+        }
+        let allowed = strings(source, "allowed-ips");
+        peer.insert(
+            "allowed_ips".into(),
+            json!(if allowed.is_empty() {
+                vec!["0.0.0.0/0".to_owned(), "::/0".to_owned()]
+            } else {
+                allowed
+            }),
+        );
+        if let Some(reserved) = source.get("reserved") {
+            peer.insert("reserved".into(), reserved.clone());
+        }
+        let keepalive: u64 = text(proxy, "persistent-keepalive").parse().unwrap_or(0);
+        if keepalive != 0 {
+            peer.insert("persistent_keepalive_interval".into(), json!(keepalive));
+        }
+        if peer["address"] == "" || peer["public_key"] == "" {
+            return Err("wireguard 的 peer 缺少 server 或 public-key".into());
+        }
+        Ok(Value::Object(peer))
+    };
+    let peers = match proxy.get("peers") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| peer(&obj(item.clone())))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => vec![peer(proxy)?],
+    };
+    let mut outbound = Map::new();
+    outbound.insert("type".into(), json!("wireguard"));
+    outbound.insert("address".into(), json!(address));
+    outbound.insert("private_key".into(), json!(private_key));
+    let mtu: u64 = text(proxy, "mtu").parse().unwrap_or(0);
+    if mtu != 0 {
+        outbound.insert("mtu".into(), json!(mtu));
+    }
+    outbound.insert("peers".into(), Value::Array(peers));
+    Ok(outbound)
+}
+
 fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
     let kind = text(proxy, "type");
+    if kind == "wireguard" {
+        let outbound = clash_wireguard(proxy)?;
+        let name = text(proxy, "name");
+        let name = if name.is_empty() {
+            "wireguard".to_owned()
+        } else {
+            name
+        };
+        return Ok((name, outbound));
+    }
     let port: u16 = text(proxy, "port")
         .parse()
         .map_err(|_| "端口无效".to_owned())?;
@@ -852,6 +937,89 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         "anytls" => {
             let mut outbound = base("anytls", &server, port)?;
             outbound.insert("password".into(), json!(raw(proxy, "password")));
+            put(&mut outbound, "tls", clash_tls(proxy, true).value());
+            outbound
+        }
+        "snell" => {
+            let mut outbound = base("snell", &server, port)?;
+            outbound.insert("psk".into(), json!(raw(proxy, "psk")));
+            let version: u64 = text(proxy, "version").parse().unwrap_or(0);
+            if version != 4 && version != 6 {
+                return Err("sing-box 只支持 snell 4 和 6".into());
+            }
+            outbound.insert("version".into(), json!(version));
+            if truthy(proxy, "reuse") {
+                outbound.insert("reuse".into(), json!(true));
+            }
+            if version == 6 {
+                let mode = text(proxy, "mode");
+                if !mode.is_empty() {
+                    outbound.insert("mode".into(), json!(mode));
+                }
+            } else {
+                let opts = section(proxy, "obfs-opts");
+                let mode = text(&opts, "mode");
+                if !mode.is_empty() {
+                    outbound.insert("obfs_mode".into(), json!(mode));
+                }
+                let host = text(&opts, "host");
+                if !host.is_empty() {
+                    outbound.insert("obfs_host".into(), json!(host));
+                }
+            }
+            outbound
+        }
+        "ssh" => {
+            let mut outbound = base("ssh", &server, port)?;
+            outbound.insert("user".into(), json!(text(proxy, "username")));
+            for (source, target) in [("password", "password"), ("private-key-passphrase", "private_key_passphrase")] {
+                let value = raw(proxy, source);
+                if !value.is_empty() {
+                    outbound.insert(target.into(), json!(value));
+                }
+            }
+            let key = raw(proxy, "private-key");
+            if !key.is_empty() {
+                if !key.contains("PRIVATE KEY") {
+                    return Err("ssh 的 private-key 要写私钥内容，不能是文件路径".into());
+                }
+                outbound.insert("private_key".into(), json!([key]));
+            }
+            for (source, target) in [("host-key", "host_key"), ("host-key-algorithms", "host_key_algorithms")] {
+                let values = strings(proxy, source);
+                if !values.is_empty() {
+                    outbound.insert(target.into(), json!(values));
+                }
+            }
+            outbound
+        }
+        "hysteria" => {
+            let protocol = text(proxy, "protocol");
+            if !protocol.is_empty() && protocol != "udp" {
+                return Err("hysteria 只支持 udp 协议".into());
+            }
+            let mut outbound = base("hysteria", &server, port)?;
+            for key in ["up", "down"] {
+                let value = text(proxy, key);
+                if value.is_empty() {
+                    return Err(format!("缺少 {key}"));
+                }
+                outbound.insert(key.into(), json!(value));
+            }
+            for (source, target) in [("auth", "auth"), ("auth-str", "auth_str"), ("obfs", "obfs")] {
+                let value = raw(proxy, source);
+                if !value.is_empty() {
+                    outbound.insert(target.into(), json!(value));
+                }
+            }
+            let ports = text(proxy, "ports");
+            if !ports.is_empty() {
+                outbound.insert("server_ports".into(), json!(ports.replace('-', ":").split(',').collect::<Vec<_>>()));
+            }
+            let hop: u64 = text(proxy, "hop-interval").parse().unwrap_or(0);
+            if hop != 0 {
+                outbound.insert("hop_interval".into(), json!(format!("{hop}s")));
+            }
             put(&mut outbound, "tls", clash_tls(proxy, true).value());
             outbound
         }

@@ -86,6 +86,7 @@ const NODE_TYPES: &[&str] = &[
     "hysteria2",
     "anytls",
     "ssh",
+    "snell",
 ];
 
 // ---------------------------------------------------------------------------
@@ -170,11 +171,17 @@ pub(crate) struct Group {
     pub(crate) members: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) providers: Vec<String>,
+    /// "All subscriptions" as the source of members: every subscription, the
+    /// ones added later included (mihomo's `include-all-providers`).
+    /// Exclusive with `providers`, which names single subscriptions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) all_providers: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) strategy: Option<BalanceStrategy>,
     /// A regular expression over node names (case-insensitive): every
     /// matching node is a member too, and nodes added later join on their
-    /// own. "" = none.
+    /// own. With mihomo it filters the subscription nodes of the group as
+    /// well (their names without the subscription prefix). "" = none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) filter: String,
     /// With a filter: the order of everything the group holds (the manual
@@ -291,6 +298,7 @@ impl Default for ProxyState {
                 kind: GroupKind::Selector,
                 members: Vec::new(),
                 providers: Vec::new(),
+                all_providers: false,
                 strategy: None,
                 filter: String::new(),
                 order: Vec::new(),
@@ -320,6 +328,8 @@ pub(crate) struct GroupInput {
     pub(crate) members: Vec<String>,
     #[serde(default)]
     pub(crate) providers: Vec<String>,
+    #[serde(default)]
+    pub(crate) all_providers: bool,
     #[serde(default)]
     pub(crate) strategy: Option<BalanceStrategy>,
     #[serde(default)]
@@ -432,6 +442,7 @@ const CREDENTIAL_KEYS: &[&str] = &[
     "short_id",
     "key",
     "psk",
+    "userkey",
     "token",
     "secret",
 ];
@@ -625,7 +636,64 @@ fn check_members(
     Ok(())
 }
 
+/// Why `group_actions` of a switch to sing-box were refused.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ActionError {
+    /// An action for a group that needs none, or one that is not `urltest`
+    /// or `delete`.
+    Invalid(String),
+    /// The fallback and load-balance groups without an action:
+    /// `(id, name, type)`.
+    Missing(Vec<(String, String, &'static str)>),
+}
+
 impl ProxyState {
+    /// The user's choice for every fallback and load-balance group before
+    /// the switch to sing-box (`actions`: group ID → `urltest` or
+    /// `delete`). `urltest` changes the group's type for good; the IDs of
+    /// the groups to delete are returned (the owner deletes them, with the
+    /// rules and bindings that follow). Nothing changes unless every such
+    /// group has an action.
+    pub(crate) fn apply_group_actions(
+        &mut self,
+        actions: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>, ActionError> {
+        for (id, action) in actions {
+            if !self.group(id).is_some_and(|group| group.kind.mihomo_only()) {
+                return Err(ActionError::Invalid(format!(
+                    "节点组 `{id}` 不是 fallback 或 load-balance 组"
+                )));
+            }
+            if action != "urltest" && action != "delete" {
+                return Err(ActionError::Invalid(format!(
+                    "节点组 `{id}` 的处理方式 `{action}` 无效：urltest 或 delete"
+                )));
+            }
+        }
+        let missing: Vec<_> = self
+            .groups
+            .iter()
+            .filter(|group| group.kind.mihomo_only() && !actions.contains_key(&group.id))
+            .map(|group| (group.id.clone(), group.name.clone(), group.kind.name()))
+            .collect();
+        if !missing.is_empty() {
+            return Err(ActionError::Missing(missing));
+        }
+        let mut deleted = Vec::new();
+        for group in &mut self.groups {
+            match actions.get(&group.id).map(String::as_str) {
+                Some("urltest") => {
+                    group.kind = GroupKind::Urltest;
+                    group.strategy = None;
+                    group.tolerance = Some(DEFAULT_TOLERANCE);
+                }
+                Some("delete") => deleted.push(group.id.clone()),
+                _ => {}
+            }
+        }
+        Ok(deleted)
+    }
+
     pub(crate) fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|node| node.id == id)
     }
@@ -747,6 +815,19 @@ impl ProxyState {
                     )));
                 }
             }
+            if group.all_providers && !group.providers.is_empty() {
+                return Err(invalid(format!(
+                    "{}: all_providers 与 providers 只能用一个",
+                    group.id
+                )));
+            }
+            if self.settings.backend == Backend::SingBox && group.kind.mihomo_only() {
+                return Err(invalid(format!(
+                    "{}: sing-box 不支持 {} 组，只能用 selector 或 urltest",
+                    group.id,
+                    group.kind.name()
+                )));
+            }
             if group.strategy.is_some() && group.kind != GroupKind::LoadBalance {
                 return Err(invalid(format!(
                     "{}: strategy 只适用于 load-balance",
@@ -769,7 +850,7 @@ impl ProxyState {
                     }
                     if !group.selected.is_empty()
                         && !self.members_of(group).contains(&group.selected)
-                        && !Self::provider_member(group, &group.selected)
+                        && !self.provider_member(group, &group.selected)
                     {
                         return Err(invalid(format!(
                             "{}: 选中的 `{}` 不是成员",
@@ -874,13 +955,56 @@ impl ProxyState {
 
     pub(crate) fn group_empty(&self, group: &Group) -> bool {
         self.members_of(group).is_empty()
-            && (self.settings.backend == Backend::SingBox || group.providers.is_empty())
+            && (self.settings.backend == Backend::SingBox || !self.uses_providers(group))
     }
 
-    pub(crate) fn provider_member(group: &Group, member: &str) -> bool {
+    /// Whether the group draws members from subscriptions.
+    pub(crate) fn uses_providers(&self, group: &Group) -> bool {
+        !group.providers.is_empty() || (group.all_providers && !self.providers.is_empty())
+    }
+
+    /// `member` is a node of a subscription the group takes members from.
+    pub(crate) fn provider_member(&self, group: &Group, member: &str) -> bool {
         member.split_once('/').is_some_and(|(id, name)| {
-            !name.is_empty() && group.providers.iter().any(|provider| provider == id)
+            !name.is_empty()
+                && if group.all_providers {
+                    self.providers.iter().any(|provider| provider.id == id)
+                } else {
+                    group.providers.iter().any(|provider| provider == id)
+                }
         })
+    }
+
+    /// The nodes the active kernel cannot run, with the reason. Only mihomo
+    /// converts nodes (sing-box takes them as they are stored).
+    pub(crate) fn inactive_nodes_for(&self, backend: Backend) -> BTreeMap<String, String> {
+        if backend != Backend::Mihomo {
+            return BTreeMap::new();
+        }
+        self.nodes
+            .iter()
+            .filter_map(|node| {
+                crate::atom_mihomo::convert_proxy(node)
+                    .err()
+                    .map(|reason| (node.id.clone(), reason))
+            })
+            .collect()
+    }
+
+    pub(crate) fn inactive_nodes(&self) -> BTreeMap<String, String> {
+        self.inactive_nodes_for(self.settings.backend)
+    }
+
+    /// What the active kernel really runs: the state without the nodes it
+    /// cannot run (they stay in the saved state, and come back when the
+    /// other kernel is selected). Groups and Final lose them as members.
+    pub(crate) fn effective(&self) -> ProxyState {
+        let mut state = self.clone();
+        for id in self.inactive_nodes().keys() {
+            state.forget(id);
+            state.nodes.retain(|node| node.id != *id);
+        }
+        state
     }
 
     /// The nodes whose names the group's filter matches, in node order.
@@ -990,7 +1114,7 @@ impl ProxyState {
             let group = &self.groups[at];
             if !group.selected.is_empty()
                 && !self.members_of(group).contains(&group.selected)
-                && !Self::provider_member(group, &group.selected)
+                && !self.provider_member(group, &group.selected)
             {
                 self.groups[at].selected.clear();
             }
@@ -1021,6 +1145,7 @@ impl ProxyState {
             kind: input.kind,
             members: input.members,
             providers: input.providers,
+            all_providers: input.all_providers,
             strategy: input.strategy,
             filter: input.filter.trim().to_owned(),
             order: input.order,
@@ -1084,6 +1209,9 @@ impl ProxyState {
 
     /// Records the selection of a selector group or Final.
     pub(crate) fn select(&mut self, id: &str, member: &str) -> Result<(), Refusal> {
+        if self.inactive_nodes().contains_key(member) {
+            return Err(invalid(format!("`{member}` 在当前内核下不生效，不能选中")));
+        }
         if id == FINAL {
             if !self.final_group.members.iter().any(|m| m == member) {
                 return Err(invalid(format!("`{member}` 不是 Final 的成员")));
@@ -1101,7 +1229,7 @@ impl ProxyState {
         }
         let group = group.clone();
         if !self.members_of(&group).iter().any(|m| m == member)
-            && !(self.settings.backend == Backend::Mihomo && Self::provider_member(&group, member))
+            && !(self.settings.backend == Backend::Mihomo && self.provider_member(&group, member))
         {
             return Err(invalid(format!("`{member}` 不是 {id} 的成员")));
         }
@@ -1120,7 +1248,7 @@ impl ProxyState {
         (group.kind == GroupKind::Selector).then(|| {
             if group.selected.is_empty()
                 || (self.settings.backend == Backend::SingBox
-                    && Self::provider_member(group, &group.selected))
+                    && self.provider_member(group, &group.selected))
             {
                 self.members_of(group).first().cloned().unwrap_or_default()
             } else {
