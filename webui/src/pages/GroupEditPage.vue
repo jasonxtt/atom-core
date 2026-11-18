@@ -10,9 +10,9 @@ import { toast } from '../composables/toast'
 // sing-box has no fallback or load-balance groups.
 const kinds = computed<Group['type'][]>(() => (isMihomo.value || form.type === 'fallback' || form.type === 'load-balance' ? ['selector', 'urltest', 'fallback', 'load-balance'] : ['selector', 'urltest']))
 const strategies: [string, string][] = [
-  ['consistent-hashing', '按目标固定节点'],
-  ['round-robin', '轮流分配'],
-  ['sticky-sessions', '按来源和目标固定节点']
+  ['consistent-hashing', '按目标固定节点 (consistent-hashing)'],
+  ['round-robin', '轮流分配 (round-robin)'],
+  ['sticky-sessions', '按来源和目标固定节点 (sticky-sessions)']
 ]
 const strategyLabel = (value: string) => strategies.find((item) => item[0] === value)?.[1] ?? value
 
@@ -323,7 +323,7 @@ async function save(overwrite = false) {
             </button>
           </div>
         </div>
-        <div v-if="form.type !== 'selector'" class="grid g3" style="gap: 10px">
+        <div v-if="form.type !== 'selector'" class="grid g3" :class="{ g3w: form.type === 'load-balance' }" style="gap: 10px">
           <div v-if="form.type === 'load-balance'" class="field">
             <label for="gstrategy">策略</label>
             <select id="gstrategy" v-model="form.strategy" class="inp">
