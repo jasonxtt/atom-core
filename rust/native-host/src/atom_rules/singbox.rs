@@ -497,6 +497,9 @@ impl AtomRules {
                 ));
             }
         }
+        if exclusive.is_some() {
+            sb::prune_provider_caches(&host);
+        }
         if !applied {
             record(trigger, false, None);
         }

@@ -746,6 +746,10 @@ fn mihomo_http_transport_follows_tls() {
         opts["headers"],
         json!({"X-A":["1"], "X-B":["2","3"], "Host":["a.test"]})
     );
+    let mut bare = outbound(false);
+    bare["transport"] = json!({"type":"http", "path":"/x"});
+    let bare = crate::atom_mihomo::convert_proxy(&mihomo_node(bare)).unwrap();
+    assert_eq!(bare["http-opts"]["method"], "PUT", "sing-box's default method");
     let secure = crate::atom_mihomo::convert_proxy(&mihomo_node(outbound(true)));
     // headers and method have no h2 counterpart: still refused rather than dropped
     assert!(secure.is_err());
@@ -781,17 +785,20 @@ fn mihomo_prunes_only_stale_subscription_caches() {
     let _ = std::fs::remove_dir_all(&dir);
     let cache = dir.join("providers");
     std::fs::create_dir_all(&cache).unwrap();
-    for name in ["p-00000001-aa.yaml", "p-00000001-bb.yaml", "p-00000002-cc.yaml", "other.yaml", "p-note.txt"] {
+    let hash = "a".repeat(64);
+    let current = format!("p-00000001-{hash}.yaml");
+    let stale = [format!("p-00000001-{}.yaml", "b".repeat(64)), format!("p-00000002-{hash}.yaml")];
+    for name in stale.iter().chain([&current].into_iter()).chain(["other.yaml".to_owned(), "p-manual.yaml".to_owned()].iter()) {
         std::fs::write(cache.join(name), "x").unwrap();
     }
-    let live = br#"{"proxy-providers":{"p-00000001":{"path":"providers/p-00000001-bb.yaml"}}}"#;
-    crate::atom_mihomo::prune_provider_caches(&dir, live);
+    let live = format!(r#"{{"proxy-providers":{{"p-00000001":{{"path":"providers/{current}"}}}}}}"#);
+    crate::atom_mihomo::prune_provider_caches(&dir, live.as_bytes());
     let mut left: Vec<_> = std::fs::read_dir(&cache)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     left.sort();
-    assert_eq!(left, ["other.yaml", "p-00000001-bb.yaml", "p-note.txt"]);
+    assert_eq!(left, ["other.yaml".to_owned(), current, "p-manual.yaml".to_owned()]);
     // an unreadable live file prunes nothing
     crate::atom_mihomo::prune_provider_caches(&dir, b"not json");
     assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 3);

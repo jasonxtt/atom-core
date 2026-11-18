@@ -8,6 +8,17 @@ use crate::atom_singbox::{Host, IpRule};
 
 /// Removes the subscription caches (`providers/p-*.yaml`) that the live
 /// configuration no longer names, e.g. after a URL change or a removal.
+/// `p-<8 hex>-<64 hex>.yaml`, the names `generate` gives the caches.
+fn is_provider_cache(name: &str) -> bool {
+    let hex = |part: &str, len: usize| {
+        part.len() == len && part.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    name.strip_suffix(".yaml")
+        .and_then(|stem| stem.strip_prefix("p-"))
+        .and_then(|stem| stem.split_once('-'))
+        .is_some_and(|(id, hash)| hex(id, 8) && hex(hash, 64))
+}
+
 pub(crate) fn prune_provider_caches(dir: &std::path::Path, live: &[u8]) {
     let Ok(config) = serde_json::from_slice::<Value>(live) else {
         return;
@@ -24,8 +35,7 @@ pub(crate) fn prune_provider_caches(dir: &std::path::Path, live: &[u8]) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("p-")
-            && name.ends_with(".yaml")
+        if is_provider_cache(&name)
             && !keep.contains(&name)
             && entry.file_type().is_ok_and(|kind| kind.is_file())
         {
@@ -431,7 +441,9 @@ fn convert_transport(
             "h2"
         }
         Some("http") => {
-            copy(&mut transport, &mut opts, &[("method", "method")]);
+            // sing-box sends PUT unless told otherwise, Mihomo GET.
+            let method = transport.remove("method").unwrap_or(json!("PUT"));
+            opts.insert("method".into(), method);
             if let Some(path) = transport.remove("path") {
                 opts.insert("path".into(), json!([path]));
             }

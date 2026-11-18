@@ -529,10 +529,7 @@ pub(crate) fn switch_blocking(
         .and_then(|()| flush_fakeip(next, secret))
         .and_then(|()| sync_selections(next, secret, chosen))
     {
-        Ok(()) => {
-            prune_provider_caches(next);
-            return Ok(());
-        }
+        Ok(()) => return Ok(()),
         Err(error) => error,
     };
     Err(ApplyError::Runtime(format!(
@@ -549,7 +546,9 @@ pub(crate) fn switch_back(old: &Host, next: &Host, old_chosen: &[(String, String
     rollback(old, bytes.as_deref(), old_chosen)
 }
 
-fn prune_provider_caches(host: &Host) {
+/// Called once the applied configuration is saved: before that, a failed
+/// save rolls back to the old configuration, which still needs its caches.
+pub(crate) fn prune_provider_caches(host: &Host) {
     if host.backend == Backend::Mihomo {
         if let Some(live) = read_live(host) {
             crate::atom_mihomo::prune_provider_caches(&host.dir, &live);
@@ -760,10 +759,7 @@ fn apply_checked(
         })
         .and_then(|()| sync_selections(host, secret, chosen))
     {
-        Ok(()) => {
-            prune_provider_caches(host);
-            return Ok(());
-        }
+        Ok(()) => return Ok(()),
         Err(failure) => failure,
     };
     Err(ApplyError::Runtime(format!(
