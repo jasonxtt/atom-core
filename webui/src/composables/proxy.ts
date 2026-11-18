@@ -15,7 +15,7 @@ export interface PoolNode {
   provider_id: string
   provider_name: string
 }
-type Runtime = { groups: Record<string, { now: string }>; nodes: Record<string, { delay: number | null; time: string | null }> }
+type Runtime = { groups: Record<string, { now: string; members?: string[] }>; nodes: Record<string, { delay: number | null; time: string | null }> }
 
 /** A group card: a node group, or Final shown as one (`final`). */
 export interface GroupView {
@@ -77,9 +77,15 @@ export const providerUpdated = ref<Record<string, string | null>>({})
 export const poolNodes = ref<PoolNode[]>([])
 
 /** `GET providers/nodes`; empty under sing-box. */
+let poolTicket = 0
+let poolApplied = 0
 export async function loadPool() {
+  const ticket = ++poolTicket
   try {
     const answer = await call(client.GET('/providers/nodes'))
+    // reads apply in the order they were sent (a late answer is dropped)
+    if (ticket < poolApplied) return
+    poolApplied = ticket
     poolNodes.value = (answer.nodes ?? []) as PoolNode[]
   } catch {
     // a failed read keeps the nodes shown (it says nothing about them)

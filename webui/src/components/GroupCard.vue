@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { call, client } from '../api/client'
 import { testGroup, testNode, testPoolNode, testing } from '../composables/delay'
-import { currentOf, delayOf, groupTypeLabels, FINAL, isGroup, isPoolNode, leafOf, loadProxy, loadRuntime, nameOf, nodes, reportFailure, version, type GroupView } from '../composables/proxy'
+import { currentOf, delayOf, groupTypeLabels, FINAL, isGroup, isPoolNode, leafOf, loadProxy, loadRuntime, nameOf, nodes, poolNodes, runtime, reportFailure, version, type GroupView } from '../composables/proxy'
 import { latency, latencyText, rate } from '../format'
 
 const props = defineProps<{ view: GroupView; open?: boolean; editing?: boolean; traffic?: number }>()
@@ -11,7 +11,12 @@ const emit = defineEmits<{ toggle: []; edit: []; remove: [] }>()
 const current = computed(() => currentOf(props.view.id))
 const tag = computed(() => (props.view.id === FINAL ? '兜底' : props.view.builtin ? '默认' : ''))
 const typeLabel = computed(() => groupTypeLabels[props.view.type])
-const isEmpty = computed(() => (props.view.group ? props.view.group.empty : !props.view.members.length))
+// The group's members as the kernel runs them: the saved ones, then the subscription nodes it reports.
+const members = computed(() => {
+  const extra = (runtime.value?.groups[props.view.id]?.members ?? []).filter((id) => isPoolNode(id) && !props.view.members.includes(id))
+  return [...props.view.members, ...extra]
+})
+const isEmpty = computed(() => (props.view.group ? props.view.group.empty : !members.value.length))
 const sources = computed(() => {
   const group = props.view.group
   if (!group) return ''
@@ -26,6 +31,10 @@ const head = computed(() => lat(current.value))
 
 function subOf(id: string) {
   if (isGroup(id)) return `组 · ${nameOf(leafOf(id))}`
+  if (isPoolNode(id)) {
+    const node = poolNodes.value.find((item) => item.id === id)
+    return node ? `${node.type ?? ''} · ${node.provider_name}` : ''
+  }
   return nodes.value.find((node) => node.id === id)?.type ?? ''
 }
 
@@ -57,7 +66,7 @@ const memberTesting = (member: string) => testing[isGroup(member) ? `m:${member}
     <div class="ghead" @click="!editing && emit('toggle')">
       <span v-if="editing" class="handle" aria-hidden="true">⠿</span>
       <span class="nm">{{ view.name }}</span>
-      <span class="ty">{{ typeLabel }} · {{ view.members.length }}</span>
+      <span class="ty">{{ typeLabel }} · {{ members.length }}</span>
       <span v-if="tag" class="tag">{{ tag }}</span>
       <span class="sp"></span>
       <template v-if="editing">
@@ -93,11 +102,11 @@ const memberTesting = (member: string) => testing[isGroup(member) ? `m:${member}
     </div>
     <div v-if="sources" class="hint" style="padding: 0 4px">订阅：{{ sources }}</div>
     <div v-if="!open || editing" class="dots" @click="!editing && emit('toggle')">
-      <span v-for="member in view.members" :key="member" class="sq" :class="[lat(member).kind, { cur: member === current }]" :title="nameOf(member)"></span>
+      <span v-for="member in members" :key="member" class="sq" :class="[lat(member).kind, { cur: member === current }]" :title="nameOf(member)"></span>
       <span v-if="isEmpty" class="hint" style="color: var(--bad)">空组</span>
     </div>
     <div v-else class="mtiles">
-      <div v-for="member in view.members" :key="member" class="mtile" :class="{ cur: member === current, static: view.type !== 'selector' }">
+      <div v-for="member in members" :key="member" class="mtile" :class="{ cur: member === current, static: view.type !== 'selector' }">
         <button type="button" class="mpick" :aria-pressed="member === current" :disabled="view.type !== 'selector'" @click="select(member)">
           <span class="nm">{{ nameOf(member) }}</span>
           <span class="sub">{{ subOf(member) }}</span>

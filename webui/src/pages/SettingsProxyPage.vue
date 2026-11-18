@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ApiError, call, client, describe, type Schemas } from '../api/client'
-import { backendName, backendVersion, refreshStatus, status } from '../composables/status'
+import { backendName, backendStartedAt, backendVersion, refreshStatus, status } from '../composables/status'
 import { toast } from '../composables/toast'
-import { ago, triggers } from '../format'
+import { ago, duration, triggers } from '../format'
 import SettingsTabs from '../components/SettingsTabs.vue'
 import SwitchBackendModal from '../components/SwitchBackendModal.vue'
 import { loadProxy } from '../composables/proxy'
@@ -119,6 +119,7 @@ async function reapply() {
         <div class="v" :style="status && !status.singbox.running ? { color: 'var(--bad)' } : undefined">
           {{ !status ? '—' : status.singbox.running ? '运行中' : '未运行' }}
         </div>
+        <div v-if="status?.singbox.running && backendStartedAt" class="s">已运行 {{ duration(Math.max(0, Date.now() / 1000 - backendStartedAt)) }}</div>
       </div>
       <div class="tile">
         <div class="k">配置</div>

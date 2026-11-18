@@ -13,6 +13,8 @@ interface Brief {
   name: string
   type?: string
   reason?: string
+  download_via?: string
+  download_via_name?: string
 }
 interface Check {
   provider_count: number
@@ -108,8 +110,12 @@ async function confirm() {
           <span class="t2">{{ node.reason }}</span>
         </div>
       </div>
-      <div v-if="blocked.length" class="err">
-        这些订阅经由不生效的节点下载，切换会失败：{{ blocked.map((item) => item.name).join('、') }}。请先改它们的下载方式。
+      <div v-if="blocked.length && target === 'mihomo'" class="grid" style="gap: 8px">
+        <h4 class="sec">下载方式将改为直连的订阅 <span class="tag">{{ blocked.length }}</span></h4>
+        <div v-for="provider in blocked" :key="provider.id" class="item">
+          <span class="nm">{{ provider.name }}</span>
+          <span class="t2">原来经 {{ provider.download_via_name || provider.download_via }}</span>
+        </div>
       </div>
       <div class="t2">切换期间代理会短暂中断，已有连接会断开。</div>
     </template>
@@ -118,7 +124,7 @@ async function confirm() {
     <template #footer>
       <button class="btn" type="button" @click="emit('close')">取消</button>
       <button v-if="!check && error" class="btn" type="button" @click="load">重试</button>
-      <button class="btn pri" type="button" :disabled="busy || !check || blocked.length > 0" @click="confirm">确认切换</button>
+      <button class="btn pri" type="button" :disabled="busy || !check" @click="confirm">确认切换</button>
     </template>
   </AppModal>
 </template>

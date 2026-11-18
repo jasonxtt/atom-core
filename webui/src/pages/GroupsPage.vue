@@ -7,7 +7,7 @@ import AppModal from '../components/AppModal.vue'
 import GroupCard from '../components/GroupCard.vue'
 import { testGroup } from '../composables/delay'
 import { usePoll } from '../composables/poll'
-import { groupViews, loadProxy, loadRuntime, order, reportFailure, version, type GroupView } from '../composables/proxy'
+import { groupViews, loadPool, loadProviders, loadProxy, loadRuntime, order, reportFailure, version, type GroupView } from '../composables/proxy'
 import { refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
 
@@ -25,7 +25,11 @@ async function load() {
   }
 }
 onMounted(load)
-usePoll(loadRuntime, 5000)
+onMounted(() => void loadProviders().catch(() => {}))
+usePoll(async () => {
+  await loadRuntime()
+  await loadPool()
+}, 5000)
 
 // Columns as zashboard: a fixed number by width, groups dealt round-robin, so opening a card
 // only pushes the cards below it in its column.
