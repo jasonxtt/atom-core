@@ -687,6 +687,7 @@ fn mihomo_generates_native_subscriptions_and_automatic_groups() {
             interval: 900,
             filter: "HK|JP".to_owned(),
             download_via: None,
+            user_agent: String::new(),
         },
     });
     let group = |name: &str, kind: &str, strategy: &str| {
@@ -714,9 +715,23 @@ fn mihomo_generates_native_subscriptions_and_automatic_groups() {
     assert!(by_id(&fallback.id).get("proxies").is_none());
     assert_eq!(by_id(&load_balance.id)["strategy"], "round-robin");
     assert_eq!(by_id(&load_balance.id)["use"][0], provider);
+    assert!(config.get("header").is_none(), "no User-Agent: mihomo's own");
     if std::env::var_os("ATOM_TEST_MIHOMO").is_some() {
         check(&host, &bytes).unwrap();
     }
+
+    state.providers[0].settings.user_agent = "clash-verge/v2.4.0".to_owned();
+    state.validate(&[]).unwrap();
+    let bytes = generate(&host, &state, &[], "223.5.5.5", "secret").unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let with_agent = &value["proxy-providers"][provider];
+    assert_eq!(with_agent["header"], json!({"User-Agent": ["clash-verge/v2.4.0"]}));
+    assert_ne!(with_agent["path"], config["path"], "a new User-Agent downloads again");
+    if std::env::var_os("ATOM_TEST_MIHOMO").is_some() {
+        check(&host, &bytes).unwrap();
+    }
+    state.providers[0].settings.user_agent = "a\r\nb".to_owned();
+    assert!(state.validate(&[]).is_err());
 }
 
 fn mihomo_node(outbound: Value) -> Node {
@@ -947,6 +962,7 @@ fn mihomo_groups_take_all_providers_filter_and_skip_inactive_nodes() {
             interval: 900,
             filter: String::new(),
             download_via: None,
+            user_agent: String::new(),
         },
     });
     state.nodes.push(Node {

@@ -147,6 +147,10 @@ pub(crate) struct ProviderInput {
     pub(crate) filter: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) download_via: Option<String>,
+    /// The User-Agent of the subscription download ("" = mihomo's own,
+    /// `clash.meta/<version>`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) user_agent: String,
 }
 
 fn provider_interval() -> u32 {
@@ -594,6 +598,7 @@ pub(crate) fn check_settings(settings: &Settings, reserved: &[u16]) -> Result<()
 }
 
 const MAX_FILTER_LEN: usize = 200;
+const MAX_USER_AGENT_LEN: usize = 512;
 
 /// The group's name filter: case-insensitive; `None` when it is empty.
 fn compile_filter(filter: &str) -> Result<Option<regex::Regex>, String> {
@@ -806,6 +811,13 @@ impl ProxyState {
             }
             if provider.settings.download_via.as_deref().is_some_and(|id| !nodes.contains(id)) {
                 return Err(invalid(format!("{}: 订阅下载代理必须是已有的手动节点", provider.id)));
+            }
+            let agent = &provider.settings.user_agent;
+            if agent.len() > MAX_USER_AGENT_LEN || agent.chars().any(char::is_control) {
+                return Err(invalid(format!(
+                    "{}: User-Agent 最长 {MAX_USER_AGENT_LEN} 字节，不能含控制字符",
+                    provider.id
+                )));
             }
             // These expressions use Mihomo's regexp2 syntax. Validate the
             // syntax with its config check when applying the provider.

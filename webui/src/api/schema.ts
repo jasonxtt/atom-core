@@ -1890,6 +1890,7 @@ export interface components {
             interval: number;
             filter: string;
             download_via?: string | null;
+            user_agent: string;
         };
         ProxyProviderInput: {
             name: string;
@@ -1900,6 +1901,8 @@ export interface components {
             filter?: string;
             /** @description An existing manually imported node ID. The default is a direct download. */
             download_via?: string | null;
+            /** @description The User-Agent of the download, at most 512 bytes, without control characters; surrounding whitespace is trimmed. Empty (the default) is mihomo's own, `clash.meta/<version>`. */
+            user_agent?: string;
             version?: components["schemas"]["Version"];
         };
         GroupInput: {

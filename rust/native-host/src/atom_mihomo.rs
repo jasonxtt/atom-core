@@ -123,7 +123,14 @@ pub(crate) fn generate(
     rules.push(format!("MATCH,{FINAL}"));
     let providers = state.providers.iter().map(|provider| {
         let input = &provider.settings;
-        let digest = ring::digest::digest(&ring::digest::SHA256, input.url.as_bytes());
+        // A new User-Agent may get different content: a new cache file makes
+        // mihomo download it again. Without one the name stays as it was.
+        let source = if input.user_agent.is_empty() {
+            input.url.clone()
+        } else {
+            format!("{}\n{}", input.url, input.user_agent)
+        };
+        let digest = ring::digest::digest(&ring::digest::SHA256, source.as_bytes());
         let hash = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let mut entry = json!({
             "type":"http", "url":input.url, "interval":input.interval, "proxy":input.download_via.as_deref().unwrap_or("DIRECT"),
@@ -134,6 +141,9 @@ pub(crate) fn generate(
         });
         if !input.filter.is_empty() {
             entry["filter"] = json!(input.filter);
+        }
+        if !input.user_agent.is_empty() {
+            entry["header"] = json!({"User-Agent": [input.user_agent]});
         }
         (provider.id.clone(), entry)
     }).collect::<Map<String, Value>>();

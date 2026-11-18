@@ -938,6 +938,7 @@ fn provider_view(provider: &crate::atom_proxy::ProxyProvider) -> Value {
         "interval": provider.settings.interval,
         "filter": provider.settings.filter,
         "download_via": provider.settings.download_via,
+        "user_agent": provider.settings.user_agent,
     })
 }
 
@@ -1042,6 +1043,7 @@ async fn providers(
             let mut settings: ProviderInput = from_map(map)?;
             settings.url = settings.url.trim().to_owned();
             settings.filter = settings.filter.trim().to_owned();
+            settings.user_agent = settings.user_agent.trim().to_owned();
             let id = existing.map_or_else(
                 || {
                     crate::atom_rules::new_id("p-", &|id| {

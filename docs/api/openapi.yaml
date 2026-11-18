@@ -3875,13 +3875,14 @@ components:
           $ref: "#/components/schemas/Version"
     ProxyProvider:
       type: object
-      required: [id, name, interval, filter]
+      required: [id, name, interval, filter, user_agent]
       properties:
         id: {type: string}
         name: {type: string}
         interval: {type: integer}
         filter: {type: string}
         download_via: {type: string, nullable: true}
+        user_agent: {type: string}
     ProxyProviderInput:
       type: object
       required: [name]
@@ -3898,6 +3899,9 @@ components:
           type: string
           nullable: true
           description: An existing manually imported node ID. The default is a direct download.
+        user_agent:
+          type: string
+          description: The User-Agent of the download, at most 512 bytes, without control characters; surrounding whitespace is trimmed. Empty (the default) is mihomo's own, `clash.meta/<version>`.
         version: {$ref: "#/components/schemas/Version"}
     GroupInput:
       type: object

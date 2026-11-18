@@ -533,6 +533,7 @@ fn all_providers_excludes_a_provider_list() {
             interval: 3600,
             filter: String::new(),
             download_via: None,
+            user_agent: String::new(),
         },
     });
     let mut input = group("全部", GroupKind::Selector, &[]);
@@ -618,6 +619,7 @@ fn subscriptions_behind_inactive_nodes_download_directly() {
                 interval: 3600,
                 filter: String::new(),
                 download_via: Some(via.clone()),
+                user_agent: String::new(),
             },
         });
     }

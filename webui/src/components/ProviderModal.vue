@@ -16,12 +16,14 @@ const intervals: [number, string][] = [
   [43200, '12 小时'],
   [86400, '1 天']
 ]
+const agents = ['clash.meta', 'mihomo/1.19.34', 'clash-verge/v2.4.2', 'ClashMetaForAndroid/2.11.20.Meta']
 const form = reactive({
   name: props.provider?.name ?? '',
   url: '',
   interval: props.provider?.interval ?? 3600,
   via: props.provider?.download_via ?? '',
-  filter: props.provider?.filter ?? ''
+  filter: props.provider?.filter ?? '',
+  agent: props.provider?.user_agent ?? ''
 })
 const intervalOptions = computed(() => (intervals.some((item) => item[0] === form.interval) ? intervals : [...intervals, [form.interval, `${form.interval} 秒`] as [number, string]]))
 const viaOptions = computed(() => nodes.value.filter((node) => node.active !== false))
@@ -50,7 +52,7 @@ async function submit() {
       return
     }
   }
-  const body = { name, ...(url ? { url } : {}), interval: form.interval, filter: form.filter.trim(), download_via: form.via || null, version: formVersion.value }
+  const body = { name, ...(url ? { url } : {}), interval: form.interval, filter: form.filter.trim(), download_via: form.via || null, user_agent: form.agent.trim(), version: formVersion.value }
   busy.value = true
   try {
     if (props.provider) await call(client.PUT('/providers/{id}', { params: { path: { id: props.provider.id } }, body }))
@@ -64,7 +66,7 @@ async function submit() {
         await Promise.all([loadProxy(), loadProviders()])
         formVersion.value = version.value
         const latest = providers.value.find((item) => item.id === props.provider?.id)
-        if (latest) Object.assign(form, { name: latest.name, interval: latest.interval, via: latest.download_via ?? '', filter: latest.filter })
+        if (latest) Object.assign(form, { name: latest.name, interval: latest.interval, via: latest.download_via ?? '', filter: latest.filter, agent: latest.user_agent })
         error.value = '节点或订阅已在别处修改，已载入最新内容，请检查后再保存（409）'
       } catch (reloadFailure) {
         error.value = `节点或订阅已在别处修改（409），重新读取失败：${describe(reloadFailure)}`
@@ -86,10 +88,19 @@ async function submit() {
       <label for="pname">名称</label>
       <input id="pname" v-model="form.name" class="inp" autocomplete="off" />
     </div>
-    <div class="field">
-      <label for="purl">订阅地址</label>
-      <input id="purl" v-model="form.url" class="inp mono" placeholder="https://" autocomplete="off" spellcheck="false" />
-      <div v-if="provider" class="hint">留空保留原地址</div>
+    <div class="grid" style="gap: 12px; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr)">
+      <div class="field">
+        <label for="purl">订阅地址</label>
+        <input id="purl" v-model="form.url" class="inp mono" placeholder="https://" autocomplete="off" spellcheck="false" />
+        <div v-if="provider" class="hint">留空保留原地址</div>
+      </div>
+      <div class="field">
+        <label for="pua">User-Agent</label>
+        <input id="pua" v-model="form.agent" class="inp mono" list="pua-list" placeholder="clash.meta" maxlength="512" autocomplete="off" spellcheck="false" />
+        <datalist id="pua-list">
+          <option v-for="item in agents" :key="item" :value="item" />
+        </datalist>
+      </div>
     </div>
     <div class="grid g2" style="gap: 12px">
       <div class="field">
