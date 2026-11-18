@@ -4,7 +4,7 @@ import { RouterLink } from 'vue-router'
 import { call, client, describe, type Schemas } from '../api/client'
 import { usePoll } from '../composables/poll'
 import { loadRuntime, runtime } from '../composables/proxy'
-import { refreshStatus, status } from '../composables/status'
+import { backendName, refreshStatus, status } from '../composables/status'
 import { sparkArea, sparkLine } from '../composables/spark'
 import { toast } from '../composables/toast'
 import { ago, bytes, duration, latency, latencyText, rate, triggers } from '../format'
@@ -162,7 +162,7 @@ async function reapply() {
   applying.value = true
   try {
     await call(client.POST('/apply'))
-    toast('ok', '已重新应用到 sing-box')
+    toast('ok', `已重新应用到 ${backendName.value}`)
   } catch (error) {
     toast('bad', describe(error))
   } finally {
@@ -186,7 +186,7 @@ async function reapply() {
         <div class="s" v-if="uptime">运行 {{ uptime }}</div>
       </div>
       <div class="tile">
-        <div class="k">sing-box</div>
+        <div class="k">{{ backendName }}</div>
         <div class="v" :style="status && !status.singbox.running ? { color: 'var(--bad)' } : undefined">
           {{ !status ? '—' : status.singbox.running ? '运行中' : '未运行' }}
         </div>
@@ -219,7 +219,7 @@ async function reapply() {
       </svg>
       <div class="row t2">
         <span v-if="shares.atomdns != null">atomdns {{ shares.atomdns.toFixed(1) }}%</span>
-        <span v-if="shares.singbox != null">sing-box {{ shares.singbox.toFixed(1) }}%</span>
+        <span v-if="shares.singbox != null">{{ backendName }} {{ shares.singbox.toFixed(1) }}%</span>
         <span class="sp"></span>
         <span v-if="system?.cpu">{{ system.cpu.cores }} 核</span>
       </div>
@@ -237,7 +237,7 @@ async function reapply() {
       </svg>
       <div class="row t2">
         <span v-if="system?.atomdns">atomdns {{ bytes(system.atomdns.resident_bytes) }}</span>
-        <span v-if="system?.singbox">sing-box {{ bytes(system.singbox.resident_bytes) }}</span>
+        <span v-if="system?.singbox">{{ backendName }} {{ bytes(system.singbox.resident_bytes) }}</span>
         <span class="sp"></span>
         <span>整机</span>
       </div>

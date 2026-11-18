@@ -1,6 +1,9 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import OverviewPage from './pages/OverviewPage.vue'
-import SettingsPage from './pages/SettingsPage.vue'
+import SettingsNetworkPage from './pages/SettingsNetworkPage.vue'
+import SettingsPanelPage from './pages/SettingsPanelPage.vue'
+import SettingsProxyPage from './pages/SettingsProxyPage.vue'
+import SettingsSystemPage from './pages/SettingsSystemPage.vue'
 import ConnectionsPage from './pages/ConnectionsPage.vue'
 import DnsLogsPage from './pages/DnsLogsPage.vue'
 import DnsOverviewPage from './pages/DnsOverviewPage.vue'
@@ -32,7 +35,11 @@ export const router = createRouter({
     { path: '/dns/upstreams', component: DnsUpstreamsPage, meta: { title: 'DNS' } },
     { path: '/dns/logs', component: DnsLogsPage, meta: { title: 'DNS' } },
     { path: '/dns/settings', component: DnsSettingsPage, meta: { title: 'DNS' } },
-    { path: '/settings', component: SettingsPage, meta: { title: '设置' } },
+    { path: '/settings', redirect: '/settings/proxy' },
+    { path: '/settings/proxy', component: SettingsProxyPage, meta: { title: '设置' } },
+    { path: '/settings/network', component: SettingsNetworkPage, meta: { title: '设置' } },
+    { path: '/settings/panel', component: SettingsPanelPage, meta: { title: '设置' } },
+    { path: '/settings/system', component: SettingsSystemPage, meta: { title: '设置' } },
     { path: '/:rest(.*)*', redirect: '/' }
   ]
 })

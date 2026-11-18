@@ -1,5 +1,6 @@
 import type { Schemas } from '../api/client'
 import { rules, upstreamGroups } from './rules'
+import { backendName } from './status'
 
 export type AuditLog = Schemas['AuditLog']
 
@@ -35,7 +36,7 @@ export function tagLabel(key: string | undefined): string {
 
 /** An upstream group's display name (`domestic`, a custom group, the FakeIP group). */
 export function groupLabel(tag: string): string {
-  if (tag === FAKEIP_GROUP) return 'FakeIP（sing-box）'
+  if (tag === FAKEIP_GROUP) return `FakeIP（${backendName.value}）`
   return upstreamGroups.value.find((group) => group.tag === tag)?.name ?? tag
 }
 

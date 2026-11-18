@@ -10,7 +10,7 @@ type Runtime = { groups: Record<string, { now: string }>; nodes: Record<string, 
 export interface GroupView {
   id: string
   name: string
-  type: 'selector' | 'urltest'
+  type: Group['type']
   members: string[]
   builtin: boolean
   group?: Group

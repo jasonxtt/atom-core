@@ -7,7 +7,7 @@ import AppModal from '../components/AppModal.vue'
 import RulesTabs from '../components/RulesTabs.vue'
 import { FINAL_NAME, loadProxy } from '../composables/proxy'
 import { dnsLabel, groupName, upstreamName, loadRules, loadRulesets, loadUpstreams, proxyTargets, rules, rulesVersion, summary, type Rule } from '../composables/rules'
-import { refreshStatus } from '../composables/status'
+import { backendName, refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
 import { chainNames, directiveText, KIND_LABEL, viaLabel } from '../dryrun'
 import { originalBranches } from '../original'
@@ -72,7 +72,7 @@ async function test() {
   }
 }
 const resultLabel = (result: string) => (result === 'hit' ? '命中' : '未命中')
-const ruleStatus: Record<string, string> = { hit: '命中', miss: '未命中', off: '停用', singbox: '只在 sing-box' }
+const ruleStatus = computed<Record<string, string>>(() => ({ hit: '命中', miss: '未命中', off: '停用', singbox: `只在 ${backendName.value}` }))
 
 // ---- edits in the list ---------------------------------------------------------------
 /** The body that replaces `rule` (direct-only fields only on a direct rule). */

@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ApiError, call, client, describe, type Schemas } from '../api/client'
-import { refreshStatus, singboxVersion, status } from '../composables/status'
-import { setTheme, theme, themeLabels, type Theme } from '../composables/theme'
+import { backendName, backendVersion, refreshStatus, status } from '../composables/status'
 import { toast } from '../composables/toast'
-import { auth, loadAuth } from '../composables/auth'
 import { ago, triggers } from '../format'
-import MaintenanceCards from './MaintenanceCards.vue'
+import SettingsTabs from '../components/SettingsTabs.vue'
 
 const settings = ref<Schemas['Settings'] | null>(null)
 const form = reactive({ fakeip_range: '', resolver: '', mixed_port: '' })
@@ -74,7 +72,7 @@ async function reapply() {
   applying.value = true
   try {
     await call(client.POST('/apply'))
-    toast('ok', '已重新应用到 sing-box')
+    toast('ok', `已重新应用到 ${backendName.value}`)
   } catch (failure) {
     toast('bad', describe(failure))
   } finally {
@@ -82,167 +80,77 @@ async function reapply() {
     refreshStatus().catch(() => {})
   }
 }
-
-// The panel login: set, change (the current password when one is on) or turn off.
-const login = reactive({ username: '', password: '', current: '' })
-const loginError = ref('')
-const loginBusy = ref(false)
-onMounted(() => {
-  loadAuth()
-    .then(() => (login.username = auth.value?.username ?? ''))
-    .catch((failure) => (loginError.value = describe(failure)))
-})
-
-async function saveLogin() {
-  loginBusy.value = true
-  loginError.value = ''
-  try {
-    const body = { username: login.username.trim(), password: login.password, ...(auth.value?.enabled ? { current_password: login.current } : {}) }
-    auth.value = await call(client.PUT('/auth', { body }))
-    login.password = ''
-    login.current = ''
-    toast('ok', '已保存')
-  } catch (failure) {
-    loginError.value = describe(failure)
-  } finally {
-    loginBusy.value = false
-  }
-}
-
-async function disableLogin() {
-  loginBusy.value = true
-  loginError.value = ''
-  try {
-    auth.value = await call(client.DELETE('/auth', { body: { current_password: login.current } }))
-    login.password = ''
-    login.current = ''
-    toast('ok', '已关闭登录')
-  } catch (failure) {
-    loginError.value = describe(failure)
-  } finally {
-    loginBusy.value = false
-  }
-}
-
-const themes: Theme[] = ['system', 'light', 'dark']
 </script>
 
 <template>
-  <div class="settings-layout grid">
-    <div class="settings-column grid">
-      <form class="settings-proxy card grid" style="gap: 12px" @submit.prevent="save">
-        <!-- The fields open once the settings were read. -->
-        <div class="hd" style="margin: 0">
-          <h2>代理（sing-box）</h2>
-          <span class="sp"></span>
-          <button class="btn sm pri" type="submit" :disabled="!changed || saving">保存</button>
-        </div>
-        <div class="field">
-          <label for="fakeip">FakeIP 网段</label>
-          <input id="fakeip" v-model="form.fakeip_range" class="inp mono" autocomplete="off" :disabled="saving || !settings" />
-        </div>
-        <div class="field">
-          <label for="resolver">解析节点域名用的 DNS</label>
-          <input
-            id="resolver"
-            v-model="form.resolver"
-            class="inp mono"
-            autocomplete="off"
-            :disabled="saving || !settings"
-            :placeholder="settings ? `留空：${settings.resolver_effective}` : ''"
-          />
-        </div>
-        <div class="field">
-          <label for="mixed">mixed 代理端口</label>
-          <input id="mixed" v-model="form.mixed_port" class="inp mono" inputmode="numeric" autocomplete="off" :disabled="saving || !settings" />
-        </div>
-        <div v-if="error" class="row">
-          <div class="err" style="flex: 1">{{ error }}</div>
-          <button v-if="!settings" class="btn" type="button" @click="load">重试</button>
-        </div>
-      </form>
-
-      <div class="card grid" style="gap: 10px">
-        <h2>应用</h2>
-        <div class="row" v-if="status">
-          <span class="pill" :class="status.singbox.in_sync ? 'ok' : 'warn'"><span class="dot"></span>{{ status.singbox.in_sync ? '配置已同步' : '配置未同步' }}</span>
-          <span class="t2" v-if="status.last_apply">
-            最近：{{ ago(status.last_apply.at) }} · {{ triggers[status.last_apply.trigger] ?? status.last_apply.trigger }} ·
-            {{ status.last_apply.ok ? '成功' : '失败' }}
-          </span>
-        </div>
-        <div><button class="btn" :disabled="applying" @click="reapply">重新应用到 sing-box</button></div>
-      </div>
-      <form class="card grid" style="gap: 10px" @submit.prevent="saveLogin">
-        <div class="hd" style="margin: 0">
-          <h2>面板登录</h2>
-          <span class="sp"></span>
-          <span v-if="auth" class="pill" :class="auth.enabled ? 'ok' : 'warn'"><span class="dot"></span>{{ auth.enabled ? '已开启' : '未开启' }}</span>
-        </div>
-        <div class="field">
-          <label for="login-username">用户名</label>
-          <input id="login-username" v-model="login.username" class="inp" autocomplete="username" :disabled="loginBusy || !auth" />
-        </div>
-        <div class="field">
-          <label for="login-password">{{ auth?.enabled ? '新密码' : '密码' }}</label>
-          <input id="login-password" v-model="login.password" class="inp" type="password" autocomplete="new-password" :disabled="loginBusy || !auth" />
-        </div>
-        <div v-if="auth?.enabled" class="field">
-          <label for="login-current">当前密码</label>
-          <input id="login-current" v-model="login.current" class="inp" type="password" autocomplete="current-password" :disabled="loginBusy" />
-        </div>
-        <div v-if="loginError" class="err">{{ loginError }}</div>
-        <div class="row">
-          <button class="btn pri" type="submit" :disabled="loginBusy || !auth || !login.username.trim() || !login.password || (auth.enabled && !login.current)">保存</button>
-          <button v-if="auth?.enabled" class="btn danger" type="button" :disabled="loginBusy || !login.current" @click="disableLogin">关闭登录</button>
-        </div>
-      </form>
-      <div class="card grid" style="gap: 10px">
-        <h2>外观</h2>
-        <div class="seg" style="justify-self: start">
-          <button v-for="item in themes" :key="item" type="button" :class="{ on: theme === item }" @click="setTheme(item)">{{ themeLabels[item] }}</button>
-        </div>
+  <SettingsTabs />
+  <section class="card grid" style="gap: 14px">
+    <div class="hd" style="margin: 0">
+      <h2>代理内核</h2>
+      <span class="sp"></span>
+      <div class="seg" role="group" aria-label="切换代理内核">
+        <button v-for="name in ['sing-box', 'mihomo']" :key="name" type="button" :class="{ on: backendName === name }" :disabled="backendName !== name">{{ name }}</button>
       </div>
     </div>
-
-    <div class="settings-column grid">
-      <div class="settings-maintenance grid">
-        <MaintenanceCards />
+    <div class="grid g3" style="gap: 10px">
+      <div class="tile">
+        <div class="k">当前内核</div>
+        <div class="v">{{ status ? backendName : '—' }}</div>
+        <div class="s mono">{{ backendVersion || '—' }}</div>
       </div>
-      <div class="card grid" style="gap: 10px">
-        <h2>关于</h2>
-        <details>
-          <summary>诊断详情</summary>
-          <div class="row" style="margin-top: 8px">
-            <span>sing-box</span><span class="mono">{{ singboxVersion || '—' }}</span>
+      <div class="tile">
+        <div class="k">状态</div>
+        <div class="v" :style="status && !status.singbox.running ? { color: 'var(--bad)' } : undefined">
+          {{ !status ? '—' : status.singbox.running ? '运行中' : '未运行' }}
+        </div>
+      </div>
+      <div class="tile">
+        <div class="k">配置</div>
+        <template v-if="status && !status.singbox.in_sync">
+          <div class="row" style="gap: 8px">
+            <span class="v" style="color: var(--warn)">未同步</span>
+            <button class="btn sm" type="button" :disabled="applying" @click="reapply">重新应用</button>
           </div>
-        </details>
+          <div v-if="status.last_apply && !status.last_apply.ok" class="s">上次应用失败 · {{ ago(status.last_apply.at) }}</div>
+        </template>
+        <template v-else>
+          <div class="v">{{ status ? '已同步' : '—' }}</div>
+          <div v-if="status?.last_apply" class="s">最近应用 · {{ ago(status.last_apply.at) }} · {{ triggers[status.last_apply.trigger] ?? status.last_apply.trigger }}</div>
+        </template>
       </div>
     </div>
-  </div>
+  </section>
+
+  <form class="card grid" style="gap: 12px" @submit.prevent="save">
+    <div class="hd" style="margin: 0">
+      <h2>通用</h2>
+      <span class="sp"></span>
+      <button class="btn sm pri" type="submit" :disabled="!changed || saving">保存</button>
+    </div>
+    <div class="grid g3" style="gap: 12px">
+      <div class="field">
+        <label for="fakeip">FakeIP 网段</label>
+        <input id="fakeip" v-model="form.fakeip_range" class="inp mono" autocomplete="off" :disabled="saving || !settings" />
+      </div>
+      <div class="field">
+        <label for="resolver">解析节点域名用的 DNS</label>
+        <input
+          id="resolver"
+          v-model="form.resolver"
+          class="inp mono"
+          autocomplete="off"
+          :disabled="saving || !settings"
+          :placeholder="settings ? `留空：${settings.resolver_effective}` : ''"
+        />
+      </div>
+      <div class="field">
+        <label for="mixed">mixed 代理端口</label>
+        <input id="mixed" v-model="form.mixed_port" class="inp mono" inputmode="numeric" autocomplete="off" :disabled="saving || !settings" />
+      </div>
+    </div>
+    <div v-if="error" class="row">
+      <div class="err" style="flex: 1">{{ error }}</div>
+      <button v-if="!settings" class="btn" type="button" @click="load">重试</button>
+    </div>
+  </form>
 </template>
-
-<style scoped>
-.settings-layout {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
-}
-
-@media (max-width: 950px) {
-  .settings-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .settings-column {
-    display: contents;
-  }
-
-  .settings-proxy {
-    order: -2;
-  }
-
-  .settings-maintenance {
-    order: -1;
-  }
-}
-</style>

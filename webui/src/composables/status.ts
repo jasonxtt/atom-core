@@ -30,11 +30,14 @@ export const health = computed(() => {
   if (statusError.value) return { kind: 'bad', text: '无法连接' }
   const current = status.value
   if (!current) return { kind: 'idle', text: '连接中' }
-  if (!current.singbox.running) return { kind: 'bad', text: 'sing-box 未运行' }
+  if (!current.singbox.running) return { kind: 'bad', text: `${backendName.value} 未运行` }
   if (current.warnings.empty_groups?.length) return { kind: 'warn', text: '有空组' }
   if (!current.singbox.in_sync) return { kind: 'warn', text: '配置未同步' }
   return { kind: 'ok', text: '运行中 · 已同步' }
 })
 
-/** sing-box's version number (Clash API answers `sing-box 1.14.4-atom`). */
-export const singboxVersion = computed(() => status.value?.singbox.version?.replace(/^sing-box\s+/, '') ?? '')
+/** The active proxy kernel (`status.singbox` describes it whichever it is; sing-box when the field is absent). */
+export const backendName = computed(() => status.value?.backend ?? 'sing-box')
+
+/** The kernel's version number (Clash API answers `sing-box 1.14.4-atom`, `Mihomo Meta v1.19`). */
+export const backendVersion = computed(() => status.value?.singbox.version?.replace(/^(sing-box|mihomo(\s+meta)?)\s+/i, '') ?? '')

@@ -256,8 +256,10 @@ export interface paths {
         /**
          * Import nodes
          * @description `format`: `link` (share links, one per line: vless, vmess, trojan, ss,
-         *     hysteria2/hy2, tuic, anytls, socks), `yaml` (Clash/mihomo `proxies`) or
-         *     `json` (sing-box outbounds; `content` may then be a JSON value). All or
+         *     hysteria2/hy2, tuic, anytls, socks), `yaml` (Clash/mihomo `proxies`, also
+         *     snell, ssh, hysteria and wireguard) or
+         *     `json` (sing-box outbounds; `content` may then be a JSON value; a `wireguard` item
+         *     is the options of an endpoint). All or
          *     nothing: one item that does not convert refuses the whole import (400,
          *     "第 N 项"), and the resulting configuration must pass `sing-box check`.
          */
@@ -305,6 +307,120 @@ export interface paths {
         put?: never;
         /** Test one node's delay (Clash API) */
         post: operations["nodeDelay"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Saved mihomo subscriptions */
+        get: operations["listProxyProviders"];
+        put?: never;
+        /** Create a mihomo subscription */
+        post: operations["createProxyProvider"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Read a subscription definition */
+        get: operations["getProxyProvider"];
+        /** Replace a subscription definition */
+        put: operations["updateProxyProvider"];
+        post?: never;
+        /** Delete an unreferenced subscription */
+        delete: operations["deleteProxyProvider"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The nodes of every subscription (the node pool)
+         * @description Each node with its subscription; empty with `active` false under sing-box.
+         */
+        get: operations["listAllProxyProviderNodes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers/nodes/delay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test one subscription node */
+        post: operations["delayProxyProviderNode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers/{id}/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** List nodes from the active mihomo subscription */
+        get: operations["listProxyProviderNodes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers/{id}/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ask mihomo to refresh a subscription */
+        post: operations["refreshProxyProvider"];
         delete?: never;
         options?: never;
         head?: never;
@@ -428,13 +544,41 @@ export interface paths {
         get: operations["getSettings"];
         /**
          * Change any of the settings
-         * @description A new FakeIP range makes sing-box drop every FakeIP mapping and binding;
-         *     the caches and the binding ledger are emptied. A new mixed port also
+         * @description Switching proxy backends or changing the FakeIP range clears
+         *     the AtomDNS caches and binding ledger. A new mixed port also
          *     moves AtomDNS's `main_proxy` when it pointed at `127.0.0.1:<old port>`
          *     (that reloads AtomDNS's configuration). The TTL caps (1 to 86400
          *     seconds) do not touch sing-box.
+         *
+         *     Switching `backend` is explicit. Ask `GET /settings/backend-check` first.
+         *     To sing-box: every fallback and load-balance group needs an entry in
+         *     `group_actions` (`urltest` changes its type for good; `delete` deletes it like
+         *     `DELETE /groups/{id}?confirm=true`: the rules that proxy to it move to Final); a missing
+         *     one gives 409 with `groups`. Subscriptions are kept but do not run. To mihomo: when
+         *     nodes cannot be converted, the request needs `confirm_inactive_nodes: true`, else 409 with
+         *     `nodes`; those nodes stay saved but are inactive until sing-box is selected again.
          */
         put: operations["putSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/backend-check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What switching to a kernel would change
+         * @description Reads only; the data of the switch's confirmation window.
+         */
+        get: operations["checkBackendSwitch"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -1613,7 +1757,7 @@ export interface components {
                     id: string;
                     name: string;
                     /** @enum {string} */
-                    kind: "final" | "selector" | "urltest" | "node" | "other";
+                    kind: "final" | "selector" | "urltest" | "fallback" | "load-balance" | "node" | "other";
                 }[];
                 chain_error?: string;
                 rule?: {
@@ -1715,8 +1859,18 @@ export interface components {
             type?: string;
             server?: string;
             server_port?: number;
-            /** @description The sing-box outbound without any credential. */
+            /**
+             * @description The sing-box outbound without any credential. A `wireguard` node is the options of a
+             *     sing-box endpoint (`address`, `private_key`, `peers`).
+             */
             outbound: Record<string, never>;
+            /**
+             * @description False when the selected kernel cannot run the node (mihomo only). It stays saved, is left
+             *     out of the mihomo configuration and of the groups' members there, and runs again under sing-box.
+             */
+            active?: boolean;
+            /** @description Why the node is inactive, in words for the user. */
+            inactive_reason?: string | null;
             /** @description The groups that contain it. */
             groups: string[];
         };
@@ -1730,15 +1884,51 @@ export interface components {
             timeout?: number;
             version?: components["schemas"]["Version"];
         };
+        ProxyProvider: {
+            id: string;
+            name: string;
+            interval: number;
+            filter: string;
+            download_via?: string | null;
+        };
+        ProxyProviderInput: {
+            name: string;
+            /** @description HTTP(S) subscription URL. Omit it on PUT to retain the saved URL. */
+            url?: string;
+            /** @default 3600 */
+            interval?: number;
+            filter?: string;
+            /** @description An existing manually imported node ID. The default is a direct download. */
+            download_via?: string | null;
+            version?: components["schemas"]["Version"];
+        };
         GroupInput: {
             name: string;
-            /** @enum {string} */
-            type: "selector" | "urltest";
+            /**
+             * @description fallback and load-balance only with mihomo (400 under sing-box).
+             * @enum {string}
+             */
+            type: "selector" | "urltest" | "fallback" | "load-balance";
             /** @description Node and group IDs, in order. */
             members?: string[];
+            /** @description IDs of the subscriptions the group takes members from (mihomo `use`). */
+            providers?: string[];
+            /**
+             * @description "All subscriptions" as the source of members: every subscription, the ones added later
+             *     included (mihomo `include-all-providers`). Exclusive with `providers` (400 when both are given).
+             */
+            all_providers?: boolean;
+            /**
+             * @description Load-balance only.
+             * @enum {string}
+             */
+            strategy?: "consistent-hashing" | "round-robin" | "sticky-sessions";
             /**
              * @description A regular expression over node names, case-insensitive (a plain keyword is one). Every
-             *     matching node is a member too, and nodes added later join on their own. "" is none.
+             *     matching node is a member too, and nodes added later join on their own. With mihomo it
+             *     filters the group's subscription nodes as well, by their names without the subscription
+             *     prefix (the start anchor `^` stays at the start of the name); the rest of the syntax is
+             *     read by mihomo's regexp2 there. "" is none.
              */
             filter?: string;
             /**
@@ -1746,11 +1936,11 @@ export interface components {
              *     (what it does not name follows in its own order). Without a filter it is dropped.
              */
             order?: string[];
-            /** @description selector only; "" is the first member. */
+            /** @description Selector only. Use a static ID or a runtime provider node ID; "" is the first member. */
             selected?: string;
-            /** @description urltest only (default https://www.gstatic.com/generate_204). */
+            /** @description Automatic groups (default https://www.gstatic.com/generate_204). */
             url?: string;
-            /** @description urltest only, like 30s, 3m, 1h30m (default 3m). */
+            /** @description Automatic groups, like 30s, 3m, 1h30m (default 3m). */
             interval?: string;
             /** @description urltest only, milliseconds (default 50). */
             tolerance?: number;
@@ -1760,18 +1950,27 @@ export interface components {
             id: string;
             name: string;
             /** @enum {string} */
-            type: "selector" | "urltest";
+            type: "selector" | "urltest" | "fallback" | "load-balance";
             /** @description The manually chosen members (not the filtered nodes). */
             members: string[];
+            /** @description IDs of the subscriptions the group takes members from. */
+            providers?: string[];
+            /** @description The group takes members from every subscription (`providers` is then empty). */
+            all_providers?: boolean;
+            /**
+             * @description Load-balance only.
+             * @enum {string}
+             */
+            strategy?: "consistent-hashing" | "round-robin" | "sticky-sessions";
             filter?: string;
             order?: string[];
-            /** @description The node IDs the filter matches now (members too, and not removable one by one). */
+            /** @description The node IDs the filter matches now (members too, and not removable one by one). Nodes the kernel cannot run are left out. */
             matched?: string[];
             selected?: string;
             url?: string;
             interval?: string;
             tolerance?: number;
-            /** @description No members (all its traffic is refused). */
+            /** @description No members the kernel can run (all its traffic is refused). */
             empty: boolean;
             builtin: boolean;
             /** @description selector only; the member in use. */
@@ -1789,6 +1988,19 @@ export interface components {
         };
         Settings: {
             version: components["schemas"]["Version"];
+            warnings?: {
+                empty_groups?: string[];
+                /** @description Subscriptions kept but not running (sing-box). */
+                inactive_providers?: string[];
+                /** @description Nodes the selected kernel cannot run (mihomo). */
+                inactive_nodes?: {
+                    id?: string;
+                    name?: string;
+                    reason?: string;
+                }[];
+            };
+            /** @enum {string} */
+            backend?: "sing-box" | "mihomo";
             /** @description IPv4 prefix, length 8 to 24 (default 28.0.0.0/8). */
             fakeip_range: string;
             resolver: string;
@@ -1867,7 +2079,7 @@ export interface components {
         ApplyRecord: {
             at: number;
             /** @enum {string} */
-            trigger: "nodes" | "groups" | "final" | "settings" | "rules" | "rulesets" | "apply" | "startup";
+            trigger: "nodes" | "groups" | "providers" | "final" | "settings" | "rules" | "rulesets" | "apply" | "startup";
             ok: boolean;
             changed: boolean;
             error?: string;
@@ -1876,9 +2088,11 @@ export interface components {
             atomdns: {
                 version?: string;
             };
+            /** @enum {string} */
+            backend?: "sing-box" | "mihomo";
             singbox: {
                 running?: boolean;
-                /** @description The `version` of Clash API `/version` (`sing-box 1.14.4-atom`); null when sing-box does not answer. */
+                /** @description The active proxy backend and its version are reported; version is null when it does not answer. */
                 version?: string | null;
                 /** @description The running file is the one the current state generates. */
                 in_sync?: boolean;
@@ -1910,11 +2124,31 @@ export interface components {
                 } | null;
             };
             warnings: {
+                /** @description Subscriptions kept but not running (sing-box). */
+                inactive_providers?: string[];
+                /** @description Nodes the selected kernel cannot run (mihomo). */
+                inactive_nodes?: {
+                    id?: string;
+                    name?: string;
+                    reason?: string;
+                }[];
                 empty_groups?: string[];
             };
         };
     };
     responses: {
+        /** @description Public subscription definition and proxy-state version. */
+        ProxyProviderChange: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    version?: components["schemas"]["Version"];
+                    provider?: components["schemas"]["ProxyProvider"];
+                };
+            };
+        };
         /** @description Task started. Poll the maintenance overview for progress. */
         MaintenanceAccepted: {
             headers: {
@@ -2693,6 +2927,238 @@ export interface operations {
             default: components["responses"]["Error"];
         };
     };
+    listProxyProviders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Subscription definitions without URLs. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        version?: components["schemas"]["Version"];
+                        active?: boolean;
+                        providers?: components["schemas"]["ProxyProvider"][];
+                    };
+                };
+            };
+        };
+    };
+    createProxyProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxyProviderInput"] & Record<string, never>;
+            };
+        };
+        responses: {
+            201: components["responses"]["ProxyProviderChange"];
+            default: components["responses"]["Error"];
+        };
+    };
+    getProxyProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["ProxyProviderChange"];
+            default: components["responses"]["Error"];
+        };
+    };
+    updateProxyProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProxyProviderInput"];
+            };
+        };
+        responses: {
+            200: components["responses"]["ProxyProviderChange"];
+            default: components["responses"]["Error"];
+        };
+    };
+    deleteProxyProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Subscription removed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The subscription is still referenced or the request version is stale. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    listAllProxyProviderNodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime view of all subscription nodes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        active?: boolean;
+                        nodes?: {
+                            /** @description `p-xxxxxxxx/name` */
+                            id?: string;
+                            name?: string;
+                            type?: string | null;
+                            alive?: boolean | null;
+                            delay?: number | null;
+                            provider_id?: string;
+                            provider_name?: string;
+                        }[];
+                    };
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    delayProxyProviderNode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The node's `p-xxxxxxxx/name`. */
+                    id: string;
+                    url?: string;
+                    /** @description Milliseconds, 100 to 30000 (default 5000). */
+                    timeout?: number;
+                };
+            };
+        };
+        responses: {
+            /** @description The delay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        id?: string;
+                        delay?: number | null;
+                    };
+                };
+            };
+            /** @description mihomo is not the selected kernel. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    listProxyProviderNodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Subscription runtime view. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        id?: string;
+                        active?: boolean;
+                        updated_at?: string | null;
+                        nodes?: {
+                            id?: string;
+                            name?: string;
+                            type?: string | null;
+                            alive?: boolean | null;
+                            delay?: number | null;
+                        }[];
+                    };
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    refreshProxyProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Subscription refreshed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Error"];
+        };
+    };
     listGroups: {
         parameters: {
             query?: never;
@@ -3028,6 +3494,17 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
+                    /** @enum {string} */
+                    backend?: "sing-box" | "mihomo";
+                    /**
+                     * @description Switching to sing-box only: group ID → `urltest` or `delete`, for every fallback
+                     *     and load-balance group (400 for any other group or action, or when not switching to sing-box).
+                     */
+                    group_actions?: {
+                        [key: string]: "urltest" | "delete";
+                    };
+                    /** @description Switching to mihomo only, accepting that the nodes it cannot run stay inactive. */
+                    confirm_inactive_nodes?: boolean;
                     fakeip_range?: string;
                     /** @description "" (follow the domestic upstreams), an IP, udp://IP[:port] or tcp://IP[:port]. */
                     resolver?: string;
@@ -3049,10 +3526,72 @@ export interface operations {
                 };
             };
             400: components["responses"]["Error"];
-            409: components["responses"]["Conflict"];
+            /**
+             * @description Stale version, or a switch that needs a decision. `groups` (to sing-box): the fallback
+             *     and load-balance groups without a `group_actions` entry, `{id, name, type}`. `nodes` (to
+             *     mihomo): the nodes it cannot run, `{id, name, type, reason}`.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        error?: string;
+                        groups?: Record<string, never>[];
+                        nodes?: Record<string, never>[];
+                    };
+                };
+            };
             500: components["responses"]["Error"];
             502: components["responses"]["Error"];
             503: components["responses"]["Error"];
+            default: components["responses"]["Error"];
+        };
+    };
+    checkBackendSwitch: {
+        parameters: {
+            query: {
+                target: "sing-box" | "mihomo";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The effects of the switch. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        target?: string;
+                        current?: string;
+                        /** @description Subscriptions; they stay saved but do not run under sing-box. */
+                        provider_count?: number;
+                        /** @description Nodes the target cannot run (always empty for sing-box). */
+                        inactive_nodes?: {
+                            id?: string;
+                            name?: string;
+                            type?: string;
+                            reason?: string;
+                        }[];
+                        /** @description Subscriptions downloaded through an inactive node; the switch to mihomo fails until that changes. */
+                        blocked_providers?: Record<string, never>[];
+                        /** @description Fallback and load-balance groups (to sing-box); each needs a `group_actions` entry. */
+                        groups_to_handle?: {
+                            id?: string;
+                            name?: string;
+                            type?: string;
+                        }[];
+                        /** @description Groups whose members all come from subscriptions (under sing-box they have none). */
+                        provider_only_groups?: Record<string, never>[];
+                    };
+                };
+            };
+            400: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };
     };
