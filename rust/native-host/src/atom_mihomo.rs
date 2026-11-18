@@ -6,6 +6,36 @@ use crate::atom_proxy::{self, FINAL, GroupKind, Node, ProxyState};
 use crate::atom_rules::Action;
 use crate::atom_singbox::{Host, IpRule};
 
+/// Removes the subscription caches (`providers/p-*.yaml`) that the live
+/// configuration no longer names, e.g. after a URL change or a removal.
+pub(crate) fn prune_provider_caches(dir: &std::path::Path, live: &[u8]) {
+    let Ok(config) = serde_json::from_slice::<Value>(live) else {
+        return;
+    };
+    let keep: std::collections::HashSet<String> = config["proxy-providers"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(_, provider)| provider["path"].as_str())
+        .filter_map(|path| path.strip_prefix("providers/").map(str::to_owned))
+        .collect();
+    let Ok(entries) = std::fs::read_dir(dir.join("providers")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("p-")
+            && name.ends_with(".yaml")
+            && !keep.contains(&name)
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
+            if let Err(error) = std::fs::remove_file(entry.path()) {
+                eprintln!("清理订阅缓存 {name} 失败: {error}");
+            }
+        }
+    }
+}
+
 pub(crate) fn generate(
     host: &Host,
     state: &ProxyState,
@@ -197,7 +227,7 @@ fn proxy(node: &Node) -> Result<Value, String> {
     convert_proxy(node).map_err(|error| format!("节点 {} ({})：{error}", node.name, node.id))
 }
 
-fn convert_proxy(node: &Node) -> Result<Value, String> {
+pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
     let mut options = node.outbound.clone();
     let kind = options.remove("type").unwrap_or_default();
     let ty = match kind.as_str() {
@@ -228,8 +258,18 @@ fn convert_proxy(node: &Node) -> Result<Value, String> {
             ("udp_relay_mode", "udp-relay-mode"),
         ],
     );
-    if matches!(ty, "ss" | "socks5" | "vless" | "vmess" | "trojan") {
+    if matches!(ty, "ss" | "socks5" | "vless" | "vmess" | "trojan" | "anytls") {
         out.insert("udp".into(), json!(true));
+    }
+    if ty == "hysteria2" {
+        for (source, target) in [("up_mbps", "up"), ("down_mbps", "down")] {
+            if let Some(value) = options.remove(source) {
+                let mbps = value
+                    .as_u64()
+                    .ok_or_else(|| format!("{source} 必须是整数"))?;
+                out.insert(target.into(), json!(format!("{mbps} Mbps")));
+            }
+        }
     }
     if ty == "ss" {
         if let Some(plugin) = options.remove("plugin") {
@@ -275,11 +315,15 @@ fn convert_proxy(node: &Node) -> Result<Value, String> {
         );
         no_extra(&obfs)?;
     }
+    let tls_enabled = options
+        .get("tls")
+        .and_then(|tls| tls.get("enabled"))
+        .is_some_and(|value| *value == true);
     if let Some(tls) = options.remove("tls") {
         convert_tls(object(tls, "tls")?, &mut out, ty)?;
     }
     if let Some(transport) = options.remove("transport") {
-        convert_transport(object(transport, "transport")?, &mut out)?;
+        convert_transport(object(transport, "transport")?, &mut out, tls_enabled)?;
     }
     no_extra(&options)?;
     Ok(Value::Object(out))
@@ -343,6 +387,7 @@ fn convert_tls(
 fn convert_transport(
     mut transport: Map<String, Value>,
     out: &mut Map<String, Value>,
+    tls: bool,
 ) -> Result<(), String> {
     let kind = transport.remove("type").unwrap_or_default();
     let mut opts = Map::new();
@@ -376,13 +421,41 @@ fn convert_transport(
             );
             "grpc"
         }
-        Some("http") => {
+        // Mihomo's h2 needs TLS; a plain HTTP transport is its http network.
+        Some("http") if tls => {
             copy(
                 &mut transport,
                 &mut opts,
                 &[("host", "host"), ("path", "path")],
             );
             "h2"
+        }
+        Some("http") => {
+            copy(&mut transport, &mut opts, &[("method", "method")]);
+            if let Some(path) = transport.remove("path") {
+                opts.insert("path".into(), json!([path]));
+            }
+            let mut headers = Map::new();
+            if let Some(Value::Object(values)) = transport.remove("headers") {
+                for (name, value) in values {
+                    let list = match value {
+                        Value::Array(list) => list,
+                        value => vec![value],
+                    };
+                    headers.insert(name, Value::Array(list));
+                }
+            }
+            if let Some(host) = transport.remove("host") {
+                let list = match host {
+                    Value::Array(list) => list,
+                    host => vec![host],
+                };
+                headers.insert("Host".into(), Value::Array(list));
+            }
+            if !headers.is_empty() {
+                opts.insert("headers".into(), Value::Object(headers));
+            }
+            "http"
         }
         _ => return Err("mihomo 未支持转换此传输协议".into()),
     };

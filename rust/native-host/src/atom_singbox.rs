@@ -529,7 +529,10 @@ pub(crate) fn switch_blocking(
         .and_then(|()| flush_fakeip(next, secret))
         .and_then(|()| sync_selections(next, secret, chosen))
     {
-        Ok(()) => return Ok(()),
+        Ok(()) => {
+            prune_provider_caches(next);
+            return Ok(());
+        }
         Err(error) => error,
     };
     Err(ApplyError::Runtime(format!(
@@ -544,6 +547,14 @@ pub(crate) fn switch_back(old: &Host, next: &Host, old_chosen: &[(String, String
     }
     let bytes = read_live(old);
     rollback(old, bytes.as_deref(), old_chosen)
+}
+
+fn prune_provider_caches(host: &Host) {
+    if host.backend == Backend::Mihomo {
+        if let Some(live) = read_live(host) {
+            crate::atom_mihomo::prune_provider_caches(&host.dir, &live);
+        }
+    }
 }
 
 fn flush_fakeip(host: &Host, secret: &str) -> Result<(), String> {
@@ -749,7 +760,10 @@ fn apply_checked(
         })
         .and_then(|()| sync_selections(host, secret, chosen))
     {
-        Ok(()) => return Ok(()),
+        Ok(()) => {
+            prune_provider_caches(host);
+            return Ok(());
+        }
         Err(failure) => failure,
     };
     Err(ApplyError::Runtime(format!(

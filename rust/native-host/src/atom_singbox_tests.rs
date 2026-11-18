@@ -717,3 +717,83 @@ fn mihomo_generates_native_subscriptions_and_automatic_groups() {
         check(&host, &bytes).unwrap();
     }
 }
+
+fn mihomo_node(outbound: Value) -> Node {
+    Node {
+        id: "n-1".to_owned(),
+        name: "n".to_owned(),
+        outbound: outbound.as_object().unwrap().clone(),
+    }
+}
+
+#[test]
+fn mihomo_http_transport_follows_tls() {
+    let outbound = |tls: bool| {
+        json!({
+            "type":"vmess", "server":"h.test", "server_port":80, "uuid":"u",
+            "tls":{"enabled":tls},
+            "transport":{"type":"http", "host":["a.test"], "path":"/x", "method":"POST",
+                "headers":{"X-A":"1", "X-B":["2","3"]}}
+        })
+    };
+    let plain = crate::atom_mihomo::convert_proxy(&mihomo_node(outbound(false))).unwrap();
+    assert_eq!(plain["network"], "http");
+    assert!(plain.get("h2-opts").is_none());
+    let opts = &plain["http-opts"];
+    assert_eq!(opts["method"], "POST");
+    assert_eq!(opts["path"], json!(["/x"]));
+    assert_eq!(
+        opts["headers"],
+        json!({"X-A":["1"], "X-B":["2","3"], "Host":["a.test"]})
+    );
+    let secure = crate::atom_mihomo::convert_proxy(&mihomo_node(outbound(true)));
+    // headers and method have no h2 counterpart: still refused rather than dropped
+    assert!(secure.is_err());
+    let mut h2 = outbound(true);
+    h2["transport"] = json!({"type":"http", "host":["a.test"], "path":"/x"});
+    let secure = crate::atom_mihomo::convert_proxy(&mihomo_node(h2)).unwrap();
+    assert_eq!(secure["network"], "h2");
+    assert_eq!(secure["h2-opts"], json!({"host":["a.test"], "path":"/x"}));
+}
+
+#[test]
+fn mihomo_anytls_has_udp_and_hysteria2_maps_bandwidth() {
+    let anytls = crate::atom_mihomo::convert_proxy(&mihomo_node(json!({
+        "type":"anytls", "server":"a.test", "server_port":443, "password":"p",
+        "tls":{"enabled":true, "server_name":"a.test"}
+    })))
+    .unwrap();
+    assert_eq!(anytls["udp"], true);
+    let hysteria2 = crate::atom_mihomo::convert_proxy(&mihomo_node(json!({
+        "type":"hysteria2", "server":"h.test", "server_port":443, "password":"p",
+        "up_mbps":50, "down_mbps":200,
+        "tls":{"enabled":true, "server_name":"h.test"}
+    })))
+    .unwrap();
+    assert_eq!(hysteria2["up"], "50 Mbps");
+    assert_eq!(hysteria2["down"], "200 Mbps");
+    assert!(hysteria2.get("up_mbps").is_none());
+}
+
+#[test]
+fn mihomo_prunes_only_stale_subscription_caches() {
+    let dir = std::env::temp_dir().join(format!("atom-prune-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cache = dir.join("providers");
+    std::fs::create_dir_all(&cache).unwrap();
+    for name in ["p-00000001-aa.yaml", "p-00000001-bb.yaml", "p-00000002-cc.yaml", "other.yaml", "p-note.txt"] {
+        std::fs::write(cache.join(name), "x").unwrap();
+    }
+    let live = br#"{"proxy-providers":{"p-00000001":{"path":"providers/p-00000001-bb.yaml"}}}"#;
+    crate::atom_mihomo::prune_provider_caches(&dir, live);
+    let mut left: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["other.yaml", "p-00000001-bb.yaml", "p-note.txt"]);
+    // an unreadable live file prunes nothing
+    crate::atom_mihomo::prune_provider_caches(&dir, b"not json");
+    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 3);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
