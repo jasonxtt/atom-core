@@ -410,6 +410,10 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
     if let Some(transport) = options.remove("transport") {
         convert_transport(object(transport, "transport")?, &mut out, tls_enabled)?;
     }
+    // A stored multiplex block that is switched off is the same as none.
+    if options.get("multiplex").and_then(|m| m.get("enabled")) != Some(&json!(true)) {
+        options.remove("multiplex");
+    }
     no_extra(&options)?;
     Ok(Value::Object(out))
 }

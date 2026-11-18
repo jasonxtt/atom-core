@@ -1079,3 +1079,12 @@ fn mihomo_conversion_keeps_the_singbox_meaning_of_defaults_and_conflicts() {
     wg["peers"].as_array_mut().unwrap().push(second);
     assert!(convert(wg).unwrap_err().contains("persistent-keepalive"));
 }
+
+#[test]
+fn mihomo_ignores_a_disabled_multiplex_block() {
+    let off = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u",
+        "multiplex":{"enabled":false, "protocol":"h2mux", "max_connections":1, "brutal":{"enabled":false}}});
+    assert!(crate::atom_mihomo::convert_proxy(&mihomo_node(off)).is_ok());
+    let on = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u", "multiplex":{"enabled":true}});
+    assert!(crate::atom_mihomo::convert_proxy(&mihomo_node(on)).is_err());
+}
