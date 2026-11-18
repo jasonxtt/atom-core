@@ -670,10 +670,16 @@ fn section(proxy: &Map<String, Value>, key: &str) -> Map<String, Value> {
 
 /// mihomo `smux` (and `brutal-opts`) to sing-box `multiplex`; both are
 /// sing-mux. A switched-off block is dropped.
-fn clash_smux(proxy: &Map<String, Value>) -> Result<Option<Value>, String> {
+fn clash_smux(proxy: &Map<String, Value>, kind: &str) -> Result<Option<Value>, String> {
     let smux = section(proxy, "smux");
     if !truthy(&smux, "enabled") {
         return Ok(None);
+    }
+    if !matches!(kind, "ss" | "vmess" | "vless" | "trojan") {
+        return Err(format!("sing-box 的 {kind} 节点不支持多路复用（smux）"));
+    }
+    if truthy(&smux, "only-tcp") || truthy(&smux, "only_tcp") {
+        return Err("sing-box 的多路复用没有 only-tcp".into());
     }
     let mut multiplex = Map::from_iter([("enabled".to_owned(), json!(true))]);
     let protocol = text(&smux, "protocol");
@@ -698,21 +704,39 @@ fn clash_smux(proxy: &Map<String, Value>) -> Result<Option<Value>, String> {
     if truthy(&brutal, "enabled") {
         let mut out = Map::from_iter([("enabled".to_owned(), json!(true))]);
         for (source, target) in [("up", "up_mbps"), ("down", "down_mbps")] {
-            let value = text(&brutal, source);
-            // A bare number is Mbps in mihomo; other units are not converted.
-            let digits = value
-                .strip_suffix("Mbps")
-                .or_else(|| value.strip_suffix("mbps"))
-                .unwrap_or(&value)
-                .trim();
-            let mbps: u64 = digits
-                .parse()
-                .map_err(|_| format!("brutal-opts 的 {source} 只支持以 Mbps 为单位的整数"))?;
+            let mbps = clash_rate_mbps(&text(&brutal, source))
+                .ok_or_else(|| format!("brutal-opts 的 {source} 不是有效速率"))?;
             out.insert(target.into(), json!(mbps));
         }
         multiplex.insert("brutal".into(), Value::Object(out));
     }
     Ok(Some(Value::Object(multiplex)))
+}
+
+/// A mihomo rate (`StringToBps`: a bare integer is Mbps, otherwise
+/// `<n>[ ][K|M|G|T](bps|Bps)`) in whole Mbps; `None` for what mihomo reads
+/// as zero or anything below 1 Mbps.
+fn clash_rate_mbps(value: &str) -> Option<u64> {
+    if let Ok(mbps) = value.parse::<u64>() {
+        return (mbps > 0).then_some(mbps);
+    }
+    let digits = value.bytes().take_while(u8::is_ascii_digit).count();
+    let number: u64 = value[..digits].parse().ok()?;
+    let rest = value[digits..].trim_start();
+    let (scale, unit) = match rest.as_bytes().first()? {
+        b'K' => (1e3, &rest[1..]),
+        b'M' => (1e6, &rest[1..]),
+        b'G' => (1e9, &rest[1..]),
+        b'T' => (1e12, &rest[1..]),
+        _ => (1.0, rest),
+    };
+    let bits = match unit {
+        "bps" => number as f64 * scale,
+        "Bps" => number as f64 * scale * 8.0,
+        _ => return None,
+    };
+    let mbps = (bits / 1e6) as u64;
+    (mbps > 0).then_some(mbps)
 }
 
 fn clash_tls(proxy: &Map<String, Value>, enabled: bool) -> Tls {
@@ -845,6 +869,7 @@ fn clash_wireguard(proxy: &Map<String, Value>) -> Result<Map<String, Value>, Str
 fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
     let kind = text(proxy, "type");
     if kind == "wireguard" {
+        clash_smux(proxy, &kind)?;
         let outbound = clash_wireguard(proxy)?;
         let name = text(proxy, "name");
         let name = if name.is_empty() {
@@ -1095,8 +1120,9 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         "" => return Err("缺少 type".into()),
         other => return Err(format!("不支持的 Clash 节点类型 `{other}`")),
     };
-    put(&mut outbound, "multiplex", clash_smux(proxy)?);
-    if truthy(proxy, "tfo") {
+    put(&mut outbound, "multiplex", clash_smux(proxy, &kind)?);
+    // sing-box rejects it on AnyTLS and it means nothing over QUIC.
+    if truthy(proxy, "tfo") && !matches!(kind.as_str(), "anytls" | "hysteria" | "hysteria2" | "tuic") {
         outbound.insert("tcp_fast_open".into(), json!(true));
     }
     for key in ["uuid", "password", "method"] {

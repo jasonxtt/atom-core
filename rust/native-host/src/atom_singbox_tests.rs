@@ -1086,6 +1086,12 @@ fn mihomo_ignores_a_disabled_multiplex_block() {
         "multiplex":{"enabled":false, "protocol":"h2mux", "max_connections":1, "brutal":{"enabled":false}}});
     let out = crate::atom_mihomo::convert_proxy(&mihomo_node(off)).unwrap();
     assert!(out.get("smux").is_none());
+    let null = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u", "multiplex":null});
+    assert!(crate::atom_mihomo::convert_proxy(&mihomo_node(null)).is_ok());
+    let brutal_off = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u",
+        "multiplex":{"enabled":true, "brutal":{"enabled":false, "up_mbps":null}}});
+    let out = crate::atom_mihomo::convert_proxy(&mihomo_node(brutal_off)).unwrap();
+    assert_eq!(out["smux"], json!({"enabled":true}));
     let bad = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u", "multiplex":"on"});
     assert!(crate::atom_mihomo::convert_proxy(&mihomo_node(bad)).is_err());
 }

@@ -410,7 +410,7 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
     if let Some(transport) = options.remove("transport") {
         convert_transport(object(transport, "transport")?, &mut out, tls_enabled)?;
     }
-    if let Some(multiplex) = options.remove("multiplex") {
+    if let Some(multiplex) = options.remove("multiplex").filter(|value| !value.is_null()) {
         convert_multiplex(object(multiplex, "multiplex")?, &mut out)?;
     }
     if let Some(tfo) = options.remove("tcp_fast_open") {
@@ -442,21 +442,24 @@ fn convert_multiplex(multiplex: Map<String, Value>, out: &mut Map<String, Value>
             ("padding", "padding"),
         ],
     );
-    if let Some(brutal) = multiplex.remove("brutal") {
+    if let Some(brutal) = multiplex.remove("brutal").filter(|value| !value.is_null()) {
         let mut brutal: Map<String, Value> = object(brutal, "multiplex.brutal")?
             .into_iter()
             .map(|(key, value)| (key.to_ascii_lowercase(), value))
             .collect();
-        let mut opts = Map::new();
-        copy(&mut brutal, &mut opts, &[("enabled", "enabled")]);
-        for (source, target) in [("up_mbps", "up"), ("down_mbps", "down")] {
-            if let Some(value) = brutal.remove(source) {
-                let mbps = value.as_u64().ok_or_else(|| format!("brutal.{source} 必须是整数"))?;
-                opts.insert(target.into(), json!(format!("{mbps} Mbps")));
+        // A switched-off Brutal block is the same as none.
+        if brutal.get("enabled") == Some(&json!(true)) {
+            let mut opts = Map::new();
+            copy(&mut brutal, &mut opts, &[("enabled", "enabled")]);
+            for (source, target) in [("up_mbps", "up"), ("down_mbps", "down")] {
+                if let Some(value) = brutal.remove(source) {
+                    let mbps = value.as_u64().ok_or_else(|| format!("brutal.{source} 必须是整数"))?;
+                    opts.insert(target.into(), json!(format!("{mbps} Mbps")));
+                }
             }
+            no_extra(&brutal)?;
+            smux.insert("brutal-opts".into(), Value::Object(opts));
         }
-        no_extra(&brutal)?;
-        smux.insert("brutal-opts".into(), Value::Object(opts));
     }
     no_extra(&multiplex)?;
     out.insert("smux".into(), Value::Object(smux));

@@ -471,5 +471,24 @@ fn clash_smux_and_tfo_become_multiplex() {
     assert_eq!(nodes[0].1["multiplex"], json!({"enabled":true, "protocol":"h2mux", "max_connections":1,
         "min_streams":4, "padding":true, "brutal":{"enabled":true, "up_mbps":50, "down_mbps":1000}}));
     assert!(nodes[1].1.get("multiplex").is_none());
-    assert!(from_clash_yaml("- {name: g, type: vless, server: v, port: 1, uuid: u, smux: {enabled: true, brutal-opts: {enabled: true, up: 1 Gbps, down: 10}}}").is_err());
+}
+
+#[test]
+fn clash_smux_rates_units_and_protocols_follow_mihomo() {
+    let rate = |up: &str| {
+        from_clash_yaml(&format!(
+            "- {{name: r, type: vless, server: v, port: 1, uuid: u, smux: {{enabled: true, brutal-opts: {{enabled: true, up: \"{up}\", down: 10}}}}}}"
+        ))
+        .map(|nodes| nodes[0].1["multiplex"]["brutal"]["up_mbps"].clone())
+    };
+    assert_eq!(rate("1 Gbps").unwrap(), 1000);
+    assert_eq!(rate("125 MBps").unwrap(), 1000);
+    assert_eq!(rate("50Mbps").unwrap(), 50);
+    assert!(rate("50 mbps").is_err());
+    assert!(rate("100 Kbps").is_err());
+    assert!(from_clash_yaml("- {name: s, type: socks5, server: v, port: 1, smux: {enabled: true}}").is_err());
+    assert!(from_clash_yaml("- {name: o, type: vless, server: v, port: 1, uuid: u, smux: {enabled: true, only-tcp: true}}").is_err());
+    assert!(from_clash_yaml("- {name: o, type: vless, server: v, port: 1, uuid: u, smux: {enabled: true, only_tcp: true}}").is_err());
+    let any = from_clash_yaml("- {name: a, type: anytls, server: v, port: 1, password: p, tfo: true}").unwrap();
+    assert!(any[0].1.get("tcp_fast_open").is_none());
 }
