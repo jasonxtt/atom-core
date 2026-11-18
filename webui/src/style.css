@@ -144,6 +144,9 @@ th.sortable:hover{color:var(--text)}
 .modal h3{margin:0;font-size:16px;font-weight:500}
 .modal .ft{display:flex;justify-content:flex-end;gap:8px}
 .err{background:var(--bad-soft);color:var(--bad);border-radius:12px;padding:8px 12px;font-size:13px}
+.warnbox{background:var(--warn-soft);color:var(--warn);border-radius:12px;padding:8px 12px;font-size:13px}
+.item{display:flex;align-items:center;gap:10px;background:var(--fill);border-radius:12px;padding:8px 12px;flex-wrap:wrap}
+.item .nm{flex:1;min-width:160px;overflow-wrap:anywhere}
 .note{background:var(--fill);border-radius:12px;padding:8px 12px;font-size:12.5px;color:var(--muted)}
 pre.json{white-space:pre-wrap;margin:0;background:var(--fill);border-radius:12px;padding:10px 12px;font-family:var(--mono);font-size:12px;max-height:50vh;overflow:auto}
 @media (max-width:1050px){.split4{grid-template-columns:minmax(0,2fr) minmax(0,1fr)}.mgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}

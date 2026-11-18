@@ -1,6 +1,6 @@
 import { reactive } from 'vue'
 import { ApiError, call, client, describe } from '../api/client'
-import { FINAL, final, groups, isGroup, loadRuntime, recordDelay } from './proxy'
+import { FINAL, final, groups, isGroup, loadPool, loadRuntime, poolNodes, recordDelay } from './proxy'
 import { toast } from './toast'
 
 /** Tests running now, by key (a node ID, `g:<group>`, `m:<member>`). */
@@ -19,6 +19,21 @@ export async function testNode(id: string, key = id) {
     toast('bad', describe(error), 5000)
   } finally {
     delete testing[key]
+  }
+}
+
+/** Tests one subscription node (mihomo's provider health check). */
+export async function testPoolNode(id: string) {
+  testing[id] = true
+  try {
+    const answer = await call(client.POST('/providers/nodes/delay', { body: { id } }))
+    const node = poolNodes.value.find((item) => item.id === id)
+    if (node) Object.assign(node, { delay: answer.delay ?? null, alive: answer.delay != null })
+  } catch (error) {
+    toast('bad', describe(error), 5000)
+  } finally {
+    delete testing[id]
+    await loadPool()
   }
 }
 

@@ -41,3 +41,5 @@ export const backendName = computed(() => status.value?.backend ?? 'sing-box')
 
 /** The kernel's version number (Clash API answers `sing-box 1.14.4-atom`, `Mihomo Meta v1.19`). */
 export const backendVersion = computed(() => status.value?.singbox.version?.replace(/^(sing-box|mihomo(\s+meta)?)\s+/i, '') ?? '')
+
+export const isMihomo = computed(() => status.value?.backend === 'mihomo')

@@ -5,6 +5,8 @@ import { backendName, backendVersion, refreshStatus, status } from '../composabl
 import { toast } from '../composables/toast'
 import { ago, triggers } from '../format'
 import SettingsTabs from '../components/SettingsTabs.vue'
+import SwitchBackendModal from '../components/SwitchBackendModal.vue'
+import { loadProxy } from '../composables/proxy'
 
 const settings = ref<Schemas['Settings'] | null>(null)
 const form = reactive({ fakeip_range: '', resolver: '', mixed_port: '' })
@@ -67,6 +69,20 @@ async function save() {
   }
 }
 
+const switching = ref<'sing-box' | 'mihomo' | null>(null)
+async function switched() {
+  switching.value = null
+  // the settings are read again (the kernel changed); unsaved edits of the form stay
+  const old = settings.value
+  const draft = { ...form }
+  await Promise.all([load(), loadProxy().catch(() => {}), refreshStatus().catch(() => {})])
+  if (old) {
+    if (draft.fakeip_range !== old.fakeip_range) form.fakeip_range = draft.fakeip_range
+    if (draft.resolver !== old.resolver) form.resolver = draft.resolver
+    if (draft.mixed_port !== String(old.mixed_port)) form.mixed_port = draft.mixed_port
+  }
+}
+
 const applying = ref(false)
 async function reapply() {
   applying.value = true
@@ -89,7 +105,7 @@ async function reapply() {
       <h2>代理内核</h2>
       <span class="sp"></span>
       <div class="seg" role="group" aria-label="切换代理内核">
-        <button v-for="name in ['sing-box', 'mihomo']" :key="name" type="button" :class="{ on: backendName === name }" :disabled="backendName !== name">{{ name }}</button>
+        <button v-for="name in ['sing-box', 'mihomo']" :key="name" type="button" :class="{ on: backendName === name }" :aria-pressed="backendName === name" @click="backendName !== name && (switching = name as 'sing-box' | 'mihomo')">{{ name }}</button>
       </div>
     </div>
     <div class="grid g3" style="gap: 10px">
@@ -153,4 +169,5 @@ async function reapply() {
       <button v-if="!settings" class="btn" type="button" @click="load">重试</button>
     </div>
   </form>
+  <SwitchBackendModal v-if="switching" :target="switching" @close="switching = null" @done="switched" />
 </template>

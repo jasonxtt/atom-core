@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { call, client } from '../api/client'
-import { testGroup, testNode, testing } from '../composables/delay'
-import { currentOf, delayOf, FINAL, isGroup, leafOf, loadProxy, loadRuntime, nameOf, nodes, reportFailure, version, type GroupView } from '../composables/proxy'
+import { testGroup, testNode, testPoolNode, testing } from '../composables/delay'
+import { currentOf, delayOf, groupTypeLabels, FINAL, isGroup, isPoolNode, leafOf, loadProxy, loadRuntime, nameOf, nodes, reportFailure, version, type GroupView } from '../composables/proxy'
 import { latency, latencyText, rate } from '../format'
 
 const props = defineProps<{ view: GroupView; open?: boolean; editing?: boolean; traffic?: number }>()
@@ -10,7 +10,13 @@ const emit = defineEmits<{ toggle: []; edit: []; remove: [] }>()
 
 const current = computed(() => currentOf(props.view.id))
 const tag = computed(() => (props.view.id === FINAL ? '兜底' : props.view.builtin ? '默认' : ''))
-const typeLabel = computed(() => (props.view.type === 'selector' ? '手动' : '自动测速'))
+const typeLabel = computed(() => groupTypeLabels[props.view.type])
+const isEmpty = computed(() => (props.view.group ? props.view.group.empty : !props.view.members.length))
+const sources = computed(() => {
+  const group = props.view.group
+  if (!group) return ''
+  return group.all_providers ? '全部订阅' : (group.providers ?? []).map(nameOf).join('、')
+})
 
 function lat(id: string | undefined) {
   const test = delayOf(id)
@@ -39,7 +45,9 @@ async function select(member: string) {
 /** A node's tag tests that node; a group's tag tests the node it uses now. */
 function testMember(member: string) {
   const leaf = leafOf(member)
-  if (leaf) void testNode(leaf, leaf === member ? leaf : `m:${member}`)
+  if (!leaf) return
+  if (isPoolNode(leaf)) void testPoolNode(leaf)
+  else void testNode(leaf, leaf === member ? leaf : `m:${member}`)
 }
 const memberTesting = (member: string) => testing[isGroup(member) ? `m:${member}` : member]
 </script>
@@ -83,9 +91,10 @@ const memberTesting = (member: string) => testing[isGroup(member) ? `m:${member}
       <span class="sp"></span>
       <span v-if="traffic !== undefined" class="tnum" style="font-size: 12px">{{ rate(traffic) }}</span>
     </div>
+    <div v-if="sources" class="hint" style="padding: 0 4px">订阅：{{ sources }}</div>
     <div v-if="!open || editing" class="dots" @click="!editing && emit('toggle')">
       <span v-for="member in view.members" :key="member" class="sq" :class="[lat(member).kind, { cur: member === current }]" :title="nameOf(member)"></span>
-      <span v-if="!view.members.length" class="hint" style="color: var(--bad)">空组</span>
+      <span v-if="isEmpty" class="hint" style="color: var(--bad)">空组</span>
     </div>
     <div v-else class="mtiles">
       <div v-for="member in view.members" :key="member" class="mtile" :class="{ cur: member === current, static: view.type !== 'selector' }">
@@ -101,7 +110,7 @@ const memberTesting = (member: string) => testing[isGroup(member) ? `m:${member}
           @click="testMember(member)"
         >{{ memberTesting(member) ? '…' : lat(member).kind === 'idle' ? '测速' : lat(member).text }}</button>
       </div>
-      <span v-if="!view.members.length" class="hint" style="color: var(--bad)">空组</span>
+      <span v-if="isEmpty" class="hint" style="color: var(--bad)">空组</span>
     </div>
   </div>
 </template>

@@ -4,6 +4,17 @@ import { toast } from './toast'
 
 export type Node = Schemas['Node']
 export type Group = Schemas['Group']
+export type Provider = Schemas['ProxyProvider']
+/** One node of a subscription (`GET providers/nodes`; its ID is `p-xxxxxxxx/name`). */
+export interface PoolNode {
+  id: string
+  name: string
+  type?: string | null
+  alive?: boolean | null
+  delay?: number | null
+  provider_id: string
+  provider_name: string
+}
 type Runtime = { groups: Record<string, { now: string }>; nodes: Record<string, { delay: number | null; time: string | null }> }
 
 /** A group card: a node group, or Final shown as one (`final`). */
@@ -14,6 +25,13 @@ export interface GroupView {
   members: string[]
   builtin: boolean
   group?: Group
+}
+
+export const groupTypeLabels: Record<Group['type'], string> = {
+  selector: '手动',
+  urltest: '自动测速',
+  fallback: '故障转移',
+  'load-balance': '负载均衡'
 }
 
 export const FINAL = 'final'
@@ -51,6 +69,39 @@ export async function loadProxy() {
     }
   }
   throw new Error('节点和节点组正在被修改，读取失败，请稍后重试')
+}
+
+/** The saved subscriptions, when each was last updated (null: unknown) and the nodes they hold (mihomo only). */
+export const providers = ref<Provider[]>([])
+export const providerUpdated = ref<Record<string, string | null>>({})
+export const poolNodes = ref<PoolNode[]>([])
+
+/** `GET providers/nodes`; empty under sing-box. */
+export async function loadPool() {
+  try {
+    const answer = await call(client.GET('/providers/nodes'))
+    poolNodes.value = (answer.nodes ?? []) as PoolNode[]
+  } catch {
+    // a failed read keeps the nodes shown (it says nothing about them)
+  }
+}
+
+/** The subscriptions, their nodes and the time of their last update. */
+export async function loadProviders() {
+  const answer = await call(client.GET('/providers'))
+  providers.value = answer.providers ?? []
+  await loadPool()
+  const times: Record<string, string | null> = {}
+  await Promise.all(
+    providers.value.map(async (provider) => {
+      try {
+        times[provider.id] = (await call(client.GET('/providers/{id}/nodes', { params: { path: { id: provider.id } } }))).updated_at ?? null
+      } catch {
+        times[provider.id] = null
+      }
+    })
+  )
+  providerUpdated.value = times
 }
 
 // Failed tests by node (when): sing-box drops a node's history when a test fails, so a failure
@@ -119,11 +170,16 @@ const names = computed(() => {
     ['block', '拒绝']
   ])
   for (const node of nodes.value) map.set(node.id, node.name)
+  for (const node of poolNodes.value) map.set(node.id, node.name)
+  for (const provider of providers.value) map.set(provider.id, provider.name)
   for (const group of groups.value) map.set(group.id, group.name)
   return map
 })
 
-export const nameOf = (id: string | undefined) => (id ? (names.value.get(id) ?? id) : '—')
+/** A subscription node's ID without the subscription prefix, for a node the pool does not list (any more). */
+const unprefixed = (id: string) => id.replace(/^p-[0-9a-f]{8}\//, '')
+export const nameOf = (id: string | undefined) => (id ? (names.value.get(id) ?? unprefixed(id)) : '—')
+export const isPoolNode = (id: string) => /^p-[0-9a-f]{8}\//.test(id)
 export const isGroup = (id: string) => id === FINAL || id.startsWith('g-')
 
 /** The member a group uses now (sing-box's view, else its saved choice, else the first). */
@@ -148,6 +204,10 @@ export function leafOf(id: string | undefined): string | undefined {
 
 export function delayOf(id: string | undefined) {
   const leaf = leafOf(id)
+  if (leaf && isPoolNode(leaf)) {
+    const node = poolNodes.value.find((item) => item.id === leaf)
+    return node ? { delay: node.delay ?? null, time: node.alive === false ? '1970-01-01T00:00:00Z' : null } : undefined
+  }
   return leaf ? runtime.value?.nodes[leaf] : undefined
 }
 

@@ -3,9 +3,18 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import draggable from 'vuedraggable'
 import { ApiError, call, client, describe } from '../api/client'
-import { FINAL, FINAL_NAME, groups, isGroup, loadProxy, membersOf, nameOf, nodes, final, version } from '../composables/proxy'
-import { refreshStatus } from '../composables/status'
+import { FINAL, FINAL_NAME, groups, groupTypeLabels, isGroup, isPoolNode, loadProviders, loadProxy, membersOf, nameOf, nodes, final, poolNodes, providers, version, type Group } from '../composables/proxy'
+import { isMihomo, refreshStatus } from '../composables/status'
 import { toast } from '../composables/toast'
+
+// sing-box has no fallback or load-balance groups.
+const kinds = computed<Group['type'][]>(() => (isMihomo.value || form.type === 'fallback' || form.type === 'load-balance' ? ['selector', 'urltest', 'fallback', 'load-balance'] : ['selector', 'urltest']))
+const strategies: [string, string][] = [
+  ['consistent-hashing', '一致性哈希'],
+  ['round-robin', '轮询'],
+  ['sticky-sessions', '粘性会话']
+]
+const strategyLabel = (value: string) => strategies.find((item) => item[0] === value)?.[1] ?? value
 
 const route = useRoute()
 const router = useRouter()
@@ -15,8 +24,11 @@ const isFinal = computed(() => id.value === FINAL)
 
 const form = reactive({
   name: '',
-  type: 'selector' as 'selector' | 'urltest',
+  type: 'selector' as Group['type'],
+  strategy: 'consistent-hashing' as NonNullable<Group['strategy']>,
   members: [] as string[],
+  providers: [] as string[],
+  all_providers: false,
   filter: '',
   order: [] as string[],
   selected: '',
@@ -33,14 +45,14 @@ const saving = ref(false)
 const formVersion = ref(0)
 // After a 409: what is saved now, for the user to compare with the form.
 // Every field a save replaces is shown.
-type Saved = { name: string; type: string; members: string[]; filter?: string; selected?: string; url?: string; interval?: string; tolerance?: number }
+type Saved = { name: string; type: Group['type']; members: string[]; providers?: string[]; all_providers?: boolean; strategy?: string; filter?: string; selected?: string; url?: string; interval?: string; tolerance?: number }
 const conflict = ref<Saved | null>(null)
 
 function latest(): Saved | null {
   if (isFinal.value) return final.value ? { name: FINAL_NAME, type: 'selector', members: final.value.members, selected: final.value.selected } : null
   const group = groups.value.find((item) => item.id === id.value)
   return group
-    ? { name: group.name, type: group.type, members: group.members, filter: group.filter, selected: group.selected, url: group.url, interval: group.interval, tolerance: group.tolerance }
+    ? { name: group.name, type: group.type, members: group.members, providers: group.providers, all_providers: group.all_providers, strategy: group.strategy, filter: group.filter, selected: group.selected, url: group.url, interval: group.interval, tolerance: group.tolerance }
     : null
 }
 
@@ -56,7 +68,10 @@ function fill() {
   Object.assign(form, {
     name: group.name,
     type: group.type,
+    strategy: group.strategy ?? 'consistent-hashing',
     members: [...group.members],
+    providers: [...(group.providers ?? [])],
+    all_providers: !!group.all_providers,
     filter: group.filter ?? '',
     order: [...(group.order ?? [])],
     selected: group.selected ?? '',
@@ -82,13 +97,14 @@ async function load() {
     error.value = '节点组不存在'
     return
   }
+  await loadProviders().catch(() => {})
   fill()
   loaded.value = true
 }
 onMounted(load)
 
 // Candidates: nodes and the other groups (Final is never a member; Final itself takes groups).
-const filter = ref<'all' | 'node' | 'group'>('all')
+const filter = ref<'all' | 'node' | 'group' | 'provider'>('all')
 // The name filter (a regular expression, case-insensitive; a plain keyword is one): the nodes
 // it matches are members that cannot be unticked one by one. The server decides at save time
 // (Rust's regex); this is the preview.
@@ -98,12 +114,16 @@ const filterRegex = computed(() => {
   try {
     return new RegExp(filterText.value, 'i')
   } catch {
-    return false as const
+    // mihomo reads more syntax than the browser does (the server checks it)
+    return isMihomo.value ? null : (false as const)
   }
 })
 const locked = computed(() => {
   const regex = filterRegex.value
-  return new Set(regex ? nodes.value.filter((node) => regex.test(node.name)).map((node) => node.id) : [])
+  if (regex) return new Set(nodes.value.filter((node) => regex.test(node.name)).map((node) => node.id))
+  // a filter the browser cannot read (mihomo's syntax): the nodes the server matched when the group was read stand
+  const saved = groups.value.find((item) => item.id === id.value)
+  return new Set(filterText.value && saved?.filter === filterText.value ? (saved.matched ?? []) : [])
 })
 // Everything the group will hold: the ticked members, then the filtered nodes not among them.
 // The selected members as the right list shows them, in the order the group will have: the
@@ -119,35 +139,84 @@ const shown = computed({
     form.members = list.filter((member) => form.members.includes(member))
   }
 })
-const memberCount = computed(() => shown.value.length)
+// Subscription nodes the group takes: of every subscription, or of the ticked ones, narrowed by the name filter.
+const sourceProviders = computed(() => (form.all_providers ? providers.value.map((item) => item.id) : form.providers))
+const matchedOf = (provider: string) => {
+  const regex = filterRegex.value
+  return poolNodes.value.filter((node) => node.provider_id === provider && (!regex || regex.test(node.name)))
+}
+const takenFrom = (provider: string) => matchedOf(provider).length
+const providerNodeCount = computed(() => sourceProviders.value.reduce((sum, id) => sum + takenFrom(id), 0))
+const memberCount = computed(() => shown.value.length + providerNodeCount.value)
+const providerSample = computed(() =>
+  sourceProviders.value
+    .flatMap((id) => matchedOf(id))
+    .slice(0, 3)
+    .map((node) => node.name)
+    .join('、')
+)
 
 const candidates = computed(() => {
+  const providerItems =
+    isMihomo.value && (filter.value === 'all' || filter.value === 'provider')
+      ? [
+          {
+            id: ALL_PROVIDERS,
+            name: '全部订阅',
+            group: false,
+            provider: true,
+            sub: `${providers.value.length} 个订阅 · 以后新增的也包含`
+          },
+          ...providers.value.map((provider) => ({
+            id: provider.id,
+            name: provider.name,
+            group: false,
+            provider: true,
+            sub: `${poolNodes.value.filter((node) => node.provider_id === provider.id).length} 个节点${filterText.value && filterRegex.value ? ` · 筛选后 ${takenFrom(provider.id)} 个` : ''}`
+          }))
+        ]
+      : []
   const groupItems =
-    filter.value === 'node'
+    filter.value === 'node' || filter.value === 'provider'
       ? []
       : groups.value
           .filter((group) => group.id !== id.value)
-          .map((group) => ({ id: group.id, name: group.name, group: true, sub: `${group.type === 'selector' ? '手动' : '自动测速'} · ${membersOf(group).length} 个成员` }))
+          .map((group) => ({ id: group.id, name: group.name, group: true, provider: false, sub: `${groupTypeLabels[group.type]} · ${membersOf(group).length} 个成员` }))
   const nodeItems =
-    filter.value === 'group'
+    filter.value === 'group' || filter.value === 'provider'
       ? []
-      : nodes.value.map((node) => ({ id: node.id, name: node.name, group: false, sub: `${node.type ?? ''} · ${node.server ?? ''}:${node.server_port ?? ''}` }))
-  return [...groupItems, ...nodeItems]
+      : nodes.value.map((node) => ({ id: node.id, name: node.name, group: false, provider: false, sub: node.active === false ? (node.inactive_reason ?? '不生效') : `${node.type ?? ''} · ${node.server ?? ''}:${node.server_port ?? ''}`, inactive: node.active === false }))
+  return [...providerItems, ...groupItems, ...nodeItems]
 })
 
-const isPicked = (member: string) => form.members.includes(member) || locked.value.has(member)
-const pickedCount = computed(() => candidates.value.filter((item) => isPicked(item.id)).length)
-const allPicked = computed(() => candidates.value.length > 0 && pickedCount.value === candidates.value.length)
+const ALL_PROVIDERS = 'all-providers'
+const isPicked = (member: string) =>
+  member === ALL_PROVIDERS
+    ? form.all_providers
+    : form.members.includes(member) || locked.value.has(member) || form.providers.includes(member) || (form.all_providers && providers.value.some((item) => item.id === member))
+const plain = computed(() => candidates.value.filter((item) => !item.provider))
+const pickedCount = computed(() => plain.value.filter((item) => isPicked(item.id)).length)
+const allPicked = computed(() => plain.value.length > 0 && pickedCount.value === plain.value.length)
 
 /** Ticks every candidate in the current list (the filter tabs apply); ticking again clears them. */
 function toggleAll() {
-  const ids = candidates.value.map((item) => item.id).filter((member) => !locked.value.has(member))
+  const ids = candidates.value.filter((item) => !item.provider).map((item) => item.id).filter((member) => !locked.value.has(member))
   if (allPicked.value) form.members = form.members.filter((member) => !ids.includes(member))
   else form.members.push(...ids.filter((member) => !form.members.includes(member)))
 }
 
 function toggle(member: string) {
   if (locked.value.has(member)) return
+  if (member === ALL_PROVIDERS) {
+    form.all_providers = !form.all_providers
+    if (form.all_providers) form.providers = []
+    return
+  }
+  if (providers.value.some((item) => item.id === member)) {
+    if (form.all_providers) return
+    form.providers = form.providers.includes(member) ? form.providers.filter((item) => item !== member) : [...form.providers, member]
+    return
+  }
   const index = form.members.indexOf(member)
   if (index < 0) form.members.push(member)
   else form.members.splice(index, 1)
@@ -176,7 +245,8 @@ async function save(overwrite = false) {
     return
   }
   // A selector keeps its choice while it is still a member ("" is the first member).
-  const selected = isPicked(form.selected) ? form.selected : ''
+  // (a subscription node stays chosen while its subscription is a source)
+  const selected = isPicked(form.selected) || (isPoolNode(form.selected) && sourceProviders.value.some((id) => form.selected.startsWith(`${id}/`))) ? form.selected : ''
   if (!isFinal.value && filterRegex.value === false) {
     error.value = '筛选正则无效'
     return
@@ -190,6 +260,8 @@ async function save(overwrite = false) {
         name,
         type: form.type,
         members: form.members,
+        ...(form.all_providers ? { all_providers: true } : form.providers.length ? { providers: form.providers } : {}),
+        ...(form.type === 'load-balance' ? { strategy: form.strategy } : {}),
         filter: filterText.value,
         order: filterText.value ? shown.value : [],
         version: formVersion.value,
@@ -198,7 +270,7 @@ async function save(overwrite = false) {
           : {
               ...(form.url.trim() ? { url: form.url.trim() } : {}),
               ...(form.interval.trim() ? { interval: form.interval.trim() } : {}),
-              ...(tolerance ? { tolerance: Number(tolerance) } : {})
+              ...(form.type === 'urltest' && tolerance ? { tolerance: Number(tolerance) } : {})
             })
       }
       if (id.value) await call(client.PUT('/groups/{id}', { params: { path: { id: id.value } }, body }))
@@ -239,11 +311,25 @@ async function save(overwrite = false) {
         <div class="field">
           <span class="label">组模式</span>
           <div class="seg" style="align-self: flex-start">
-            <button type="button" :class="{ on: form.type === 'selector' }" @click="form.type = 'selector'">手动</button>
-            <button type="button" :class="{ on: form.type === 'urltest' }" :disabled="form.builtin" @click="form.type = 'urltest'">自动测速</button>
+            <button
+              v-for="kind in kinds"
+              :key="kind"
+              type="button"
+              :class="{ on: form.type === kind }"
+              :disabled="form.builtin && kind !== 'selector'"
+              @click="form.type = kind"
+            >
+              {{ groupTypeLabels[kind] }}
+            </button>
           </div>
         </div>
-        <div v-if="form.type === 'urltest'" class="grid g3" style="gap: 10px">
+        <div v-if="form.type === 'load-balance'" class="field">
+          <label for="gstrategy">策略</label>
+          <select id="gstrategy" v-model="form.strategy" class="inp" style="width: auto">
+            <option v-for="item in strategies" :key="item[0]" :value="item[0]">{{ item[1] }}</option>
+          </select>
+        </div>
+        <div v-if="form.type !== 'selector'" class="grid g3" style="gap: 10px">
           <div class="field">
             <label for="gurl">测速 URL</label>
             <input id="gurl" v-model="form.url" class="inp mono" placeholder="https://www.gstatic.com/generate_204" autocomplete="off" />
@@ -252,7 +338,7 @@ async function save(overwrite = false) {
             <label for="gint">间隔</label>
             <input id="gint" v-model="form.interval" class="inp mono" placeholder="3m" autocomplete="off" />
           </div>
-          <div class="field">
+          <div v-if="form.type === 'urltest'" class="field">
             <label for="gtol">容差（ms）</label>
             <input id="gtol" v-model="form.tolerance" class="inp mono" placeholder="50" inputmode="numeric" autocomplete="off" />
           </div>
@@ -263,21 +349,21 @@ async function save(overwrite = false) {
           <h2>成员</h2>
           <span class="sp"></span>
           <div class="seg sm">
-            <button v-for="item in [['all', '全部'], ['node', '节点'], ['group', '节点组']] as const" :key="item[0]" type="button" :class="{ on: filter === item[0] }" @click="filter = item[0]">
+            <button v-for="item in (isMihomo ? [['all', '全部'], ['node', '节点'], ['group', '节点组'], ['provider', '订阅']] : [['all', '全部'], ['node', '节点'], ['group', '节点组']]) as readonly (readonly [typeof filter, string])[]" :key="item[0]" type="button" :class="{ on: filter === item[0] }" @click="filter = item[0]">
               {{ item[1] }}
             </button>
           </div>
           <div class="seg sm">
-            <button type="button" :class="{ on: allPicked }" :disabled="!candidates.length" :title="`${pickedCount} / ${candidates.length}`" @click="toggleAll">全选</button>
+            <button type="button" :class="{ on: allPicked }" :disabled="!plain.length || filter === 'provider'" :title="`${pickedCount} / ${candidates.length}`" @click="toggleAll">全选</button>
           </div>
           <input v-if="!isFinal" v-model="form.filter" class="inp sm mono" style="width: 180px; font-size: 12.5px" placeholder="关键字筛选节点" aria-label="关键字筛选节点" autocomplete="off" spellcheck="false" />
           <span v-if="filterRegex === false" class="err">正则无效</span>
         </div>
         <div class="mgrid">
           <label v-for="item in candidates" :key="item.id" class="check" :class="{ on: isPicked(item.id) }">
-            <input type="checkbox" :aria-label="item.name" :checked="isPicked(item.id)" :disabled="locked.has(item.id)" @change="toggle(item.id)" />
+            <input type="checkbox" :aria-label="item.name" :checked="isPicked(item.id)" :disabled="locked.has(item.id) || (form.all_providers && item.provider && item.id !== 'all-providers')" @change="toggle(item.id)" />
             <div>
-              <div class="t1">{{ item.name }} <span v-if="item.group" class="tag">组</span> <span v-if="locked.has(item.id)" class="tag">筛选</span></div>
+              <div class="t1">{{ item.name }} <span v-if="item.group" class="tag">组</span> <span v-if="item.provider && item.id !== 'all-providers'" class="tag">订阅</span> <span v-if="locked.has(item.id)" class="tag">筛选</span> <span v-if="'inactive' in item && item.inactive" class="tag">不生效</span></div>
               <div class="t2 t1">{{ item.sub }}</div>
             </div>
           </label>
@@ -316,12 +402,21 @@ async function save(overwrite = false) {
           </div>
         </template>
       </draggable>
+      <div v-if="form.all_providers" class="item" style="background: var(--accent-soft)">
+        <span class="nm">全部订阅</span><span class="tag">订阅 · {{ providerNodeCount }} 个</span>
+      </div>
+      <div v-for="id in form.all_providers ? [] : form.providers" :key="id" class="item" style="background: var(--accent-soft)">
+        <span class="nm">{{ nameOf(id) }}</span><span class="tag">订阅 · {{ takenFrom(id) }} 个</span>
+      </div>
+      <div v-if="providerSample" class="t2" style="padding-left: 4px">{{ providerSample }} …</div>
       <div v-if="!memberCount" class="err">空组</div>
       <div v-if="conflict" class="grid" style="gap: 8px">
         <div class="err">已在别处修改（409）。现在保存的是：</div>
         <div class="tile" style="font-size: 12.5px">
-          <div>{{ conflict.name }} · {{ conflict.type === 'selector' ? '手动' : '自动测速' }}</div>
+          <div>{{ conflict.name }} · {{ groupTypeLabels[conflict.type] }}</div>
           <div class="t2">成员：{{ conflict.members.map(nameOf).join('、') || '空组' }}</div>
+          <div v-if="conflict.all_providers || conflict.providers?.length" class="t2">订阅：{{ conflict.all_providers ? '全部订阅' : conflict.providers?.map(nameOf).join('、') }}</div>
+          <div v-if="conflict.strategy" class="t2">策略：{{ strategyLabel(conflict.strategy) }}</div>
           <div v-if="conflict.filter" class="t2 mono">名称筛选：{{ conflict.filter }}</div>
           <div v-if="conflict.type === 'selector'" class="t2">选中：{{ conflict.selected ? nameOf(conflict.selected) : '第一个成员' }}</div>
           <template v-else>

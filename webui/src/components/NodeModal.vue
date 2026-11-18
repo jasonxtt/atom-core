@@ -72,11 +72,15 @@ async function join(ids: string[]) {
   }
   const group = groups.value.find((item) => item.id === form.joinGroup)
   if (!group) throw new Error('这个节点组已不存在')
-  const { name, type, selected, url, interval, tolerance } = group
+  const { name, type, selected, url, interval, tolerance, strategy, filter, order } = group
   await call(
     client.PUT('/groups/{id}', {
       params: { path: { id: group.id } },
-      body: { name, type, selected, url, interval, tolerance, members: [...group.members, ...ids], version: at }
+      body: {
+        name, type, selected, url, interval, tolerance, strategy, filter, order,
+        ...(group.all_providers ? { all_providers: true } : group.providers?.length ? { providers: group.providers } : {}),
+        members: [...group.members, ...ids], version: at
+      }
     })
   )
 }
