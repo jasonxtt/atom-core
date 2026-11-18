@@ -460,3 +460,16 @@ fn clash_hysteria_bare_speed_numbers_become_mbps() {
     assert_eq!(nodes[0].1["up"], "50 Mbps");
     assert_eq!(nodes[0].1["down"], "100 Mbps");
 }
+
+#[test]
+fn clash_smux_and_tfo_become_multiplex() {
+    let nodes = from_clash_yaml(
+        "- name: b\n  type: vless\n  server: v.example\n  port: 8443\n  uuid: u\n  tfo: true\n  smux:\n    enabled: true\n    protocol: h2mux\n    max-connections: 1\n    min-streams: 4\n    padding: true\n    brutal-opts:\n      enabled: true\n      up: 50\n      down: 1000 Mbps\n- {name: off, type: vless, server: v.example, port: 1, uuid: u, smux: {enabled: false, protocol: smux}}",
+    )
+    .unwrap();
+    assert_eq!(nodes[0].1["tcp_fast_open"], true);
+    assert_eq!(nodes[0].1["multiplex"], json!({"enabled":true, "protocol":"h2mux", "max_connections":1,
+        "min_streams":4, "padding":true, "brutal":{"enabled":true, "up_mbps":50, "down_mbps":1000}}));
+    assert!(nodes[1].1.get("multiplex").is_none());
+    assert!(from_clash_yaml("- {name: g, type: vless, server: v, port: 1, uuid: u, smux: {enabled: true, brutal-opts: {enabled: true, up: 1 Gbps, down: 10}}}").is_err());
+}

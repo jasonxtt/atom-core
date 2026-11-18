@@ -668,6 +668,53 @@ fn section(proxy: &Map<String, Value>, key: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// mihomo `smux` (and `brutal-opts`) to sing-box `multiplex`; both are
+/// sing-mux. A switched-off block is dropped.
+fn clash_smux(proxy: &Map<String, Value>) -> Result<Option<Value>, String> {
+    let smux = section(proxy, "smux");
+    if !truthy(&smux, "enabled") {
+        return Ok(None);
+    }
+    let mut multiplex = Map::from_iter([("enabled".to_owned(), json!(true))]);
+    let protocol = text(&smux, "protocol");
+    if !protocol.is_empty() {
+        multiplex.insert("protocol".into(), json!(protocol));
+    }
+    for (source, target) in [
+        ("max-connections", "max_connections"),
+        ("min-streams", "min_streams"),
+        ("max-streams", "max_streams"),
+    ] {
+        let value = text(&smux, source);
+        if !value.is_empty() {
+            let number: u64 = value.parse().map_err(|_| format!("smux 的 {source} 必须是整数"))?;
+            multiplex.insert(target.into(), json!(number));
+        }
+    }
+    if truthy(&smux, "padding") {
+        multiplex.insert("padding".into(), json!(true));
+    }
+    let brutal = section(&smux, "brutal-opts");
+    if truthy(&brutal, "enabled") {
+        let mut out = Map::from_iter([("enabled".to_owned(), json!(true))]);
+        for (source, target) in [("up", "up_mbps"), ("down", "down_mbps")] {
+            let value = text(&brutal, source);
+            // A bare number is Mbps in mihomo; other units are not converted.
+            let digits = value
+                .strip_suffix("Mbps")
+                .or_else(|| value.strip_suffix("mbps"))
+                .unwrap_or(&value)
+                .trim();
+            let mbps: u64 = digits
+                .parse()
+                .map_err(|_| format!("brutal-opts 的 {source} 只支持以 Mbps 为单位的整数"))?;
+            out.insert(target.into(), json!(mbps));
+        }
+        multiplex.insert("brutal".into(), Value::Object(out));
+    }
+    Ok(Some(Value::Object(multiplex)))
+}
+
 fn clash_tls(proxy: &Map<String, Value>, enabled: bool) -> Tls {
     let reality = section(proxy, "reality-opts");
     let mut server_name = text(proxy, "servername");
@@ -811,7 +858,7 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         .parse()
         .map_err(|_| "端口无效".to_owned())?;
     let server = text(proxy, "server");
-    let outbound = match kind.as_str() {
+    let mut outbound = match kind.as_str() {
         "ss" => {
             if text(proxy, "cipher").is_empty() {
                 return Err("缺少 cipher".into());
@@ -1048,6 +1095,10 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
         "" => return Err("缺少 type".into()),
         other => return Err(format!("不支持的 Clash 节点类型 `{other}`")),
     };
+    put(&mut outbound, "multiplex", clash_smux(proxy)?);
+    if truthy(proxy, "tfo") {
+        outbound.insert("tcp_fast_open".into(), json!(true));
+    }
     for key in ["uuid", "password", "method"] {
         if outbound.get(key).and_then(Value::as_str) == Some("") {
             return Err(format!("缺少 {key}"));

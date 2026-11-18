@@ -410,15 +410,57 @@ pub(crate) fn convert_proxy(node: &Node) -> Result<Value, String> {
     if let Some(transport) = options.remove("transport") {
         convert_transport(object(transport, "transport")?, &mut out, tls_enabled)?;
     }
-    // A stored multiplex block that is switched off is the same as none.
-    let multiplex_off = options.get("multiplex").and_then(Value::as_object).is_some_and(|m| {
-        m.iter().find(|(key, _)| key.eq_ignore_ascii_case("enabled")).is_none_or(|(_, value)| *value == false)
-    });
-    if multiplex_off {
-        options.remove("multiplex");
+    if let Some(multiplex) = options.remove("multiplex") {
+        convert_multiplex(object(multiplex, "multiplex")?, &mut out)?;
+    }
+    if let Some(tfo) = options.remove("tcp_fast_open") {
+        out.insert("tfo".into(), tfo);
     }
     no_extra(&options)?;
     Ok(Value::Object(out))
+}
+
+/// sing-box `multiplex` (and its `brutal`) to mihomo `smux`; both are
+/// sing-mux. sing-box reads keys case-insensitively, so they are lowered first.
+/// A block that is switched off is the same as none.
+fn convert_multiplex(multiplex: Map<String, Value>, out: &mut Map<String, Value>) -> Result<(), String> {
+    let mut multiplex: Map<String, Value> =
+        multiplex.into_iter().map(|(key, value)| (key.to_ascii_lowercase(), value)).collect();
+    if multiplex.get("enabled") != Some(&json!(true)) {
+        return Ok(());
+    }
+    let mut smux = Map::new();
+    copy(
+        &mut multiplex,
+        &mut smux,
+        &[
+            ("enabled", "enabled"),
+            ("protocol", "protocol"),
+            ("max_connections", "max-connections"),
+            ("min_streams", "min-streams"),
+            ("max_streams", "max-streams"),
+            ("padding", "padding"),
+        ],
+    );
+    if let Some(brutal) = multiplex.remove("brutal") {
+        let mut brutal: Map<String, Value> = object(brutal, "multiplex.brutal")?
+            .into_iter()
+            .map(|(key, value)| (key.to_ascii_lowercase(), value))
+            .collect();
+        let mut opts = Map::new();
+        copy(&mut brutal, &mut opts, &[("enabled", "enabled")]);
+        for (source, target) in [("up_mbps", "up"), ("down_mbps", "down")] {
+            if let Some(value) = brutal.remove(source) {
+                let mbps = value.as_u64().ok_or_else(|| format!("brutal.{source} 必须是整数"))?;
+                opts.insert(target.into(), json!(format!("{mbps} Mbps")));
+            }
+        }
+        no_extra(&brutal)?;
+        smux.insert("brutal-opts".into(), Value::Object(opts));
+    }
+    no_extra(&multiplex)?;
+    out.insert("smux".into(), Value::Object(smux));
+    Ok(())
 }
 
 fn convert_obfs(obfs: Value, out: &mut Map<String, Value>) -> Result<(), String> {

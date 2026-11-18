@@ -911,10 +911,10 @@ fn mihomo_explains_the_nodes_it_cannot_run() {
     assert_eq!(convert(json!({"type":"naive", "server":"n", "server_port":443})).unwrap_err(), "mihomo 没有 naive 协议");
     assert!(convert(json!({"type":"shadowtls", "server":"n", "server_port":443})).unwrap_err().contains("插件"));
     let multiplex = convert(json!({
-        "type":"vmess", "server":"v", "server_port":443, "uuid":"u", "multiplex":{"enabled":true}
+        "type":"vmess", "server":"v", "server_port":443, "uuid":"u", "multiplex":{"enabled":true, "unknown":1}
     }))
     .unwrap_err();
-    assert!(multiplex.contains("multiplex"), "{multiplex}");
+    assert!(multiplex.contains("unknown"), "{multiplex}");
 }
 
 #[test]
@@ -1084,7 +1084,20 @@ fn mihomo_conversion_keeps_the_singbox_meaning_of_defaults_and_conflicts() {
 fn mihomo_ignores_a_disabled_multiplex_block() {
     let off = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u",
         "multiplex":{"enabled":false, "protocol":"h2mux", "max_connections":1, "brutal":{"enabled":false}}});
-    assert!(crate::atom_mihomo::convert_proxy(&mihomo_node(off)).is_ok());
-    let on = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u", "multiplex":{"enabled":true}});
-    assert!(crate::atom_mihomo::convert_proxy(&mihomo_node(on)).is_err());
+    let out = crate::atom_mihomo::convert_proxy(&mihomo_node(off)).unwrap();
+    assert!(out.get("smux").is_none());
+    let bad = json!({"type":"vless", "server":"v", "server_port":443, "uuid":"u", "multiplex":"on"});
+    assert!(crate::atom_mihomo::convert_proxy(&mihomo_node(bad)).is_err());
+}
+
+#[test]
+fn mihomo_turns_multiplex_and_brutal_into_smux() {
+    let node = json!({"type":"vless", "server":"v", "server_port":8443, "uuid":"u", "packet_encoding":"xudp",
+        "tcp_fast_open":true,
+        "multiplex":{"Enabled":true, "protocol":"h2mux", "max_connections":1, "min_streams":4, "padding":true,
+            "brutal":{"enabled":true, "up_mbps":50, "down_mbps":1000}}});
+    let out = crate::atom_mihomo::convert_proxy(&mihomo_node(node)).unwrap();
+    assert_eq!(out["tfo"], true);
+    assert_eq!(out["smux"], json!({"enabled":true, "protocol":"h2mux", "max-connections":1, "min-streams":4,
+        "padding":true, "brutal-opts":{"enabled":true, "up":"50 Mbps", "down":"1000 Mbps"}}));
 }
