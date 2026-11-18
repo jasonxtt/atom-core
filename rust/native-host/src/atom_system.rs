@@ -58,6 +58,13 @@ fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
 #[cfg(target_os = "linux")]
 fn find_process(binary: &Path) -> Option<u32> {
     let wanted = std::fs::canonicalize(binary).ok();
+    // Without a match on the file, the one process named like the binary
+    // (sing-box or mihomo).
+    let name = binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("sing-box")
+        .to_owned();
     let (mut by_exe, mut by_name) = (Vec::new(), Vec::new());
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
@@ -70,7 +77,7 @@ fn find_process(binary: &Path) -> Option<u32> {
                 continue;
             }
         }
-        if std::fs::read_to_string(dir.join("comm")).is_ok_and(|comm| comm.trim() == "sing-box") {
+        if std::fs::read_to_string(dir.join("comm")).is_ok_and(|comm| comm.trim() == name) {
             by_name.push(pid);
         }
     }
