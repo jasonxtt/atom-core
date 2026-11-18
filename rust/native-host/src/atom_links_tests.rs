@@ -443,3 +443,13 @@ fn clash_hysteria_keeps_the_credential_mihomo_uses() {
     assert_eq!(nodes[0].1["auth"], "ZG9uZQ==");
     assert!(nodes[0].1.get("auth_str").is_none());
 }
+
+#[test]
+fn a_singbox_config_with_only_endpoints_imports() {
+    let nodes = from_singbox_json(json!({
+        "endpoints": [{"type": "wireguard", "tag": "wg", "address": ["10.0.0.2/32"], "private_key": "K"}],
+        "route": {"final": "wg"}
+    }))
+    .unwrap();
+    assert_eq!(nodes[0].0, "wg");
+}

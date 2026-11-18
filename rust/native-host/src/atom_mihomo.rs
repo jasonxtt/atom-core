@@ -473,7 +473,7 @@ fn convert_hysteria(
         }
     }
     // sing-box takes `auth_str` over `auth`; mihomo the other way round.
-    if out.contains_key("auth-str") {
+    if out.get("auth-str").and_then(Value::as_str).is_some_and(|text| !text.is_empty()) {
         options.remove("auth");
     } else {
         copy(options, out, &[("auth", "auth")]);

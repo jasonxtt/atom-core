@@ -585,3 +585,14 @@ fn loading_turns_leftover_mihomo_groups_into_urltest_under_singbox() {
     assert_eq!(loaded.group(&failover.id).unwrap().kind, GroupKind::Urltest);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn the_x_flag_is_not_a_group_filter() {
+    let mut state = ProxyState::default();
+    let mut input = group("g", GroupKind::Selector, &[]);
+    input.filter = "(?ix)HK # Hong Kong".to_owned();
+    state.add_group(input);
+    assert!(message(state.validate(&[])).contains("x 标志"));
+    state.groups.last_mut().unwrap().filter = "(?i)HK".to_owned();
+    state.validate(&[]).unwrap();
+}

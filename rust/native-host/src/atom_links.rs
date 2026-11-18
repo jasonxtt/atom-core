@@ -1208,9 +1208,13 @@ fn strip_comments_and_trailing_commas(text: &str) -> String {
 /// `outbounds` (only its proxy outbounds).
 pub(crate) fn from_singbox_json(value: Value) -> Result<Vec<Imported>, String> {
     let (items, whole) = match value {
-        Value::Object(mut map) if map.contains_key("outbounds") && !map.contains_key("type") => {
+        Value::Object(mut map)
+            if (map.contains_key("outbounds") || map.contains_key("endpoints"))
+                && !map.contains_key("type") =>
+        {
             let mut items = match map.remove("outbounds") {
                 Some(Value::Array(items)) => items,
+                None => Vec::new(),
                 _ => return Err("outbounds 必须是数组".into()),
             };
             // WireGuard is an endpoint since sing-box 1.13; the other

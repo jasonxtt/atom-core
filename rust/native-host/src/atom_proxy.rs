@@ -603,6 +603,16 @@ fn compile_filter(filter: &str) -> Result<Option<regex::Regex>, String> {
     if filter.len() > MAX_FILTER_LEN {
         return Err(format!("筛选正则最长 {MAX_FILTER_LEN} 字节"));
     }
+    // The `x` flag makes `#` start a comment, which would swallow what
+    // mihomo's generated filter appends.
+    let mut rest = filter;
+    while let Some(at) = rest.find("(?") {
+        rest = &rest[at + 2..];
+        let flags: String = rest.chars().take_while(|c| c.is_ascii_alphabetic() || *c == '-').collect();
+        if flags.contains('x') && rest[flags.len()..].starts_with([')', ':']) {
+            return Err("筛选正则不支持 x 标志".to_owned());
+        }
+    }
     regex::RegexBuilder::new(filter)
         .case_insensitive(true)
         .size_limit(1 << 20)
