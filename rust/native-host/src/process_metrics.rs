@@ -40,7 +40,7 @@ pub(crate) fn parse_stat(text: &str) -> Option<(u64, u64, u64, u64, u64)> {
 
 /// `btime` (seconds since the epoch at boot) from `/proc/stat`.
 #[cfg(any(target_os = "linux", test))]
-fn parse_boot_time(text: &str) -> Option<u64> {
+pub(crate) fn parse_boot_time(text: &str) -> Option<u64> {
     text.lines()
         .find_map(|line| line.strip_prefix("btime "))?
         .trim()

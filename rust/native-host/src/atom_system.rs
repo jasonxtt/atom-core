@@ -92,6 +92,23 @@ fn process(pid: u32) -> Option<(f64, u64)> {
     ))
 }
 
+/// When the proxy kernel process running `binary` started (seconds since the
+/// epoch): the boot time plus its start time from `/proc/<pid>/stat`, which
+/// works under systemd and OpenRC alike. `None` when it cannot be told.
+#[cfg(target_os = "linux")]
+pub(crate) fn started_at(binary: &Path) -> Option<u64> {
+    let pid = find_process(binary)?;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, _, start_ticks, _, _) = crate::process_metrics::parse_stat(&stat)?;
+    let boot = crate::process_metrics::parse_boot_time(&std::fs::read_to_string("/proc/stat").ok()?)?;
+    Some(boot + start_ticks / rustix::param::clock_ticks_per_second().max(1))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn started_at(_binary: &Path) -> Option<u64> {
+    None
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn snapshot(singbox_binary: Option<&Path>) -> Value {
     let per_second = rustix::param::clock_ticks_per_second().max(1) as f64;
@@ -168,5 +185,17 @@ mod tests {
         let text = "MemTotal:        2000 kB\nMemFree:          100 kB\nMemAvailable:     1500 kB\n";
         assert_eq!(parse_meminfo(text), Some((2000 * 1024, 1500 * 1024)));
         assert_eq!(parse_meminfo("MemTotal: 1 kB\n"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_start_time_comes_from_proc() {
+        let exe = std::env::current_exe().unwrap();
+        let started = started_at(&exe).expect("this test process");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(started <= now && now - started < 3600, "{started} vs {now}");
     }
 }

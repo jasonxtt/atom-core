@@ -596,3 +596,35 @@ fn the_x_flag_is_not_a_group_filter() {
     state.groups.last_mut().unwrap().filter = "(?i)HK".to_owned();
     state.validate(&[]).unwrap();
 }
+
+#[test]
+fn subscriptions_behind_inactive_nodes_download_directly() {
+    let mut state = ProxyState::default();
+    let node = naive_node();
+    let kept = ("n-0000000a".to_owned(), "trojan".to_owned());
+    state.nodes.push(node.clone());
+    state.nodes.push(Node {
+        id: kept.0.clone(),
+        name: kept.1,
+        outbound: json!({"type":"trojan","server":"t","server_port":1,"password":"p","tls":{"enabled":true}})
+            .as_object().unwrap().clone(),
+    });
+    for (id, via) in [("p-00000001", &node.id), ("p-00000002", &kept.0)] {
+        state.providers.push(ProxyProvider {
+            id: id.to_owned(),
+            settings: ProviderInput {
+                name: id.to_owned(),
+                url: "https://example.test/s".to_owned(),
+                interval: 3600,
+                filter: String::new(),
+                download_via: Some(via.clone()),
+            },
+        });
+    }
+    state.settings.backend = Backend::Mihomo;
+    let inactive = state.inactive_nodes();
+    state.clear_inactive_downloads(&inactive);
+    assert_eq!(state.providers[0].settings.download_via, None);
+    assert_eq!(state.providers[1].settings.download_via.as_deref(), Some("n-0000000a"));
+    state.validate(&[]).unwrap();
+}

@@ -1439,8 +1439,16 @@ paths:
                         reason: {type: string}
                   blocked_providers:
                     type: array
-                    description: Subscriptions downloaded through an inactive node; the switch to mihomo fails until that changes.
-                    items: {type: object}
+                    description: |
+                      Subscriptions downloaded through an inactive node; the switch to mihomo changes
+                      them to a direct download (`download_via` cleared) in the same transaction, no extra confirmation.
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+                        download_via: {type: string, nullable: true}
+                        download_via_name: {type: string, nullable: true}
                   groups_to_handle:
                     type: array
                     description: Fallback and load-balance groups (to sing-box); each needs a `group_actions` entry.
@@ -4218,6 +4226,13 @@ components:
               type: string
               nullable: true
               description: The active proxy backend and its version are reported; version is null when it does not answer.
+            started_at:
+              type: integer
+              nullable: true
+              description: |
+                When the running proxy kernel process started (unix seconds; boot time plus the
+                process start time from /proc, so it works under systemd and OpenRC). Null when
+                the kernel does not answer or the time cannot be told.
             in_sync:
               type: boolean
               description: The running file is the one the current state generates.

@@ -1005,6 +1005,20 @@ impl ProxyState {
         self.inactive_nodes_for(self.settings.backend)
     }
 
+    /// Subscriptions downloaded through a node in `inactive` download directly.
+    pub(crate) fn clear_inactive_downloads(&mut self, inactive: &BTreeMap<String, String>) {
+        for provider in &mut self.providers {
+            if provider
+                .settings
+                .download_via
+                .as_deref()
+                .is_some_and(|via| inactive.contains_key(via))
+            {
+                provider.settings.download_via = None;
+            }
+        }
+    }
+
     /// What the active kernel really runs: the state without the nodes it
     /// cannot run (they stay in the saved state, and come back when the
     /// other kernel is selected). Groups and Final lose them as members.

@@ -191,7 +191,13 @@ fn backend_check(rules: &AtomRules, query: Option<&str>) -> Answer {
                 .as_deref()
                 .is_some_and(|via| inactive.contains_key(via))
         })
-        .map(|provider| json!({"id":provider.id, "name":provider.settings.name, "download_via":provider.settings.download_via}))
+        .map(|provider| {
+            let via = provider.settings.download_via.as_deref();
+            json!({
+                "id":provider.id, "name":provider.settings.name, "download_via":via,
+                "download_via_name":via.and_then(|id| state.node(id)).map(|node| &node.name),
+            })
+        })
         .collect();
     let brief = |group: &crate::atom_proxy::Group| json!({"id":group.id, "name":group.name, "type":group.kind.name()});
     let (to_handle, provider_only): (Vec<Value>, Vec<Value>) = if target == Backend::SingBox {
@@ -863,6 +869,9 @@ async fn put_settings(
                         }),
                     );
                 }
+                // A subscription downloaded through a node mihomo cannot run
+                // downloads directly from now on (the same transaction).
+                next.clear_inactive_downloads(&inactive);
             }
         }
     }
@@ -1142,14 +1151,19 @@ async fn status(rules: &AtomRules) -> Reply {
     let current = state(rules);
     let host = rules.proxy_host().cloned();
     let secret = rules.live_secret();
-    let singbox_version = match (host.clone(), secret) {
-        (Some(host), Some(secret)) => {
-            tokio::task::spawn_blocking(move || crate::atom_singbox::version(&host, &secret))
-                .await
-                .ok()
-                .flatten()
-        }
-        _ => None,
+    // The version doubles as "it answers"; the start time is read from /proc
+    // only for a kernel that does.
+    let (singbox_version, started_at) = match (host.clone(), secret) {
+        (Some(host), Some(secret)) => tokio::task::spawn_blocking(move || {
+            let version = crate::atom_singbox::version(&host, &secret);
+            let started = version
+                .as_ref()
+                .and_then(|_| crate::atom_system::started_at(&host.binary));
+            (version, started)
+        })
+        .await
+        .unwrap_or((None, None)),
+        _ => (None, None),
     };
     let host_view = host.as_ref().map(|host| {
         json!({
@@ -1168,6 +1182,7 @@ async fn status(rules: &AtomRules) -> Reply {
             "singbox": {
                 "running": singbox_version.is_some(),
                 "version": singbox_version,
+                "started_at": started_at,
                 "in_sync": rules.in_sync(),
                 "host": host_view,
             },
