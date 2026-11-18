@@ -10,9 +10,9 @@ import { toast } from '../composables/toast'
 // sing-box has no fallback or load-balance groups.
 const kinds = computed<Group['type'][]>(() => (isMihomo.value || form.type === 'fallback' || form.type === 'load-balance' ? ['selector', 'urltest', 'fallback', 'load-balance'] : ['selector', 'urltest']))
 const strategies: [string, string][] = [
-  ['consistent-hashing', '一致性哈希'],
-  ['round-robin', '轮询'],
-  ['sticky-sessions', '粘性会话']
+  ['consistent-hashing', '按目标固定节点'],
+  ['round-robin', '轮流分配'],
+  ['sticky-sessions', '按来源和目标固定节点']
 ]
 const strategyLabel = (value: string) => strategies.find((item) => item[0] === value)?.[1] ?? value
 
@@ -323,13 +323,13 @@ async function save(overwrite = false) {
             </button>
           </div>
         </div>
-        <div v-if="form.type === 'load-balance'" class="field">
-          <label for="gstrategy">策略</label>
-          <select id="gstrategy" v-model="form.strategy" class="inp" style="width: auto">
-            <option v-for="item in strategies" :key="item[0]" :value="item[0]">{{ item[1] }}</option>
-          </select>
-        </div>
         <div v-if="form.type !== 'selector'" class="grid g3" style="gap: 10px">
+          <div v-if="form.type === 'load-balance'" class="field">
+            <label for="gstrategy">策略</label>
+            <select id="gstrategy" v-model="form.strategy" class="inp">
+              <option v-for="item in strategies" :key="item[0]" :value="item[0]">{{ item[1] }}</option>
+            </select>
+          </div>
           <div class="field">
             <label for="gurl">测速 URL</label>
             <input id="gurl" v-model="form.url" class="inp mono" placeholder="https://www.gstatic.com/generate_204" autocomplete="off" />
