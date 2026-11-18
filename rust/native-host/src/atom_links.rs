@@ -1006,10 +1006,16 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                 }
                 outbound.insert(key.into(), json!(value));
             }
-            for (source, target) in [("auth", "auth"), ("auth-str", "auth_str"), ("obfs", "obfs")] {
+            // mihomo takes `auth` over `auth-str`, sing-box the other way round.
+            let sources: &[(&str, &str)] = if raw(proxy, "auth").is_empty() {
+                &[("auth-str", "auth_str"), ("obfs", "obfs")]
+            } else {
+                &[("auth", "auth"), ("obfs", "obfs")]
+            };
+            for (source, target) in sources {
                 let value = raw(proxy, source);
                 if !value.is_empty() {
-                    outbound.insert(target.into(), json!(value));
+                    outbound.insert((*target).into(), json!(value));
                 }
             }
             let ports = text(proxy, "ports");
@@ -1203,10 +1209,20 @@ fn strip_comments_and_trailing_commas(text: &str) -> String {
 pub(crate) fn from_singbox_json(value: Value) -> Result<Vec<Imported>, String> {
     let (items, whole) = match value {
         Value::Object(mut map) if map.contains_key("outbounds") && !map.contains_key("type") => {
-            match map.remove("outbounds") {
-                Some(Value::Array(items)) => (items, true),
+            let mut items = match map.remove("outbounds") {
+                Some(Value::Array(items)) => items,
                 _ => return Err("outbounds 必须是数组".into()),
+            };
+            // WireGuard is an endpoint since sing-box 1.13; the other
+            // endpoint types are not nodes.
+            if let Some(Value::Array(endpoints)) = map.remove("endpoints") {
+                items.extend(
+                    endpoints
+                        .into_iter()
+                        .filter(|item| item.get("type").and_then(Value::as_str) == Some("wireguard")),
+                );
             }
+            (items, true)
         }
         Value::Object(map) => (vec![Value::Object(map)], false),
         Value::Array(items) => (items, false),

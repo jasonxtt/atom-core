@@ -419,3 +419,27 @@ proxies:
     assert!(from_clash_yaml("- {name: s, type: snell, server: s, port: 1, psk: k, version: 3}").is_err());
     assert!(from_clash_yaml("- {name: s, type: ssh, server: s, port: 22, username: r, private-key: /root/key}").is_err());
 }
+
+#[test]
+fn a_whole_singbox_config_brings_its_wireguard_endpoints() {
+    let nodes = from_singbox_json(json!({
+        "outbounds": [{"type": "direct", "tag": "d"}, {"type": "socks", "tag": "s", "server": "s.example", "server_port": 1080}],
+        "endpoints": [
+            {"type": "wireguard", "tag": "wg", "address": ["10.0.0.2/32"], "private_key": "K", "peers": []},
+            {"type": "tailscale", "tag": "ts"}
+        ]
+    }))
+    .unwrap();
+    let names: Vec<&str> = nodes.iter().map(|node| node.0.as_str()).collect();
+    assert_eq!(names, ["s", "wg"]);
+}
+
+#[test]
+fn clash_hysteria_keeps_the_credential_mihomo_uses() {
+    let nodes = from_clash_yaml(
+        "- {name: hy, type: hysteria, server: y.example, port: 443, up: 1 Mbps, down: 1 Mbps, auth: ZG9uZQ==, auth-str: stale}",
+    )
+    .unwrap();
+    assert_eq!(nodes[0].1["auth"], "ZG9uZQ==");
+    assert!(nodes[0].1.get("auth_str").is_none());
+}
