@@ -453,3 +453,10 @@ fn a_singbox_config_with_only_endpoints_imports() {
     .unwrap();
     assert_eq!(nodes[0].0, "wg");
 }
+
+#[test]
+fn clash_hysteria_bare_speed_numbers_become_mbps() {
+    let nodes = from_clash_yaml("- {name: hy, type: hysteria, server: y.example, port: 443, up: 50, down: 100, auth-str: s}").unwrap();
+    assert_eq!(nodes[0].1["up"], "50 Mbps");
+    assert_eq!(nodes[0].1["down"], "100 Mbps");
+}

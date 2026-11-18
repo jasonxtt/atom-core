@@ -1004,6 +1004,8 @@ fn clash_proxy(proxy: &Map<String, Value>) -> Result<Imported, String> {
                 if value.is_empty() {
                     return Err(format!("缺少 {key}"));
                 }
+                // A bare number in Clash is Mbps; sing-box wants a unit.
+                let value = if value.bytes().all(|b| b.is_ascii_digit()) { format!("{value} Mbps") } else { value };
                 outbound.insert(key.into(), json!(value));
             }
             // mihomo takes `auth` over `auth-str`, sing-box the other way round.
