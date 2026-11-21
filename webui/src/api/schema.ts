@@ -1028,12 +1028,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * CPU and memory of the machine, atomdns and sing-box
-         * @description Counters, not rates: take two samples and divide the differences.
-         *     The machine's CPU use is Δ`busy_seconds` / Δ`total_seconds`; a
-         *     program's share of the machine is its Δ`cpu_seconds` / Δ`total_seconds`.
-         *     Read from `/proc`; a figure that cannot be read is null (all of them
-         *     off Linux, `singbox` when its process is not found).
+         * CPU, memory, and buffered overview telemetry
+         * @description Machine and process counters (`cpu`, `memory`, `load`, `uptime_seconds`,
+         *     `atomdns`, `singbox`), plus precomputed CPU rates (`rates`), latest
+         *     proxy throughput (`traffic`), and optional in-memory ring-buffer history
+         *     (`history=1`, with `window=3m|15m|1h`). Read from `/proc` and the local
+         *     Clash API `/traffic` stream; unreadable figures are null.
          */
         get: operations["getSystem"];
         put?: never;
@@ -1667,6 +1667,44 @@ export interface components {
             uptime_seconds: number | null;
             atomdns: components["schemas"]["ProcessFigures"];
             singbox: components["schemas"]["ProcessFigures"];
+            /** @description Latest server-computed CPU usage shares (0..100). */
+            rates?: {
+                cpu_percent: number;
+                atomdns_percent: number | null;
+                singbox_percent: number | null;
+            } | null;
+            /** @description Latest 1-second proxy throughput sample from the Clash API `/traffic` stream. */
+            traffic?: {
+                ts: number;
+                down_bps: number;
+                up_bps: number;
+            } | null;
+            /** @description Present when `history=1` is requested. */
+            history?: {
+                system: components["schemas"]["SystemHistoryPoint"][];
+                traffic: {
+                    /** @enum {string} */
+                    window: "3m" | "15m" | "1h";
+                    step_seconds: number;
+                    points: components["schemas"]["TrafficPoint"][];
+                };
+            };
+        };
+        SystemHistoryPoint: {
+            /** @description Unix timestamp in seconds. */
+            ts: number;
+            cpu_percent: number;
+            atomdns_percent: number | null;
+            singbox_percent: number | null;
+            memory_used_bytes: number;
+        };
+        TrafficPoint: {
+            /** @description Unix timestamp in seconds. */
+            ts: number;
+            /** @description Download throughput in bytes per second. */
+            down_bps: number;
+            /** @description Upload throughput in bytes per second. */
+            up_bps: number;
         };
         AuditRankItem: {
             key: string;
@@ -4627,14 +4665,19 @@ export interface operations {
     };
     getSystem: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Include buffered system and traffic history series. */
+                history?: "1" | "true";
+                /** @description Traffic history time window when `history` is set (default `3m`). */
+                window?: "3m" | "15m" | "1h";
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description One sample. */
+            /** @description Latest sample and optional buffered history. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4643,6 +4686,7 @@ export interface operations {
                     "application/json": components["schemas"]["System"];
                 };
             };
+            400: components["responses"]["Error"];
             404: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };

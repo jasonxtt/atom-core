@@ -345,3 +345,54 @@ tr.off td{opacity:.5}
 .dry-detail{min-width:0;overflow-wrap:break-word;color:var(--muted)}
 .dry-rules ul{list-style:none;margin:4px 0 0;padding:0}
 .dry-rules summary{cursor:pointer}
+
+/* Overview page: traffic-first hero, live breakdown, and balanced 3-pillar row */
+.ov-alert{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--bad-soft);color:var(--bad);border-radius:16px;padding:10px 16px;font-size:13px}
+.ov-alert .sp{flex:1}
+.ov-alert .btn{border-color:currentColor;background:transparent;color:inherit}
+.ov-hero{display:grid;gap:16px;grid-template-columns:minmax(0,2fr) minmax(0,1fr);align-items:stretch}
+.ov-hero-card,.ov-side-card,.ov-pillar{display:flex;flex-direction:column;gap:14px}
+.ov-pillar{gap:12px}
+.ov-kpi{display:grid;gap:10px;grid-template-columns:repeat(4,minmax(0,1fr))}
+.ov-kpi .tile .k{display:flex;align-items:center;gap:6px}
+.ov-big{font-size:22px;line-height:1.25;margin-top:4px;letter-spacing:-.01em}
+.ov-mid{font-size:19px;line-height:1.25}
+.ov-chart-wrap{position:relative;user-select:none;margin-top:2px;cursor:crosshair}
+.ov-chart-svg{width:100%;height:184px;display:block;overflow:visible}
+.ov-tooltip{position:absolute;top:8px;pointer-events:none;z-index:10;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:9px 12px;box-shadow:0 10px 28px #0000001f;font-size:12px;min-width:152px}
+.ov-tt-row{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:4px}
+.ov-tt-lbl{display:flex;align-items:center;gap:6px;color:var(--muted)}
+.ov-bars{display:flex;flex-direction:column;gap:12px;flex:1;justify-content:space-between}
+.ov-bar-item{display:flex;flex-direction:column;gap:5px}
+.ov-bar-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:13px}
+.ov-bar-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-bar-val{flex:none;text-align:right;white-space:nowrap}
+.ov-bar-tr{height:6px;background:var(--fill);border-radius:999px;overflow:hidden}
+.ov-bar-tr i{display:block;height:100%;border-radius:999px;transition:width .35s ease}
+.ov-empty{flex:1;display:grid;place-items:center;min-height:96px;text-align:center}
+.ov-card-foot{margin-top:auto;padding-top:10px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.ov-pillars{display:grid;gap:16px;grid-template-columns:repeat(3,minmax(0,1fr));align-items:stretch}
+.ov-node-summary{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;background:var(--fill);border-radius:14px;padding:9px 12px}
+.ov-group-list{display:flex;flex-direction:column;flex:1;justify-content:center}
+.ov-group-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--line);font-size:13px}
+.ov-group-row:first-child{border-top:0}
+.ov-group-name{flex:none}
+.ov-group-now{color:var(--muted);font-size:12.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-group-row .sp{flex:1}
+.ov-dns-grid{display:grid;gap:10px;grid-template-columns:repeat(2,minmax(0,1fr));flex:1}
+.ov-dns-tile{display:flex;flex-direction:column;justify-content:space-between}
+.ov-sys-box{background:var(--fill);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;flex:1;justify-content:space-between}
+.ov-sys-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.ov-mini-spark{width:100%;height:38px;display:block}
+.ov-sys-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted)}
+.ov-hero a.btn.ghost,.ov-pillars a.btn.ghost{text-decoration:none;color:var(--muted)}
+.ov-hero a.btn.ghost:hover,.ov-pillars a.btn.ghost:hover{background:var(--fill2);color:var(--text)}
+@media (max-width:1080px){
+  .ov-hero{grid-template-columns:minmax(0,1fr)}
+  .ov-pillars{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:760px){
+  .ov-top-meta{display:none}
+  .ov-kpi{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ov-pillars{grid-template-columns:minmax(0,1fr)}
+}

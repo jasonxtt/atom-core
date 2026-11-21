@@ -342,6 +342,71 @@ impl ApiServer {
         let mut accept_error = None;
         let mut accepted = 0_usize;
 
+        let has_atom_rules = self.control.as_ref().map_or_else(
+            || {
+                self.fixed
+                    .as_ref()
+                    .is_some_and(|(cfg, _)| cfg.local.atom_rules.is_some())
+            },
+            |control| control.view().config.local.atom_rules.is_some(),
+        );
+        if has_atom_rules {
+            let sys_control = self.control.clone();
+            let sys_fixed = self.fixed.clone();
+            let sys_shutdown = shutdown.child_token();
+            tasks.spawn_local(async move {
+                crate::atom_system::run_system_collector(
+                    move || {
+                        let config = sys_control
+                            .as_ref()
+                            .map(|control| Rc::clone(&control.view().config))
+                            .or_else(|| sys_fixed.as_ref().map(|(cfg, _)| Rc::clone(cfg)))?;
+                        config
+                            .local
+                            .atom_rules
+                            .as_deref()
+                            .and_then(|rules| rules.proxy_host().map(|host| host.binary.clone()))
+                    },
+                    sys_shutdown,
+                )
+                .await;
+            });
+
+            let net_control = self.control.clone();
+            let net_fixed = self.fixed.clone();
+            let secret_control = self.control.clone();
+            let secret_fixed = self.fixed.clone();
+            let net_shutdown = shutdown.child_token();
+            tasks.spawn_local(async move {
+                crate::atom_system::run_traffic_collector(
+                    move || {
+                        let config = net_control
+                            .as_ref()
+                            .map(|control| Rc::clone(&control.view().config))
+                            .or_else(|| net_fixed.as_ref().map(|(cfg, _)| Rc::clone(cfg)))?;
+                        config
+                            .local
+                            .atom_rules
+                            .as_deref()
+                            .and_then(|rules| rules.proxy_host().map(|host| host.clash_api))
+                    },
+                    move || {
+                        let config = secret_control
+                            .as_ref()
+                            .map(|control| Rc::clone(&control.view().config))
+                            .or_else(|| secret_fixed.as_ref().map(|(cfg, _)| Rc::clone(cfg)))?;
+                        config
+                            .local
+                            .atom_rules
+                            .as_deref()
+                            .and_then(crate::atom_rules::AtomRules::live_secret)
+                    },
+                    net_shutdown,
+                )
+                .await;
+            });
+        }
+
         loop {
             let has_tasks = !tasks.is_empty();
             tokio::select! {

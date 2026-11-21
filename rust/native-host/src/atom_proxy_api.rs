@@ -1417,15 +1417,18 @@ pub(crate) async fn handle(
         if method != "GET" {
             return error(405, "method not allowed");
         }
-        // /proc scans: off the runtime thread that serves DNS.
+        let include_history = query_flag(query, "history");
+        let window = match query_value(query, "window") {
+            Some(value) => match crate::atom_system::TrafficWindow::parse(value) {
+                Ok(window) => window,
+                Err(message) => return error(400, message),
+            },
+            None => crate::atom_system::TrafficWindow::Min3,
+        };
         let binary = rules.proxy_host().map(|host| host.binary.clone());
-        return match tokio::task::spawn_blocking(move || {
-            crate::atom_system::snapshot(binary.as_deref())
-        })
-        .await
-        {
+        return match crate::atom_system::view(binary, include_history, window).await {
             Ok(value) => reply_json(200, &value),
-            Err(e) => error(500, format!("任务异常结束: {e}")),
+            Err(message) => error(500, message),
         };
     }
     if rules.proxy_host().is_none() {

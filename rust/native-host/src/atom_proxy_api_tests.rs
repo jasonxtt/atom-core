@@ -1330,6 +1330,18 @@ fn system_reports_the_machine_and_both_programs() {
     }
     let (status, _) = api.call("POST", "/api/v1/atom/system", "");
     assert_eq!(status, 405);
+
+    let (status, with_history) = api.call("GET", "/api/v1/atom/system?history=1&window=15m", "");
+    assert_eq!(status, 200, "{with_history}");
+    assert!(with_history.get("rates").is_some(), "{with_history}");
+    assert!(with_history.get("traffic").is_some(), "{with_history}");
+    assert!(with_history["history"]["system"].is_array(), "{with_history}");
+    assert_eq!(with_history["history"]["traffic"]["window"], "15m");
+    assert_eq!(with_history["history"]["traffic"]["step_seconds"], 15);
+    assert!(with_history["history"]["traffic"]["points"].is_array());
+
+    let (status, bad_window) = api.call("GET", "/api/v1/atom/system?history=1&window=2h", "");
+    assert_eq!(status, 400, "{bad_window}");
 }
 
 #[test]

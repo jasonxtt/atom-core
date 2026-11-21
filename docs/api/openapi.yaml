@@ -2327,21 +2327,38 @@ paths:
   /system:
     get:
       tags: [runtime]
-      summary: CPU and memory of the machine, atomdns and sing-box
+      summary: CPU, memory, and buffered overview telemetry
       description: |
-        Counters, not rates: take two samples and divide the differences.
-        The machine's CPU use is Δ`busy_seconds` / Δ`total_seconds`; a
-        program's share of the machine is its Δ`cpu_seconds` / Δ`total_seconds`.
-        Read from `/proc`; a figure that cannot be read is null (all of them
-        off Linux, `singbox` when its process is not found).
+        Machine and process counters (`cpu`, `memory`, `load`, `uptime_seconds`,
+        `atomdns`, `singbox`), plus precomputed CPU rates (`rates`), latest
+        proxy throughput (`traffic`), and optional in-memory ring-buffer history
+        (`history=1`, with `window=3m|15m|1h`). Read from `/proc` and the local
+        Clash API `/traffic` stream; unreadable figures are null.
       operationId: getSystem
+      parameters:
+        - name: history
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["1", "true"]
+          description: Include buffered system and traffic history series.
+        - name: window
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["3m", "15m", "1h"]
+          description: Traffic history time window when `history` is set (default `3m`).
       responses:
         "200":
-          description: One sample.
+          description: Latest sample and optional buffered history.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/System"
+        "400":
+          $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
         default:
@@ -3458,6 +3475,84 @@ components:
           $ref: "#/components/schemas/ProcessFigures"
         singbox:
           $ref: "#/components/schemas/ProcessFigures"
+        rates:
+          type: object
+          nullable: true
+          description: Latest server-computed CPU usage shares (0..100).
+          required: [cpu_percent, atomdns_percent, singbox_percent]
+          properties:
+            cpu_percent:
+              type: number
+            atomdns_percent:
+              type: number
+              nullable: true
+            singbox_percent:
+              type: number
+              nullable: true
+        traffic:
+          type: object
+          nullable: true
+          description: Latest 1-second proxy throughput sample from the Clash API `/traffic` stream.
+          required: [ts, down_bps, up_bps]
+          properties:
+            ts:
+              type: integer
+            down_bps:
+              type: integer
+            up_bps:
+              type: integer
+        history:
+          type: object
+          description: Present when `history=1` is requested.
+          required: [system, traffic]
+          properties:
+            system:
+              type: array
+              items:
+                $ref: "#/components/schemas/SystemHistoryPoint"
+            traffic:
+              type: object
+              required: [window, step_seconds, points]
+              properties:
+                window:
+                  type: string
+                  enum: ["3m", "15m", "1h"]
+                step_seconds:
+                  type: integer
+                points:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/TrafficPoint"
+    SystemHistoryPoint:
+      type: object
+      required: [ts, cpu_percent, atomdns_percent, singbox_percent, memory_used_bytes]
+      properties:
+        ts:
+          type: integer
+          description: Unix timestamp in seconds.
+        cpu_percent:
+          type: number
+        atomdns_percent:
+          type: number
+          nullable: true
+        singbox_percent:
+          type: number
+          nullable: true
+        memory_used_bytes:
+          type: integer
+    TrafficPoint:
+      type: object
+      required: [ts, down_bps, up_bps]
+      properties:
+        ts:
+          type: integer
+          description: Unix timestamp in seconds.
+        down_bps:
+          type: integer
+          description: Download throughput in bytes per second.
+        up_bps:
+          type: integer
+          description: Upload throughput in bytes per second.
     AuditRankItem:
       type: object
       required: [key, count]
