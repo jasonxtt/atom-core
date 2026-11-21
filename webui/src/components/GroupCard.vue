@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { Pencil, Trash } from '@lucide/vue'
 import { call, client } from '../api/client'
 import { testGroup, testNode, testPoolNode, testing } from '../composables/delay'
 import { currentOf, delayOf, groupTypeLabels, FINAL, isGroup, isPoolNode, leafOf, loadProxy, loadRuntime, nameOf, nodes, poolNodes, runtime, reportFailure, version, type GroupView } from '../composables/proxy'
@@ -71,10 +72,10 @@ const memberTesting = (member: string) => testing[isGroup(member) ? `m:${member}
       <span class="sp"></span>
       <template v-if="editing">
         <button class="ico" type="button" aria-label="编辑" title="编辑" @click.stop="emit('edit')">
-          <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z" /></svg>
+          <Pencil :size="16" :stroke-width="1.8" />
         </button>
         <button v-if="!view.builtin" class="ico" type="button" aria-label="删除" title="删除" style="color: var(--bad)" @click.stop="emit('remove')">
-          <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13" /></svg>
+          <Trash :size="16" :stroke-width="1.8" />
         </button>
       </template>
       <template v-else>

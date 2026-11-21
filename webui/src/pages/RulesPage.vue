@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
+import { Pencil, Trash } from '@lucide/vue'
 import draggable from 'vuedraggable'
 import { ApiError, call, client, describe, type Schemas } from '../api/client'
 import AppModal from '../components/AppModal.vue'
@@ -300,10 +301,10 @@ async function remove() {
           </select>
           <div class="ops row" style="gap: 0">
             <button class="ico" type="button" aria-label="编辑" title="编辑" @click="router.push(`/rules/${rule.id}`)">
-              <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z" /></svg>
+              <Pencil :size="16" :stroke-width="1.8" />
             </button>
             <button class="ico" type="button" aria-label="删除" title="删除" style="color: var(--bad)" @click="removing = rule">
-              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13" /></svg>
+              <Trash :size="16" :stroke-width="1.8" />
             </button>
           </div>
         </div>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { Copy, Pencil, RefreshCw, Trash, Zap } from '@lucide/vue'
 import { ApiError, call, client, describe } from '../api/client'
 import AppModal from '../components/AppModal.vue'
 import NodeModal from '../components/NodeModal.vue'
@@ -294,13 +295,13 @@ function closeProvider() {
             </td>
             <td style="text-align: right">
               <button class="ico" type="button" aria-label="立即更新" title="立即更新" :disabled="refreshing[provider.id]" @click="refreshOne(provider)">
-                <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7" /></svg>
+                <RefreshCw :size="16" :stroke-width="1.8" />
               </button>
               <button class="ico" type="button" aria-label="编辑" title="编辑" @click="editingProvider = provider">
-                <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z" /></svg>
+                <Pencil :size="16" :stroke-width="1.8" />
               </button>
               <button class="ico" type="button" aria-label="删除" title="删除" style="color: var(--bad)" @click="((removingProvider = provider), (providerError = ''))">
-                <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13" /></svg>
+                <Trash :size="16" :stroke-width="1.8" />
               </button>
             </td>
           </tr>
@@ -359,16 +360,16 @@ function closeProvider() {
         <div v-if="item.node" class="hint">所在组：{{ item.groups.map(nameOf).join('、') || '无' }}</div>
         <div v-if="!selecting" class="acts">
           <button v-if="item.node" class="ico" type="button" aria-label="复制" title="复制" @click="copy(item.node)">
-            <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M4 16V4h12" /></svg>
+            <Copy :size="16" :stroke-width="1.8" />
           </button>
           <button v-if="!item.inactive" class="ico" type="button" aria-label="测速" title="测速" @click="test(item)">
-            <svg viewBox="0 0 24 24"><path d="M13 3L5 14h6l-1 7 8-11h-6z" /></svg>
+            <Zap :size="16" :stroke-width="1.8" />
           </button>
           <button v-if="item.node" class="ico" type="button" aria-label="编辑" title="编辑" @click="editing = item.node">
-            <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z" /></svg>
+            <Pencil :size="16" :stroke-width="1.8" />
           </button>
           <button v-if="item.node" class="ico" type="button" aria-label="删除" title="删除" style="color: var(--bad)" @click="removing = item.node">
-            <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13" /></svg>
+            <Trash :size="16" :stroke-width="1.8" />
           </button>
         </div>
       </div>

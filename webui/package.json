@@ -12,6 +12,7 @@
     "build:package": "node ../scripts/build-webui.mjs --package"
   },
   "dependencies": {
+    "@lucide/vue": "^1.77.0",
     "@tanstack/vue-table": "^8.21.3",
     "@tanstack/vue-virtual": "^3.13.52",
     "openapi-fetch": "^0.15.0",
